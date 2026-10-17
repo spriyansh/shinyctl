@@ -1,0 +1,16 @@
+# Run shinyctl from this directory. Relative paths resolve from where you
+# run it, not from this file's location.
+#
+#   cd examples/hello
+#   shinyctl apply -f shinyctl.yaml
+#
+# Then open http://127.0.0.1:8765
+
+app-group: examples
+app-name: hello
+entrypoint-file: ./app.R
+port: 8765
+app-state-file: ./state.json
+host: 127.0.0.1          # this machine only; 0.0.0.0 makes it reachable from the network
+env:
+  GREETING: Hello from shinyctl

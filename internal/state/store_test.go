@@ -1,0 +1,161 @@
+package state
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestSaveLoadRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	want := State{AppGroup: "g", Apps: []AppState{{Name: "a", PID: 42, Port: 8881, CrashCount: 2}}}
+
+	if err := Save(path, want); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AppGroup != want.AppGroup || len(got.Apps) != 1 || got.Apps[0] != want.Apps[0] {
+		t.Errorf("Load() = %+v, want %+v", got, want)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0600 {
+		t.Errorf("mode = %o, want 0600", mode)
+	}
+}
+
+func TestSaveLeavesNoTempFileBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	for i := 0; i < 3; i++ {
+		if err := Save(path, State{AppGroup: "g"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "state.json" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("dir contains %v, want only state.json", names)
+	}
+}
+
+// TestSaveReplacesExistingFileWholesale guards the atomic-rename property
+// from the reader's side: a Save of a shorter document over a longer one
+// must never leave a tail of the old bytes behind, which a plain
+// truncate-and-write could if interrupted and which Load would then
+// reject forever.
+func TestSaveReplacesExistingFileWholesale(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	long := State{AppGroup: "g"}
+	for i := 0; i < 10; i++ {
+		long.Apps = append(long.Apps, AppState{Name: "app-with-a-long-name", PID: i})
+	}
+	if err := Save(path, long); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(path, State{AppGroup: "g"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() after shrinking Save: %v", err)
+	}
+	if len(got.Apps) != 0 {
+		t.Errorf("Apps = %v, want none", got.Apps)
+	}
+}
+
+func TestLoadMissingFileIsEmptyState(t *testing.T) {
+	got, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AppGroup != "" || len(got.Apps) != 0 {
+		t.Errorf("Load() = %+v, want zero State", got)
+	}
+}
+
+// TestLockSerializesReadModifyWrite runs the exact pattern every
+// shinyctl-api goroutine uses — Load, bump a counter, Save — from many
+// goroutines at once. Under Lock, no update is ever lost; without it,
+// this test loses updates almost every run.
+func TestLockSerializesReadModifyWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := Save(path, State{Apps: []AppState{{}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	const workers, perWorker = 8, 25
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				func() {
+					unlock := Lock(path)
+					defer unlock()
+
+					s, err := Load(path)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					s.Apps[0].CrashCount++
+					if err := Save(path, s); err != nil {
+						t.Error(err)
+					}
+				}()
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Apps[0].CrashCount != workers*perWorker {
+		t.Errorf("CrashCount = %d, want %d (updates were lost)", got.Apps[0].CrashCount, workers*perWorker)
+	}
+}
+
+// TestLockIsPerPath: holding one app's lock must not stall another app's
+// reconcile — the ticker walks every app in sequence.
+func TestLockIsPerPath(t *testing.T) {
+	unlockA := Lock("/a/state.json")
+	defer unlockA()
+
+	acquired := make(chan struct{})
+	go func() {
+		unlockB := Lock("/b/state.json")
+		unlockB()
+		close(acquired)
+	}()
+
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("Lock on a different path blocked behind an unrelated held lock")
+	}
+}
