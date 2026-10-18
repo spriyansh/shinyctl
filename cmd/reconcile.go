@@ -74,8 +74,10 @@ func reconcileLocked(spec manifest.AppSpec, resetBackoff bool) (api.ApplyRespons
 		var replaced string
 		if alive {
 			log.Printf("reconcile: %q: stopping the previous instance (%q, pid %d, port %d) to replace it", spec.AppName, app.Name, app.PID, app.Port)
-			// A failed Stop records no crash: nothing new ran.
-			if err := process.Stop(app.PID); err != nil {
+			// Stop re-checks identity before each signal, so a PID that
+			// changed hands since the check above is left alone. A failed
+			// Stop records no crash: nothing new ran.
+			if _, err := process.Stop(app, spec.EntrypointFile); err != nil {
 				return api.ApplyResponse{}, fmt.Errorf("stopping the previous instance of %q (pid %d): %w", spec.AppName, app.PID, err)
 			}
 			replaced = fmt.Sprintf(" (stopped the previous instance: pid %d, port %d)", app.PID, app.Port)

@@ -20,6 +20,8 @@ func TestLaunchDetached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LaunchDetached: %v", err)
 	}
+	// Raw-PID kill is safe: nothing reaps this child while the test holds
+	// it, so its PID cannot be reused.
 	defer syscall.Kill(pid, syscall.SIGKILL)
 
 	time.Sleep(100 * time.Millisecond)

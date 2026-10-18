@@ -11,7 +11,6 @@ import (
 
 	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/manifest"
-	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/reconcile"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
@@ -25,7 +24,9 @@ import (
 // stopped *before* the kill, so the exit-watcher goroutine that fires when
 // the process dies sees an unmanaged app and does nothing. Forget then
 // keeps it that way — Managed is false for unknown apps too. Idempotent:
-// deleting an app that's already stopped, or never applied, succeeds.
+// deleting an app that's already stopped, or never applied, succeeds. The
+// recorded process is signaled only if it is still this app, matched
+// against the applied spec when the request carries no entrypoint.
 func handleDelete(w http.ResponseWriter, r *http.Request) {
 	var spec manifest.AppSpec
 	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
@@ -53,7 +54,9 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := process.Stop(currentState.App().PID); err != nil {
+	// Before Forget: identityFallbacks reads the applied spec.
+	note, err := stopRecorded("delete", spec, currentState.App())
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -70,7 +73,7 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	resp := api.ApplyResponse{
 		Action:  reconcile.ActionDelete,
-		Message: fmt.Sprintf("Deleted %q — stopped, forgotten, and %s removed", spec.AppName, spec.AppStateFile),
+		Message: fmt.Sprintf("Deleted %q — stopped, forgotten, and %s removed%s", spec.AppName, spec.AppStateFile, note),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -25,6 +25,15 @@ import (
 // are empty, the identity check is skipped — callers without a spec handy
 // still get the plain PID check.
 func IsAlive(spec manifest.AppSpec, app state.AppState) bool {
+	if app.EntrypointFile == "" && spec.EntrypointFile == "" {
+		return pidRunning(app) // callers without a spec still get the plain PID check
+	}
+	return isOurs(app, spec.EntrypointFile)
+}
+
+// pidRunning reports whether app's recorded PID exists, without saying
+// whose process it is.
+func pidRunning(app state.AppState) bool {
 	// PID 0 means "never actually recorded as started" for a zero-value
 	// AppState — and syscall.Kill(0, 0) is not a safe no-op: PID 0 signals
 	// the caller's entire process group, so it would report nil/alive here
@@ -35,19 +44,29 @@ func IsAlive(spec manifest.AppSpec, app state.AppState) bool {
 	}
 
 	err := syscall.Kill(app.PID, 0)
-	if err != nil && err != syscall.EPERM {
+	return err == nil || err == syscall.EPERM
+}
+
+// isOurs reports whether app's recorded process is still running and is
+// identifiably the one shinyctl started: its command line contains
+// app.EntrypointFile or, for a record without one, any non-empty
+// fallback. Unlike IsAlive it never skips the command-line check: with
+// nothing to match, the answer is no. It gates every signal, where a false
+// "yes" would kill a stranger and a false "no" only leaves a process alone.
+func isOurs(app state.AppState, fallbacks ...string) bool {
+	if !pidRunning(app) {
 		return false
 	}
 
-	entrypoint := app.EntrypointFile
-	if entrypoint == "" {
-		entrypoint = spec.EntrypointFile
+	if app.EntrypointFile != "" {
+		return hasCommandLine(app.PID, app.EntrypointFile)
 	}
-	if entrypoint == "" {
-		return true
+	for _, f := range fallbacks {
+		if f != "" && hasCommandLine(app.PID, f) {
+			return true
+		}
 	}
-
-	return hasCommandLine(app.PID, entrypoint)
+	return false
 }
 
 // hasCommandLine reports whether the process at pid's command line

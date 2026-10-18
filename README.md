@@ -58,10 +58,15 @@ the page to see the new process ID. Remove the app with
 | `init` | Writes a starter manifest. `-o` sets the path, `--force` overwrites. |
 | `apply -f <file>` | Starts the app if it isn't running. Starts `shinyctl-api` on first use. Also resumes a stopped app. |
 | `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. |
-| `stop -f <file>` | Sends SIGTERM, waits 10 seconds, then SIGKILL. The app stays down until the next `apply`. |
+| `stop -f <file>` | Sends SIGTERM to the app's own process, waits 10 seconds, then SIGKILL. The app stays down until the next `apply`. |
 | `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
 | `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
 | `version` | Prints the version. Source builds print `dev`. |
+
+`stop`, `delete` and a re-apply signal a process only if its command line
+contains the app's `entrypoint-file`. If the recorded process ID now
+belongs to something else, shinyctl leaves it alone, and `stop` or
+`delete` names it in the reply.
 
 ## Manifest
 

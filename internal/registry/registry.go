@@ -134,6 +134,15 @@ func (r *Registry) Managed(stateFile string) bool {
 	return known && !r.stopped[stateFile]
 }
 
+// Spec returns the spec remembered for stateFile, whether or not it is
+// stopped. stop and delete need it after they have marked the app stopped.
+func (r *Registry) Spec(stateFile string) (manifest.AppSpec, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	spec, known := r.specs[stateFile]
+	return spec, known
+}
+
 // ManagedSpec is Managed plus the remembered spec, read in one step so the
 // two can't disagree. The second result is false if the app is unknown or
 // stopped.

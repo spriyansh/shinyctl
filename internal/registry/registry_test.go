@@ -241,3 +241,27 @@ func TestManagedSpec(t *testing.T) {
 		t.Error("forgotten app reported managed")
 	}
 }
+
+func TestSpec(t *testing.T) {
+	r := New()
+	spec := manifest.AppSpec{AppName: "a", AppStateFile: "a.json", Port: 8881}
+
+	if _, ok := r.Spec("a.json"); ok {
+		t.Error("unknown app has a spec")
+	}
+
+	r.Remember(spec)
+	if got, ok := r.Spec("a.json"); !ok || got.Port != 8881 {
+		t.Errorf("Spec() = %+v, %v; want the remembered spec", got, ok)
+	}
+
+	r.Stop("a.json")
+	if _, ok := r.Spec("a.json"); !ok {
+		t.Error("stopped app lost its spec")
+	}
+
+	r.Forget("a.json")
+	if _, ok := r.Spec("a.json"); ok {
+		t.Error("forgotten app still has a spec")
+	}
+}

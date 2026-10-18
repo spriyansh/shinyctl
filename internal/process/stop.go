@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"syscall"
 	"time"
+
+	"github.com/spriyansh/shinyctl/internal/state"
 )
 
 // stopGrace is how long Stop gives a process to exit on SIGTERM before
@@ -15,41 +17,52 @@ const stopGrace = 10 * time.Second
 // actually be gone — the kill itself is immediate; this covers the reap.
 const killGrace = 2 * time.Second
 
-// Stop terminates pid and only returns once it's actually gone: SIGTERM
-// first, then SIGKILL if the process is still around after stopGrace. The
-// caller's next step is clearing pid's record from state.json, and a
-// record cleared while the process is still running (and still holding
-// its port) turns the next apply's port check into a phantom crash. A PID
-// that's already gone (ESRCH) is treated as success — "make sure it's
-// stopped" trivially holds if it already is.
-func Stop(pid int) error {
-	return stop(pid, stopGrace)
+// Stop terminates app's recorded process and only returns once it's
+// actually gone: SIGTERM first, then SIGKILL if the process is still around
+// after stopGrace. The caller's next step is clearing the record from
+// state.json, and a record cleared while the process is still running (and
+// still holding its port) turns the next apply's port check into a phantom
+// crash. A PID that's already gone (ESRCH) is treated as success — "make
+// sure it's stopped" trivially holds if it already is.
+//
+// It signals only while the process is identifiably the app's own (see
+// isOurs; fallbacks are for records that predate the recorded entrypoint),
+// and checks again before SIGKILL, because the grace period is long enough
+// for a process that exited to have its PID handed to a stranger.
+// signaled=false means there was nothing of ours to stop (no PID, already
+// gone, or someone else's); that counts as success.
+func Stop(app state.AppState, fallbacks ...string) (signaled bool, err error) {
+	return stop(app.PID, func() bool { return isOurs(app, fallbacks...) }, stopGrace)
 }
 
-// stop is Stop with the SIGTERM grace period as a parameter, for tests.
-func stop(pid int, grace time.Duration) error {
-	if pid <= 0 {
-		return nil
+// stop is Stop with the identity check and the SIGTERM grace period as
+// parameters, for tests.
+func stop(pid int, ours func() bool, grace time.Duration) (bool, error) {
+	if pid <= 0 || !ours() {
+		return false, nil
 	}
 
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		if err == syscall.ESRCH {
-			return nil
+			return true, nil
 		}
-		return err
+		return true, err
 	}
 	if waitGone(pid, grace) {
-		return nil
+		return true, nil
+	}
+	if !ours() {
+		return true, nil
 	}
 
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		return err
+		return true, err
 	}
-	if waitGone(pid, killGrace) {
-		return nil
+	if waitGone(pid, killGrace) || !ours() {
+		return true, nil
 	}
 
-	return fmt.Errorf("process %d still running %s after SIGKILL", pid, killGrace)
+	return true, fmt.Errorf("process %d still running %s after SIGKILL", pid, killGrace)
 }
 
 // waitGone polls until pid no longer exists or timeout elapses. A zombie

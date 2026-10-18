@@ -97,3 +97,41 @@ func TestIsAlive_PIDReuse(t *testing.T) {
 		}
 	})
 }
+
+func TestIsOurs(t *testing.T) {
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not found on PATH, skipping")
+	}
+	cmd := exec.Command(sleepPath, "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting sleep: %v", err)
+	}
+	defer cmd.Process.Kill()
+	go cmd.Wait()
+
+	rec := func(entrypoint string) state.AppState {
+		return state.AppState{PID: cmd.Process.Pid, StartedAt: time.Now(), EntrypointFile: entrypoint}
+	}
+
+	cases := []struct {
+		name      string
+		app       state.AppState
+		fallbacks []string
+		want      bool
+	}{
+		{"recorded entrypoint matches", rec("sleep"), nil, true},
+		{"recorded entrypoint wins over a matching fallback", rec("other.R"), []string{"sleep"}, false},
+		{"no recorded entrypoint, a fallback matches", rec(""), []string{"other.R", "sleep"}, true},
+		{"nothing to match is never ours", rec(""), []string{""}, false},
+		{"no fallbacks at all is never ours", rec(""), nil, false},
+		{"no such PID", state.AppState{PID: 999999999, StartedAt: time.Now(), EntrypointFile: "sleep"}, nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isOurs(c.app, c.fallbacks...); got != c.want {
+				t.Errorf("isOurs = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

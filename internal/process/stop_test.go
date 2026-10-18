@@ -2,10 +2,20 @@ package process
 
 import (
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/spriyansh/shinyctl/internal/state"
 )
+
+// sleeperApp is the record of a sleeper started by startSleeper, whose
+// command line contains "sleep".
+func sleeperApp(pid int, entrypoint string) state.AppState {
+	return state.AppState{PID: pid, StartedAt: time.Now(), EntrypointFile: entrypoint}
+}
 
 // startSleeper launches a long-running process for Stop to act on and
 // reaps it in the background, the way the exit-watcher goroutine does for
@@ -30,21 +40,34 @@ func startSleeper(t *testing.T, ignoreTERM bool) int {
 	}
 	go cmd.Wait()
 
-	t.Cleanup(func() { syscall.Kill(cmd.Process.Pid, syscall.SIGKILL) })
+	// Killed by handle, so a reused PID can never be hit.
+	t.Cleanup(func() { cmd.Process.Kill() })
 
-	// Give sh a moment to install the trap and exec; signaling before
-	// that would hit a shell that hasn't ignored TERM yet.
-	time.Sleep(100 * time.Millisecond)
+	// Wait until sh has installed the trap and exec'd sleep; signaling
+	// before that would hit a shell that hasn't ignored TERM yet. Prefix
+	// match: the sh -c command line also contains "sleep 30".
+	pid := cmd.Process.Pid
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		out, _ := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+		if strings.HasPrefix(strings.TrimSpace(string(out)), "sleep") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sleeper never exec'd sleep")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
-	return cmd.Process.Pid
+	return pid
 }
 
 func TestStop(t *testing.T) {
 	t.Run("SIGTERM, and only returns once the process is gone", func(t *testing.T) {
 		pid := startSleeper(t, false)
 
-		if err := Stop(pid); err != nil {
-			t.Fatalf("Stop: %v", err)
+		if signaled, err := Stop(sleeperApp(pid, "sleep")); err != nil || !signaled {
+			t.Fatalf("Stop = (%v, %v), want (true, nil)", signaled, err)
 		}
 
 		// No sleep here on purpose: Stop's contract is that the PID is
@@ -57,9 +80,10 @@ func TestStop(t *testing.T) {
 	t.Run("escalates to SIGKILL when SIGTERM is ignored", func(t *testing.T) {
 		pid := startSleeper(t, true)
 
+		app := sleeperApp(pid, "sleep")
 		started := time.Now()
-		if err := stop(pid, 300*time.Millisecond); err != nil {
-			t.Fatalf("stop: %v", err)
+		if signaled, err := stop(pid, func() bool { return isOurs(app) }, 300*time.Millisecond); err != nil || !signaled {
+			t.Fatalf("stop = (%v, %v), want (true, nil)", signaled, err)
 		}
 
 		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
@@ -71,14 +95,46 @@ func TestStop(t *testing.T) {
 	})
 
 	t.Run("already-dead PID is not an error", func(t *testing.T) {
-		if err := Stop(999999999); err != nil {
-			t.Errorf("Stop(dead pid) = %v, want nil", err)
+		if signaled, err := Stop(sleeperApp(999999999, "sleep")); err != nil || signaled {
+			t.Errorf("Stop(dead pid) = (%v, %v), want (false, nil)", signaled, err)
 		}
 	})
 
 	t.Run("zero/negative PID is a no-op, not an error", func(t *testing.T) {
-		if err := Stop(0); err != nil {
-			t.Errorf("Stop(0) = %v, want nil", err)
+		if signaled, err := Stop(state.AppState{}); err != nil || signaled {
+			t.Errorf("Stop(zero) = (%v, %v), want (false, nil)", signaled, err)
+		}
+	})
+
+	t.Run("a process running something else is left alone", func(t *testing.T) {
+		pid := startSleeper(t, false)
+
+		if signaled, err := Stop(sleeperApp(pid, "some-other-app.R")); err != nil || signaled {
+			t.Fatalf("Stop = (%v, %v), want (false, nil)", signaled, err)
+		}
+		if err := syscall.Kill(pid, 0); err != nil {
+			t.Errorf("process %d was signaled: %v", pid, err)
+		}
+	})
+
+	t.Run("re-checks identity before SIGKILL", func(t *testing.T) {
+		pid := startSleeper(t, true)
+
+		// Ours when the signal is sent, a stranger by the time the grace
+		// period ends: the PID changed hands in between.
+		calls := 0
+		ours := func() bool {
+			calls++
+			return calls == 1
+		}
+		if signaled, err := stop(pid, ours, 300*time.Millisecond); err != nil || !signaled {
+			t.Fatalf("stop = (%v, %v), want (true, nil)", signaled, err)
+		}
+		if err := syscall.Kill(pid, 0); err != nil {
+			t.Errorf("process %d was killed after losing identity: %v", pid, err)
+		}
+		if calls < 2 {
+			t.Errorf("ours called %d time(s), want at least 2", calls)
 		}
 	})
 }
