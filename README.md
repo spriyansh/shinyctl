@@ -113,11 +113,14 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
 
 ## Limitations
 
-- **Re-applying doesn't pick up manifest changes.** `apply` only checks
-  whether the app is alive. Changing `env`, `host`, `working-dir` or
-  `entrypoint-file` has no effect on a running app. Changing `port` or
-  `app-name` starts a second copy and loses track of the first. To change
-  a running app, `stop` it, edit the manifest, then `apply`.
+- **Re-applying only acts on `port` and `app-name` changes.** Changing
+  either stops the running copy and starts a new one from the edited
+  manifest, so other edits made at the same time take effect too. The old
+  copy is stopped before the new port is checked, so a taken port leaves
+  the app down. Changing only `env`, `host`, `working-dir` or
+  `entrypoint-file` has no effect on a running app: `stop` it, edit the
+  manifest, then `apply`. Changing `app-state-file` makes it a different
+  app, so `delete` the old one with its old manifest first.
 - **Nothing restarts `shinyctl-api` after a reboot.** Apps keep running if
   `shinyctl-api` dies, but nothing watches them. Run `shinyctl serve -d`
   or any `apply` to bring it back. It resumes every app it was managing.

@@ -12,6 +12,7 @@ import (
 	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/reconcile"
 	"github.com/spriyansh/shinyctl/internal/registry"
+	"github.com/spriyansh/shinyctl/internal/state"
 )
 
 // appRegistry is shared between handleApply (an HTTP handler goroutine per
@@ -42,7 +43,7 @@ func runReconcileLoop(ctx context.Context) {
 
 func reconcileOnce() {
 	for _, spec := range appRegistry.All() {
-		triggerReconcile(spec)
+		triggerReconcile(spec.AppStateFile)
 		rotateAppLog(spec)
 	}
 	rotateAPILog()
@@ -83,26 +84,42 @@ func rotateAPILog() {
 	}
 }
 
-// triggerReconcile runs one reconcileSpec cycle for spec and logs the
-// outcome if it started something or backed off. Called both by the ticker, on its
-// fixed interval, and directly the instant a managed process is detected
-// to have exited (see reconcileSpec's exit-watcher in cmd/reconcile.go) —
-// the ticker is the safety net, the direct call is what makes restart
-// near-instant for apps shinyctl-api itself started this run.
+// triggerReconcile runs one reconcile cycle for the app at stateFile and
+// logs the outcome if it started something or backed off. Called both by
+// the ticker, on its fixed interval, and directly the instant a managed
+// process is detected to have exited (see reconcileLocked's exit-watcher in
+// cmd/reconcile.go) — the ticker is the safety net, the direct call is
+// what makes restart near-instant for apps shinyctl-api itself started
+// this run.
 //
-// Checking appRegistry.Managed here, rather than inside reconcileSpec or
+// Checking appRegistry.Managed here, rather than inside reconcileLocked or
 // Decide, is deliberate: it's what lets handleStop and handleDelete kill a
 // process without the already-running exit-watcher goroutine (which calls
-// this same function, not reconcileSpec directly) immediately restarting
+// this same function, not reconcileLocked directly) immediately restarting
 // it — stopped and forgotten apps are both unmanaged. handleApply calls
 // reconcileSpec directly, bypassing this check entirely — applying always
 // means "ensure this is running now."
-func triggerReconcile(spec manifest.AppSpec) {
-	if !appRegistry.Managed(spec.AppStateFile) {
+//
+// It takes the state key, not a spec, and reads the spec under the state
+// lock: a spec captured earlier (by an exit-watcher, or by the ticker's
+// snapshot) may predate a re-apply, and reconciling with it would undo the
+// replacement.
+func triggerReconcile(stateFile string) {
+	// Cheap gate before the lock, so this never queues behind a stop or
+	// delete that is holding it.
+	if !appRegistry.Managed(stateFile) {
 		return
 	}
 
-	resp, err := reconcileSpec(spec, false)
+	unlock := state.Lock(stateFile)
+	defer unlock()
+
+	spec, ok := appRegistry.ManagedSpec(stateFile)
+	if !ok {
+		return
+	}
+
+	resp, err := reconcileLocked(spec, false)
 	if err != nil {
 		log.Printf("reconcile: %q: %v", spec.AppName, err)
 		return

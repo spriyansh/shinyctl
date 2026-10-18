@@ -10,7 +10,7 @@ import (
 
 func TestSaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	want := State{AppGroup: "g", Apps: []AppState{{Name: "a", PID: 42, Port: 8881, CrashCount: 2}}}
+	want := State{AppGroup: "g", Apps: []AppState{{Name: "a", PID: 42, Port: 8881, EntrypointFile: "/srv/app.R", CrashCount: 2}}}
 
 	if err := Save(path, want); err != nil {
 		t.Fatal(err)
@@ -157,5 +157,41 @@ func TestLockIsPerPath(t *testing.T) {
 	case <-acquired:
 	case <-time.After(time.Second):
 		t.Fatal("Lock on a different path blocked behind an unrelated held lock")
+	}
+}
+
+// TestLoadStateWithoutEntrypointFile: state.json files written before
+// entrypoint-file was recorded must keep loading. The on-disk shape is a
+// compatibility surface.
+func TestLoadStateWithoutEntrypointFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	old := `{
+  "app-group": "g",
+  "apps": [
+    {
+      "name": "a",
+      "pid": 42,
+      "port": 8881,
+      "started-at": "2026-01-02T03:04:05Z",
+      "crash-count": 2,
+      "last-exit-at": "2026-01-02T04:00:00Z",
+      "last-exit-failed": true
+    }
+  ]
+}`
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := got.App()
+	if app.EntrypointFile != "" {
+		t.Errorf("EntrypointFile = %q, want empty", app.EntrypointFile)
+	}
+	if app.Name != "a" || app.PID != 42 || app.Port != 8881 || app.CrashCount != 2 || !app.LastExitFailed {
+		t.Errorf("other fields lost: %+v", app)
 	}
 }

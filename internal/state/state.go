@@ -3,12 +3,14 @@ package state
 import "time"
 
 // AppState is what shinyctl-api last recorded about one app's process:
-// identity (PID, port, when it was started) plus the crash history the
-// reconcile loop's backoff and restart-policy decisions are made from.
+// identity (PID, name, port, entrypoint, when it was started) plus the
+// crash history the reconcile loop's backoff and restart-policy decisions
+// are made from.
 type AppState struct {
 	Name           string    `json:"name"`
 	PID            int       `json:"pid"`
 	Port           int       `json:"port"`
+	EntrypointFile string    `json:"entrypoint-file"`
 	StartedAt      time.Time `json:"started-at"`
 	CrashCount     int       `json:"crash-count"`
 	LastExitAt     time.Time `json:"last-exit-at"`

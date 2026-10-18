@@ -6,9 +6,12 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
+	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
@@ -57,5 +60,71 @@ func TestReconcileSpec_StartFailureRecordsCrash(t *testing.T) {
 	}
 	if !app.LastExitFailed {
 		t.Error("LastExitFailed = false, want true")
+	}
+}
+
+// TestExitWatcher_RecordsCrashOfRecordedProcess guards the other side of
+// the PID gate in recordExit: a genuine crash of the recorded process must
+// still reach state.json.
+func TestExitWatcher_RecordsCrashOfRecordedProcess(t *testing.T) {
+	useFakeRscript(t)
+	dir := t.TempDir()
+	spec := newTestSpec(t, dir, "app", "app.R", freePorts(t, 1)[0])
+
+	var a state.AppState
+	t.Cleanup(func() {
+		postJSON(t, handleDelete, spec)
+		killIfAlive(spec, a)
+	})
+	a = applyOK(t, spec)
+	waitReady(t, spec.Host, spec.Port)
+
+	if !process.IsAlive(spec, a) {
+		t.Fatal("started process is not alive")
+	}
+	if err := syscall.Kill(a.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		app := loadApp(t, spec)
+		if app.PID == a.PID && app.CrashCount == 1 && app.LastExitFailed && !app.LastExitAt.IsZero() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("crash not recorded: %+v", app)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// TestRecordExit_IgnoresReplacedProcess: the exit of a process that a
+// re-apply has replaced belongs to no one. Recorded against its successor
+// it would be a phantom crash, and the reconcile that follows would act on
+// it.
+func TestRecordExit_IgnoresReplacedProcess(t *testing.T) {
+	useFakeRscript(t)
+	dir := t.TempDir()
+	ports := freePorts(t, 2)
+	spec1 := newTestSpec(t, dir, "app", "app.R", ports[0])
+
+	spec2 := spec1
+	spec2.Port = ports[1]
+	var a state.AppState
+	t.Cleanup(func() {
+		postJSON(t, handleDelete, spec2)
+		killIfAlive(spec1, a)
+	})
+	a = applyOK(t, spec1)
+	waitReady(t, spec1.Host, spec1.Port)
+	b := applyOK(t, spec2)
+
+	if recordExit(spec1, a.PID, process.Exit{At: time.Now(), Failed: true}) {
+		t.Error("recordExit() = true for a replaced process, want false")
+	}
+	got := loadApp(t, spec2)
+	if got.PID != b.PID || got.CrashCount != 0 || !got.LastExitAt.IsZero() || got.LastExitFailed {
+		t.Errorf("state changed: %+v, want pid %d with no exit recorded", got, b.PID)
 	}
 }

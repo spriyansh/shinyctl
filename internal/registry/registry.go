@@ -134,6 +134,19 @@ func (r *Registry) Managed(stateFile string) bool {
 	return known && !r.stopped[stateFile]
 }
 
+// ManagedSpec is Managed plus the remembered spec, read in one step so the
+// two can't disagree. The second result is false if the app is unknown or
+// stopped.
+func (r *Registry) ManagedSpec(stateFile string) (manifest.AppSpec, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	spec, known := r.specs[stateFile]
+	if !known || r.stopped[stateFile] {
+		return manifest.AppSpec{}, false
+	}
+	return spec, true
+}
+
 // Forget drops every record of the app at stateFile — its spec and any
 // stopped flag — so it no longer appears in status and nothing will ever
 // restart it. The next Remember (apply) starts it from scratch. Forgetting

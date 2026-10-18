@@ -72,6 +72,24 @@ func TestIsAlive_PIDReuse(t *testing.T) {
 		}
 	})
 
+	t.Run("recorded entrypoint wins over the spec's", func(t *testing.T) {
+		spec := manifest.AppSpec{EntrypointFile: "some-other-app.R"}
+		recorded := app
+		recorded.EntrypointFile = "sleep"
+		if !IsAlive(spec, recorded) {
+			t.Error("IsAlive = false, want true (the recorded entrypoint matches the running command)")
+		}
+	})
+
+	t.Run("recorded entrypoint that does not match is not alive, even if the spec's does", func(t *testing.T) {
+		spec := manifest.AppSpec{EntrypointFile: "sleep"}
+		recorded := app
+		recorded.EntrypointFile = "some-other-app.R"
+		if IsAlive(spec, recorded) {
+			t.Error("IsAlive = true, want false (the recorded entrypoint is not what is running)")
+		}
+	})
+
 	t.Run("mismatched entrypoint is not alive, even though the PID is real", func(t *testing.T) {
 		spec := manifest.AppSpec{EntrypointFile: "some-other-app.R"}
 		if IsAlive(spec, app) {

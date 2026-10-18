@@ -11,15 +11,19 @@ import (
 )
 
 // IsAlive reports whether app's recorded process is genuinely still
-// running spec's entrypoint — not just whether some process exists at
-// that PID. A dead process's PID can be recycled by the OS for an
-// unrelated process; syscall.Kill(pid, 0) alone can't tell the
-// difference. Checking the running command line against
-// spec.EntrypointFile closes that gap cheaply and portably (via `ps`, no
-// /proc dependency, so it works on macOS too, unlike reading the OS's own
-// process-start-time). If spec.EntrypointFile is empty, the identity
-// check is skipped — callers without a spec handy still get the plain
-// PID check.
+// running — not just whether some process exists at that PID. A dead
+// process's PID can be recycled by the OS for an unrelated process;
+// syscall.Kill(pid, 0) alone can't tell the difference. Checking the
+// running command line against the entrypoint closes that gap cheaply and
+// portably (via `ps`, no /proc dependency, so it works on macOS too,
+// unlike reading the OS's own process-start-time).
+//
+// The entrypoint recorded in app wins over spec's: after a re-apply, spec
+// describes the replacement, and the recorded process must still be
+// recognised so it can be stopped instead of orphaned. spec's entrypoint
+// is the fallback for records written before Start recorded one. If both
+// are empty, the identity check is skipped — callers without a spec handy
+// still get the plain PID check.
 func IsAlive(spec manifest.AppSpec, app state.AppState) bool {
 	// PID 0 means "never actually recorded as started" for a zero-value
 	// AppState — and syscall.Kill(0, 0) is not a safe no-op: PID 0 signals
@@ -35,11 +39,15 @@ func IsAlive(spec manifest.AppSpec, app state.AppState) bool {
 		return false
 	}
 
-	if spec.EntrypointFile == "" {
+	entrypoint := app.EntrypointFile
+	if entrypoint == "" {
+		entrypoint = spec.EntrypointFile
+	}
+	if entrypoint == "" {
 		return true
 	}
 
-	return hasCommandLine(app.PID, spec.EntrypointFile)
+	return hasCommandLine(app.PID, entrypoint)
 }
 
 // hasCommandLine reports whether the process at pid's command line

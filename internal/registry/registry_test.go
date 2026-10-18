@@ -210,3 +210,34 @@ func TestRegistry_InMemoryWritesNothing(t *testing.T) {
 		t.Errorf("New() registry wrote files: %v", entries)
 	}
 }
+
+func TestManagedSpec(t *testing.T) {
+	r := New()
+	spec := manifest.AppSpec{AppName: "a", AppStateFile: "a.json", Port: 8881}
+
+	if _, ok := r.ManagedSpec("a.json"); ok {
+		t.Error("unknown app reported managed")
+	}
+
+	r.Remember(spec)
+	if got, ok := r.ManagedSpec("a.json"); !ok || got.Port != 8881 {
+		t.Errorf("ManagedSpec() = %+v, %v; want the remembered spec", got, ok)
+	}
+
+	r.Stop("a.json")
+	if _, ok := r.ManagedSpec("a.json"); ok {
+		t.Error("stopped app reported managed")
+	}
+
+	spec2 := spec
+	spec2.Port = 8882
+	r.Remember(spec2)
+	if got, ok := r.ManagedSpec("a.json"); !ok || got.Port != 8882 {
+		t.Errorf("ManagedSpec() after re-apply = %+v, %v; want the new spec", got, ok)
+	}
+
+	r.Forget("a.json")
+	if _, ok := r.ManagedSpec("a.json"); ok {
+		t.Error("forgotten app reported managed")
+	}
+}

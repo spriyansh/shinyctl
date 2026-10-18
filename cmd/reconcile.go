@@ -15,13 +15,14 @@ import (
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
-// reconcileSpec runs one decide-and-act cycle for spec: load state, decide,
-// and on ActionStart, launch the process and persist the new state. Shared
-// between the HTTP /apply handler (triggered by a client request) and the
-// background reconcile loop (triggered by a ticker or an exit-watcher
-// goroutine) — they differ only in what causes this to run, and in
-// resetBackoff: an explicit apply always means "ensure this is running
-// now," so it clears any crash-loop history; a tick or an exit does not.
+// reconcileSpec runs one decide-and-act cycle for spec under its state
+// lock: load state, decide, and on ActionStart stop the recorded process
+// if a name or port change left it running, then launch the replacement
+// and persist the new state. handleApply calls it directly; the ticker and
+// exit-watchers go through triggerReconcile, which takes the lock itself
+// and calls reconcileLocked. resetBackoff: an explicit apply always means
+// "ensure this is running now," so it clears any crash-loop history; a
+// tick or an exit does not.
 func reconcileSpec(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse, error) {
 	// Held across the whole cycle, through process.Start: an apply and a
 	// tick deciding ActionStart off the same loaded state would otherwise
@@ -29,7 +30,13 @@ func reconcileSpec(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse,
 	// a phantom crash.
 	unlock := state.Lock(spec.AppStateFile)
 	defer unlock()
+	return reconcileLocked(spec, resetBackoff)
+}
 
+// reconcileLocked is reconcileSpec for a caller that already holds the
+// state lock — triggerReconcile, which takes it first so it can read the
+// registry's current spec under it.
+func reconcileLocked(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse, error) {
 	currentState, err := state.Load(spec.AppStateFile)
 	if err != nil {
 		return api.ApplyResponse{}, err
@@ -45,7 +52,8 @@ func reconcileSpec(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse,
 		app.LastExitFailed = false
 	}
 
-	action := reconcile.Decide(spec, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{app}}, process.IsAlive(spec, app), time.Now())
+	alive := process.IsAlive(spec, app)
+	action := reconcile.Decide(spec, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{app}}, alive, time.Now())
 	resp := api.ApplyResponse{Action: action.Type}
 
 	switch action.Type {
@@ -56,12 +64,38 @@ func reconcileSpec(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse,
 		resp.Message = fmt.Sprintf("Backing off restart of %q after %d crash(es)", spec.AppName, app.CrashCount)
 
 	case reconcile.ActionStart:
-		// Checked here, not in manifest.Validate: by this point Decide has
-		// already confirmed our own last-recorded instance (if any) isn't
-		// alive, so a port that's occupied right now genuinely belongs to
-		// something else — Validate has no state to make that distinction
-		// and would wrongly reject every routine re-apply of an app that's
-		// correctly, already running on its own port.
+		// Decide only answers Start for a live recorded process when its
+		// name or port no longer matches the spec. Left running, that
+		// process is orphaned: it keeps serving, but the Save below drops
+		// it from state.json, so status can't see it and delete can't stop
+		// it. IsAlive matched its recorded entrypoint, so it is ours to
+		// stop. This happens before the port check because a name change
+		// keeps the port, which the old process still holds.
+		var replaced string
+		if alive {
+			log.Printf("reconcile: %q: stopping the previous instance (%q, pid %d, port %d) to replace it", spec.AppName, app.Name, app.PID, app.Port)
+			// A failed Stop records no crash: nothing new ran.
+			if err := process.Stop(app.PID); err != nil {
+				return api.ApplyResponse{}, fmt.Errorf("stopping the previous instance of %q (pid %d): %w", spec.AppName, app.PID, err)
+			}
+			replaced = fmt.Sprintf(" (stopped the previous instance: pid %d, port %d)", app.PID, app.Port)
+
+			// Keep only the crash history. Any failure below is recorded
+			// on this cleared record, and the stopped process's
+			// exit-watcher sees a PID that isn't its own and stays quiet.
+			app = state.AppState{CrashCount: app.CrashCount, LastExitAt: app.LastExitAt, LastExitFailed: app.LastExitFailed}
+			if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{app}}); err != nil {
+				return api.ApplyResponse{}, err
+			}
+		}
+
+		// Checked here, not in manifest.Validate: by this point our own
+		// last-recorded instance (if any) is either dead, per Decide, or
+		// was just stopped above, so a port that's occupied right now
+		// genuinely belongs to something else — Validate has no state to
+		// make that distinction and would wrongly reject every routine
+		// re-apply of an app that's correctly, already running on its own
+		// port.
 		if err := process.PortAvailable(spec.EffectiveHost(), spec.Port); err != nil {
 			recordExitLocked(spec, process.Exit{At: time.Now(), Failed: true})
 			return api.ApplyResponse{}, err
@@ -88,14 +122,16 @@ func reconcileSpec(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse,
 
 		// React to this specific process dying immediately, instead of
 		// waiting for the next reconcile tick (up to reconcileInterval
-		// later). Safe even if a newer process has already replaced this
-		// one by the time it fires: triggerReconcile re-reads state.json
-		// fresh and re-derives from there, it doesn't trust anything
-		// captured in this closure except which spec to check.
+		// later). Only this PID's exit counts: if a replacement has since
+		// taken over the record, recordExit refuses it and nothing is
+		// reconciled. The reconcile itself uses the registry's current
+		// spec, not the one captured here, which may predate a re-apply.
+		pid := newApp.PID
 		go func() {
 			exit := <-done
-			recordExit(spec, exit)
-			triggerReconcile(spec)
+			if recordExit(spec, pid, exit) {
+				triggerReconcile(spec.AppStateFile)
+			}
 		}()
 
 		apps := state.State{
@@ -107,7 +143,7 @@ func reconcileSpec(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse,
 			return api.ApplyResponse{}, err
 		}
 
-		resp.Message = fmt.Sprintf("Starting app %q on port %d", spec.AppName, spec.Port)
+		resp.Message = fmt.Sprintf("Starting app %q on port %d%s", spec.AppName, spec.Port, replaced)
 
 	default:
 		return api.ApplyResponse{}, fmt.Errorf("unhandled action type %q", action.Type)
@@ -129,18 +165,36 @@ func reconcileSpec(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse,
 // there's nothing to record — writing one would show as a phantom
 // `CRASHES 1` in status, or (for delete) recreate the state file that was
 // just removed.
-func recordExit(spec manifest.AppSpec, exit process.Exit) {
+//
+// pid is the process that exited. The exit is recorded only if state.json
+// still names that PID: a record that a re-apply replaced or cleared must
+// not take the old process's exit, or it shows up as a phantom crash
+// against the replacement. The result says whether the exit was recorded;
+// callers react (reconcile) only when it was.
+func recordExit(spec manifest.AppSpec, pid int, exit process.Exit) bool {
 	if !appRegistry.Managed(spec.AppStateFile) {
-		return
+		return false
 	}
 
 	unlock := state.Lock(spec.AppStateFile)
 	defer unlock()
+
+	currentState, err := state.Load(spec.AppStateFile)
+	if err != nil {
+		log.Printf("reconcile: %q: recording exit: %v", spec.AppName, err)
+		return false
+	}
+	if currentState.App().PID != pid {
+		return false
+	}
+
 	recordExitLocked(spec, exit)
+	return true
 }
 
 // recordExitLocked is recordExit for a caller that already holds the
-// state lock — reconcileSpec, recording a Start failure mid-cycle.
+// state lock — reconcileLocked, recording a port-check or Start failure
+// mid-cycle.
 func recordExitLocked(spec manifest.AppSpec, exit process.Exit) {
 	currentState, err := state.Load(spec.AppStateFile)
 	if err != nil {

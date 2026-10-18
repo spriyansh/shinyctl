@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
-	"github.com/spriyansh/shinyctl/internal/registry"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
@@ -33,15 +32,13 @@ func postJSON(t *testing.T, handler http.HandlerFunc, body any) *httptest.Respon
 // what's under test is: registry entry gone, stopped flag gone, state
 // file gone, and the exit-watcher/ticker gate (Managed) closed.
 func TestHandleDelete(t *testing.T) {
-	appRegistry = registry.New()
-	t.Cleanup(func() { appRegistry = registry.New() })
-
 	dir := t.TempDir()
 	spec := manifest.AppSpec{
 		AppGroup:     "g",
 		AppName:      "n",
 		AppStateFile: filepath.Join(dir, "state.json"),
 	}
+	t.Cleanup(func() { appRegistry.Forget(spec.AppStateFile) })
 
 	if err := appRegistry.Remember(spec); err != nil {
 		t.Fatal(err)
@@ -58,8 +55,10 @@ func TestHandleDelete(t *testing.T) {
 	if _, err := os.Stat(spec.AppStateFile); !os.IsNotExist(err) {
 		t.Errorf("state file still exists after delete (stat err = %v)", err)
 	}
-	if n := len(appRegistry.All()); n != 0 {
-		t.Errorf("registry still lists %d app(s) after delete", n)
+	for _, remembered := range appRegistry.All() {
+		if remembered.AppStateFile == spec.AppStateFile {
+			t.Error("registry still lists the app after delete")
+		}
 	}
 	if appRegistry.IsStopped(spec.AppStateFile) {
 		t.Error("stopped flag survived delete")
@@ -75,9 +74,6 @@ func TestHandleDelete(t *testing.T) {
 }
 
 func TestHandleDelete_RequiresNameAndStateFile(t *testing.T) {
-	appRegistry = registry.New()
-	t.Cleanup(func() { appRegistry = registry.New() })
-
 	for _, spec := range []manifest.AppSpec{
 		{AppName: "n"},
 		{AppStateFile: "/x/state.json"},

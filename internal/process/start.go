@@ -74,9 +74,10 @@ func Start(spec manifest.AppSpec) (state.AppState, <-chan Exit, error) {
 	}()
 
 	return state.AppState{
-		Name:      spec.AppName,
-		PID:       proc.Process.Pid,
-		Port:      spec.Port,
-		StartedAt: time.Now(),
+		Name:           spec.AppName,
+		PID:            proc.Process.Pid,
+		Port:           spec.Port,
+		EntrypointFile: spec.EntrypointFile,
+		StartedAt:      time.Now(),
 	}, done, nil
 }
