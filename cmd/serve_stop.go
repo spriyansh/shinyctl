@@ -50,7 +50,7 @@ func handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	note, err := stopRecorded("stop", spec, currentState.App())
+	_, note, err := stopRecorded("stop", spec, currentState.App())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -85,21 +85,24 @@ func identityFallbacks(spec manifest.AppSpec) []string {
 	return fallbacks
 }
 
-// stopRecorded stops app's recorded process for stop and delete, signaling
-// it only while it is identifiably this app's. If the recorded PID turns
-// out to be dead or someone else's (a reused PID), nothing is signaled and
-// the returned note says which PID was left alone; the caller carries on:
-// a process that can't be identified must not be signaled, and the user
-// asked for the app to be down. The caller holds the state lock.
-func stopRecorded(op string, spec manifest.AppSpec, app state.AppState) (note string, err error) {
-	signaled, err := process.Stop(app, identityFallbacks(spec)...)
+// stopRecorded stops app's recorded process for stop, delete and restart,
+// signaling it only while it is identifiably this app's. If the recorded
+// PID is someone else's (a reused PID), nothing is signaled and the
+// returned note says which PID was left alone; the caller carries on: a
+// process that can't be identified must not be signaled, and the user
+// asked for the app to be down. A recorded PID that isn't running at all
+// is the ordinary case of an app that already exited, so it gets no note.
+// signaled says whether the process was ours and has been stopped. The
+// caller holds the state lock.
+func stopRecorded(op string, spec manifest.AppSpec, app state.AppState) (signaled bool, note string, err error) {
+	signaled, err = process.Stop(app, identityFallbacks(spec)...)
 	if err != nil {
-		return "", err
+		return false, "", err
 	}
-	if signaled || app.PID <= 0 {
-		return "", nil
+	if signaled || !process.PIDRunning(app) {
+		return signaled, "", nil
 	}
 
 	log.Printf("%s: %q: recorded pid %d is not running this app; not signaling it", op, spec.AppName, app.PID)
-	return fmt.Sprintf(" (recorded pid %d is not running this app, so it was not signaled)", app.PID), nil
+	return false, fmt.Sprintf(" (recorded pid %d is not running this app, so it was not signaled)", app.PID), nil
 }

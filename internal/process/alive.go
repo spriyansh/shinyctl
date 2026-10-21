@@ -31,6 +31,13 @@ func IsAlive(spec manifest.AppSpec, app state.AppState) bool {
 	return isOurs(app, spec.EntrypointFile)
 }
 
+// PIDRunning reports whether app's recorded PID exists, without saying
+// whose process it is. Callers use it to tell "nothing is running" from
+// "something is, but it isn't the app" after Stop declines to signal.
+func PIDRunning(app state.AppState) bool {
+	return pidRunning(app)
+}
+
 // pidRunning reports whether app's recorded PID exists, without saying
 // whose process it is.
 func pidRunning(app state.AppState) bool {

@@ -7,7 +7,7 @@ import (
 )
 
 // ApplyResponse is shinyctl-api's response to the spec-carrying POSTs —
-// /apply, /stop and /delete: which action it took, and a line for the
+// /apply, /stop, /delete and /restart: which action it took, and a line for the
 // CLI to print.
 type ApplyResponse struct {
 	Action  reconcile.ActionType `json:"action"`

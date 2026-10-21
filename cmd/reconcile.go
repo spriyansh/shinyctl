@@ -33,9 +33,16 @@ func reconcileSpec(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse,
 	return reconcileLocked(spec, resetBackoff)
 }
 
+// previousInstanceNote is the reply suffix for a start that first stopped
+// app's process: the replacement path here, and restart.
+func previousInstanceNote(app state.AppState) string {
+	return fmt.Sprintf(" (stopped the previous instance: pid %d, port %d)", app.PID, app.Port)
+}
+
 // reconcileLocked is reconcileSpec for a caller that already holds the
 // state lock — triggerReconcile, which takes it first so it can read the
-// registry's current spec under it.
+// registry's current spec under it, and handleRestart, which holds it
+// across its stop.
 func reconcileLocked(spec manifest.AppSpec, resetBackoff bool) (api.ApplyResponse, error) {
 	currentState, err := state.Load(spec.AppStateFile)
 	if err != nil {
@@ -80,7 +87,7 @@ func reconcileLocked(spec manifest.AppSpec, resetBackoff bool) (api.ApplyRespons
 			if _, err := process.Stop(app, spec.EntrypointFile); err != nil {
 				return api.ApplyResponse{}, fmt.Errorf("stopping the previous instance of %q (pid %d): %w", spec.AppName, app.PID, err)
 			}
-			replaced = fmt.Sprintf(" (stopped the previous instance: pid %d, port %d)", app.PID, app.Port)
+			replaced = previousInstanceNote(app)
 
 			// Keep only the crash history. Any failure below is recorded
 			// on this cleared record, and the stopped process's
@@ -169,10 +176,10 @@ func reconcileLocked(spec manifest.AppSpec, resetBackoff bool) (api.ApplyRespons
 // just removed.
 //
 // pid is the process that exited. The exit is recorded only if state.json
-// still names that PID: a record that a re-apply replaced or cleared must
-// not take the old process's exit, or it shows up as a phantom crash
-// against the replacement. The result says whether the exit was recorded;
-// callers react (reconcile) only when it was.
+// still names that PID: a record that a re-apply or restart replaced or
+// cleared must not take the old process's exit, or it shows up as a
+// phantom crash against the replacement. The result says whether the exit
+// was recorded; callers react (reconcile) only when it was.
 func recordExit(spec manifest.AppSpec, pid int, exit process.Exit) bool {
 	if !appRegistry.Managed(spec.AppStateFile) {
 		return false

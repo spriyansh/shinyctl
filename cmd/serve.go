@@ -88,6 +88,7 @@ var serveCmd = &cobra.Command{
 		mux.HandleFunc("/status", handleStatus)
 		mux.HandleFunc("/stop", handleStop)
 		mux.HandleFunc("/delete", handleDelete)
+		mux.HandleFunc("/restart", handleRestart)
 
 		server := &http.Server{Handler: mux}
 

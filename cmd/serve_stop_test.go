@@ -119,6 +119,45 @@ func TestStopAndDelete_LeaveReusedPIDAlone(t *testing.T) {
 	}
 }
 
+// TestStopAndDelete_DeadPIDGetsNoNote: the recorded app has exited and
+// nothing took over its PID. That is the ordinary state of a crashed app,
+// not something to warn about, so the reply carries no "not signaled" note.
+func TestStopAndDelete_DeadPIDGetsNoNote(t *testing.T) {
+	for _, h := range stopHandlers {
+		t.Run(h.name, func(t *testing.T) {
+			useFakeRscript(t)
+			spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
+			t.Cleanup(func() { appRegistry.Forget(spec.AppStateFile) })
+
+			a, done, err := process.Start(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			killIfAlive(spec, a)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("fake Rscript did not exit after SIGKILL")
+			}
+
+			if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{a}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := appRegistry.Remember(spec); err != nil {
+				t.Fatal(err)
+			}
+
+			rec := postJSON(t, h.handler, spec)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if msg := responseMessage(t, rec); strings.Contains(msg, "not signaled") {
+				t.Errorf("message %q reports a PID that is simply gone", msg)
+			}
+		})
+	}
+}
+
 // TestStopAndDelete_StopOurProcess guards that the identity check doesn't
 // block legitimate stops, for apps this daemon started and for adopted ones.
 func TestStopAndDelete_StopOurProcess(t *testing.T) {

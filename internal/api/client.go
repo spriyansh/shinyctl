@@ -28,8 +28,8 @@ func unixClient(socketPath string) *http.Client {
 }
 
 // postSpec POSTs spec as JSON to path over the Unix socket at socketPath
-// and decodes an ApplyResponse back — the shape shared by /apply, /stop
-// and /delete, which only differ in which endpoint they hit.
+// and decodes an ApplyResponse back — the shape shared by /apply, /stop,
+// /delete and /restart, which only differ in which endpoint they hit.
 func postSpec(socketPath, path string, spec manifest.AppSpec) (ApplyResponse, error) {
 	body, err := json.Marshal(spec)
 	if err != nil {
@@ -72,6 +72,13 @@ func Stop(socketPath string, spec manifest.AppSpec) (ApplyResponse, error) {
 // its state file.
 func Delete(socketPath string, spec manifest.AppSpec) (ApplyResponse, error) {
 	return postSpec(socketPath, "/delete", spec)
+}
+
+// Restart sends spec to shinyctl-api's /restart endpoint over the Unix
+// socket at socketPath, asking it to stop the app's process if it is
+// running and start it again from spec.
+func Restart(socketPath string, spec manifest.AppSpec) (ApplyResponse, error) {
+	return postSpec(socketPath, "/restart", spec)
 }
 
 // Status fetches shinyctl-api's /status endpoint over the Unix socket at

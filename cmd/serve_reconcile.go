@@ -98,7 +98,8 @@ func rotateAPILog() {
 // this same function, not reconcileLocked directly) immediately restarting
 // it — stopped and forgotten apps are both unmanaged. handleApply calls
 // reconcileSpec directly, bypassing this check entirely — applying always
-// means "ensure this is running now."
+// means "ensure this is running now." handleRestart likewise calls
+// reconcileLocked directly, under its own hold of the state lock.
 //
 // It takes the state key, not a spec, and reads the spec under the state
 // lock: a spec captured earlier (by an exit-watcher, or by the ticker's

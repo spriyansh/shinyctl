@@ -3,8 +3,8 @@ package reconcile
 import "github.com/spriyansh/shinyctl/internal/manifest"
 
 // ActionType names what shinyctl-api did, or decided to do, for an app.
-// Decide only ever produces None, Start and Backoff; Stop and Delete are
-// reported by their handlers, which don't go through Decide.
+// Decide only ever produces None, Start and Backoff; Stop, Delete and Restart
+// are reported by their handlers, which don't go through Decide.
 type ActionType string
 
 const (
@@ -12,6 +12,7 @@ const (
 	ActionStart   ActionType = "start"   // launch the process
 	ActionStop    ActionType = "stop"    // stopped and parked until the next apply
 	ActionDelete  ActionType = "delete"  // stopped and forgotten: gone from status, state file removed
+	ActionRestart ActionType = "restart" // stopped if it was running, then started again from the current manifest
 	ActionBackoff ActionType = "backoff" // crash-looping; waiting out a delay before the next restart attempt
 )
 

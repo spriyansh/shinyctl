@@ -55,7 +55,7 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Before Forget: identityFallbacks reads the applied spec.
-	note, err := stopRecorded("delete", spec, currentState.App())
+	_, note, err := stopRecorded("delete", spec, currentState.App())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
