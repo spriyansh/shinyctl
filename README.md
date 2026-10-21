@@ -47,7 +47,9 @@ shinyctl apply -f examples/hello/shinyctl.yaml
 
 Open http://127.0.0.1:8765 and click **Crash this app**. `shinyctl status`
 shows `crash-looping` for a couple of seconds, then a new process. Reload
-the page to see the new process ID. Remove the app with
+the page to see the new process ID.
+`shinyctl logs -f examples/hello/shinyctl.yaml` shows what the app printed,
+including the crash. Remove the app with
 `shinyctl delete -f examples/hello/shinyctl.yaml`.
 
 ## Commands
@@ -59,6 +61,7 @@ the page to see the new process ID. Remove the app with
 | `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. |
 | `stop -f <file>` | Sends SIGTERM to the app's own process, waits 10 seconds, then SIGKILL. The app stays down until the next `apply` or `restart`. |
 | `restart -f <file>` | Stops the app's own process and starts it again from the manifest as it is now, so new code and manifest edits take effect. Also starts a stopped or crash-looping app right away. |
+| `logs -f <file>` | Prints the last 100 lines of the app's log. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
 | `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
 | `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
 | `version` | Prints the version. Source builds print `dev`. |
