@@ -5,17 +5,29 @@
 Everything goes through the Makefile:
 
 ```sh
-make format   # go mod tidy + go fmt ./...
-make vet      # go vet ./...
-make test     # go test ./...
-make install  # vet, then go install .
-make run      # format, install, then apply the example app in examples/hello
+make format        # go mod tidy + go fmt ./...
+make check-format  # fail if any file needs gofmt
+make vet           # go vet ./...
+make test          # go test ./...
+make test-race     # go test -race -shuffle=on ./...
+make install       # vet, then go install .
+make run           # format, install, then apply the example app in examples/hello
 ```
 
-Run `go test -race ./...` too before sending anything that touches
-`cmd/` or `internal/state` — the reconcile loop, the exit-watchers and the
-HTTP handlers all run concurrently, and the race detector is what catches
-an unsynchronized Load → Save.
+Run `make test-race` too before sending anything that touches `cmd/` or
+`internal/state` — the reconcile loop, the exit-watchers and the HTTP
+handlers all run concurrently, and the race detector is what catches an
+unsynchronized Load → Save. CI (`.github/workflows/ci.yml`) runs
+`check-format`, `vet` and `test-race` on Linux and macOS for pushes to
+`main` and pull requests.
+
+To run the suite on Linux from a Mac, start [colima](https://github.com/abiosoft/colima)
+(`colima start`) and run it in a container, with the repo mounted read-only:
+
+```sh
+docker run --rm --init -v "$PWD":/src:ro -w /src -e GOFLAGS=-buildvcs=false \
+  golang:1.26.5 make check-format vet test-race
+```
 
 Every behavior change comes with a test. Its commit message says what
 changed for users and why.

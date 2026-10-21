@@ -1,10 +1,16 @@
-.PHONY: vet test install show-busy-ports tidy format run
+.PHONY: vet test test-race check-format install show-busy-ports tidy format run
 
 vet:
 	go vet ./...
 
 test:
 	go test ./...
+
+test-race:
+	go test -race -shuffle=on ./...
+
+check-format:
+	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "needs gofmt (run make format):"; echo "$$out"; exit 1; fi
 
 install: vet
 	go install .
