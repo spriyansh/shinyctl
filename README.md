@@ -42,14 +42,13 @@ my-app  8080  61429  alive   ready  -        2026-10-11T20:20:21+02:00
 ## Try the example
 
 ```sh
-cd examples/hello
-shinyctl apply -f shinyctl.yaml
+shinyctl apply -f examples/hello/shinyctl.yaml
 ```
 
 Open http://127.0.0.1:8765 and click **Crash this app**. `shinyctl status`
 shows `crash-looping` for a couple of seconds, then a new process. Reload
 the page to see the new process ID. Remove the app with
-`shinyctl delete -f shinyctl.yaml`.
+`shinyctl delete -f examples/hello/shinyctl.yaml`.
 
 ## Commands
 
@@ -84,9 +83,8 @@ env:                            # added on top of shinyctl-api's own environment
 replicas: 1                     # optional; 1 is the only accepted value
 ```
 
-- **Relative paths resolve from your current directory**, not from the
-  manifest's location. Run `shinyctl` from the same directory every time,
-  or use absolute paths.
+- **Relative paths resolve from the manifest's folder**, so commands work
+  from any directory. `~` is not expanded.
 - **`host` must be an IP address**, not a hostname.
 - **`shinyctl-api` inherits the environment of the shell that started
   it.** Apps get that environment plus `env`.

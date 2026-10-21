@@ -17,36 +17,180 @@ func writeManifest(t *testing.T, dir, body string) string {
 	return path
 }
 
-func TestLoad_ResolvesRelativePaths(t *testing.T) {
+func TestLoad_ResolvesRelativePathsFromManifestDir(t *testing.T) {
 	dir := t.TempDir()
-	path := writeManifest(t, dir, `
+	other := t.TempDir()
+
+	cases := []struct {
+		name           string
+		body           string
+		wantEntrypoint string
+		wantStateFile  string
+		wantWorkingDir string
+	}{
+		{
+			name: "dot-slash paths",
+			body: `
+entrypoint-file: ./app.R
+app-state-file: ./state.json
+`,
+			wantEntrypoint: filepath.Join(dir, "app.R"),
+			wantStateFile:  filepath.Join(dir, "state.json"),
+			wantWorkingDir: dir,
+		},
+		{
+			name: "explicit working-dir",
+			body: `
+entrypoint-file: ./app.R
+app-state-file: ./state.json
+working-dir: ./somewhere/else
+`,
+			wantEntrypoint: filepath.Join(dir, "app.R"),
+			wantStateFile:  filepath.Join(dir, "state.json"),
+			wantWorkingDir: filepath.Join(dir, "somewhere/else"),
+		},
+		{
+			name: "parent directory",
+			body: `
+entrypoint-file: ../shared/app.R
+app-state-file: ./state.json
+`,
+			wantEntrypoint: filepath.Join(filepath.Dir(dir), "shared/app.R"),
+			wantStateFile:  filepath.Join(dir, "state.json"),
+			wantWorkingDir: filepath.Join(filepath.Dir(dir), "shared"),
+		},
+		{
+			name: "tilde is not expanded",
+			body: `
+entrypoint-file: ~/app.R
+app-state-file: ./state.json
+`,
+			wantEntrypoint: filepath.Join(dir, "~/app.R"),
+			wantStateFile:  filepath.Join(dir, "state.json"),
+			wantWorkingDir: filepath.Join(dir, "~"),
+		},
+		{
+			name:           "absolute paths are only cleaned",
+			body:           "\nentrypoint-file: " + other + "/x/../app.R\napp-state-file: " + other + "/state.json\nworking-dir: " + other + "/w/../wd\n",
+			wantEntrypoint: filepath.Join(other, "app.R"),
+			wantStateFile:  filepath.Join(other, "state.json"),
+			wantWorkingDir: filepath.Join(other, "wd"),
+		},
+		{
+			name:           "missing fields stay empty",
+			body:           "",
+			wantEntrypoint: "",
+			wantStateFile:  "",
+			wantWorkingDir: ".",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeManifest(t, dir, "app-group: g\napp-name: n\nport: 8881\n"+c.body)
+
+			spec, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if spec.EntrypointFile != c.wantEntrypoint {
+				t.Errorf("EntrypointFile = %q, want %q", spec.EntrypointFile, c.wantEntrypoint)
+			}
+			if spec.AppStateFile != c.wantStateFile {
+				t.Errorf("AppStateFile = %q, want %q", spec.AppStateFile, c.wantStateFile)
+			}
+			if spec.WorkingDir != c.wantWorkingDir {
+				t.Errorf("WorkingDir = %q, want %q", spec.WorkingDir, c.wantWorkingDir)
+			}
+		})
+	}
+}
+
+func TestLoad_RelativeManifestPath(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, sub, `
 app-group: g
 app-name: n
 entrypoint-file: ./app.R
 port: 8881
-replicas: 1
 app-state-file: ./state.json
 `)
 
-	wd, err := os.Getwd()
+	t.Chdir(root)
+
+	spec, err := Load(filepath.Join("sub", "manifest.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	spec, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
+	if want := filepath.Join(root, "sub", "app.R"); spec.EntrypointFile != want {
+		t.Errorf("EntrypointFile = %q, want %q", spec.EntrypointFile, want)
 	}
+	if want := filepath.Join(root, "sub", "state.json"); spec.AppStateFile != want {
+		t.Errorf("AppStateFile = %q, want %q", spec.AppStateFile, want)
+	}
+}
 
-	wantEntrypoint := filepath.Join(wd, "app.R")
-	if spec.EntrypointFile != wantEntrypoint {
-		t.Errorf("EntrypointFile = %q, want %q", spec.EntrypointFile, wantEntrypoint)
-	}
+// A manifest reached through a symlink resolves from where the link is, not
+// from the file it points at: otherwise every link to one shared template
+// would collapse into the template's folder and share one app-state-file,
+// which is one app identity.
+func TestLoad_SymlinkedManifestResolvesFromLink(t *testing.T) {
+	body := `
+app-group: g
+app-name: n
+entrypoint-file: ./app.R
+port: 8881
+app-state-file: ./state.json
+`
 
-	wantStateFile := filepath.Join(wd, "state.json")
-	if spec.AppStateFile != wantStateFile {
-		t.Errorf("AppStateFile = %q, want %q", spec.AppStateFile, wantStateFile)
-	}
+	t.Run("file link", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real")
+		if err := os.Mkdir(real, 0755); err != nil {
+			t.Fatal(err)
+		}
+		target := writeManifest(t, real, body)
+		link := filepath.Join(dir, "app.yaml")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+
+		spec, err := Load(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if want := filepath.Join(dir, "app.R"); spec.EntrypointFile != want {
+			t.Errorf("EntrypointFile = %q, want %q", spec.EntrypointFile, want)
+		}
+	})
+
+	t.Run("directory link", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real")
+		if err := os.Mkdir(real, 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeManifest(t, real, body)
+		if err := os.Symlink(real, filepath.Join(dir, "linked")); err != nil {
+			t.Fatal(err)
+		}
+
+		spec, err := Load(filepath.Join(dir, "linked", "manifest.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if want := filepath.Join(dir, "linked", "app.R"); spec.EntrypointFile != want {
+			t.Errorf("EntrypointFile = %q, want %q", spec.EntrypointFile, want)
+		}
+	})
 }
 
 func TestLoad_DefaultsWorkingDirToEntrypointDir(t *testing.T) {
@@ -65,37 +209,9 @@ app-state-file: ./state.json
 		t.Fatal(err)
 	}
 
-	wantDir := filepath.Dir(spec.EntrypointFile)
+	wantDir := filepath.Join(dir, "nested")
 	if spec.WorkingDir != wantDir {
 		t.Errorf("WorkingDir = %q, want %q", spec.WorkingDir, wantDir)
-	}
-}
-
-func TestLoad_ExplicitWorkingDirResolvedAbsolute(t *testing.T) {
-	dir := t.TempDir()
-	path := writeManifest(t, dir, `
-app-group: g
-app-name: n
-entrypoint-file: ./app.R
-port: 8881
-replicas: 1
-app-state-file: ./state.json
-working-dir: ./somewhere/else
-`)
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	spec, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := filepath.Join(wd, "somewhere/else")
-	if spec.WorkingDir != want {
-		t.Errorf("WorkingDir = %q, want %q", spec.WorkingDir, want)
 	}
 }
 

@@ -19,4 +19,4 @@ format: tidy
 	go fmt ./...
 
 run: format install
-	cd examples/hello && shinyctl apply -f shinyctl.yaml
+	shinyctl apply -f examples/hello/shinyctl.yaml

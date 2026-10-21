@@ -1,8 +1,7 @@
-# Run shinyctl from this directory. Relative paths resolve from where you
-# run it, not from this file's location.
+# A minimal example. Relative paths resolve from this file's directory, so
+# shinyctl can be run from anywhere, e.g. from the repository root:
 #
-#   cd examples/hello
-#   shinyctl apply -f shinyctl.yaml
+#   shinyctl apply -f examples/hello/shinyctl.yaml
 #
 # Then open http://127.0.0.1:8765
 

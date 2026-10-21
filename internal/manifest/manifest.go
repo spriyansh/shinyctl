@@ -15,14 +15,19 @@ import (
 // on whatever machine runs `go test`.
 var lookPath = exec.LookPath
 
-// Load reads and parses path, then resolves every filesystem path in the
-// result to absolute. This has to happen here, in the CLI process, while
-// "relative to the current directory" still means the directory the user
-// actually ran shinyctl from — spec.EntrypointFile and spec.AppStateFile
-// cross the wire to shinyctl-api next, a long-running process whose own
-// working directory is whatever it happened to inherit the first time it
-// was lazily launched, not the directory this manifest was written
-// relative to.
+// Load reads and parses path, then makes every filesystem path in the
+// result absolute. Relative paths resolve from the manifest's own
+// directory, not from the current one, so a manifest names the same files
+// (and the same app: app-state-file is its identity) whichever directory
+// shinyctl is run from. The directory is path as given, made absolute;
+// symlinks are not resolved, so a manifest reached through a link resolves
+// from where the link is. A leading ~ is not expanded.
+//
+// This has to happen here, in the CLI process: spec.EntrypointFile and
+// spec.AppStateFile cross the wire to shinyctl-api next, a long-running
+// process whose own working directory is whatever it happened to inherit
+// the first time it was lazily launched, and has nothing to do with where
+// the manifest lives.
 func Load(path string) (AppSpec, error) {
 	var spec AppSpec
 
@@ -35,21 +40,14 @@ func Load(path string) (AppSpec, error) {
 		return spec, fmt.Errorf("parse manifest: %w", err)
 	}
 
-	if spec.EntrypointFile != "" {
-		abs, err := filepath.Abs(spec.EntrypointFile)
-		if err != nil {
-			return spec, fmt.Errorf("resolving entrypoint-file: %w", err)
-		}
-		spec.EntrypointFile = abs
+	manifestPath, err := filepath.Abs(path)
+	if err != nil {
+		return spec, fmt.Errorf("resolving manifest path: %w", err)
 	}
+	dir := filepath.Dir(manifestPath)
 
-	if spec.AppStateFile != "" {
-		abs, err := filepath.Abs(spec.AppStateFile)
-		if err != nil {
-			return spec, fmt.Errorf("resolving app-state-file: %w", err)
-		}
-		spec.AppStateFile = abs
-	}
+	spec.EntrypointFile = resolvePath(dir, spec.EntrypointFile)
+	spec.AppStateFile = resolvePath(dir, spec.AppStateFile)
 
 	// Default working-dir to the entrypoint's own directory — R apps
 	// routinely load relative paths (data files, config) assuming they're
@@ -57,14 +55,24 @@ func Load(path string) (AppSpec, error) {
 	if spec.WorkingDir == "" {
 		spec.WorkingDir = filepath.Dir(spec.EntrypointFile)
 	} else {
-		abs, err := filepath.Abs(spec.WorkingDir)
-		if err != nil {
-			return spec, fmt.Errorf("resolving working-dir: %w", err)
-		}
-		spec.WorkingDir = abs
+		spec.WorkingDir = resolvePath(dir, spec.WorkingDir)
 	}
 
 	return spec, nil
+}
+
+// resolvePath makes p absolute against dir, the manifest's directory. An
+// absolute p is only cleaned, as filepath.Abs did; an empty one stays empty
+// so a missing field is still reported as missing.
+func resolvePath(dir, p string) string {
+	switch {
+	case p == "":
+		return ""
+	case filepath.IsAbs(p):
+		return filepath.Clean(p)
+	default:
+		return filepath.Join(dir, p)
+	}
 }
 
 // Validate checks spec for everything that can be caught before a process
