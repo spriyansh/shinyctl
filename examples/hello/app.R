@@ -2,7 +2,7 @@
 #
 # The page shows which R process is serving it. "Crash this app" makes that
 # process exit with an error, and shinyctl starts a new one within a few
-# seconds. Reload the page and the process ID has changed.
+# seconds. The page reconnects to it by itself and shows the new process ID.
 
 library(shiny)
 
@@ -18,6 +18,11 @@ ui <- fluidPage(
 )
 
 server <- function(input, output, session) {
+  # Lets an open page reconnect after the app restarts, instead of greying
+  # out. "force" because TRUE only works behind Shiny Server or Posit
+  # Connect; "force" also works under plain shiny::runApp.
+  session$allowReconnect("force")
+
   # GREETING comes from the manifest's env field.
   output$greeting <- renderText(Sys.getenv("GREETING", "Hello"))
 
@@ -26,10 +31,12 @@ server <- function(input, output, session) {
     Sys.getpid(), format(started_at, "%H:%M:%S")
   ))
 
+  # ignoreInit because a reconnecting page sends its inputs again, this
+  # button's click count included, which would crash the new process too.
   observeEvent(input$crash, {
     message("Crash button clicked, exiting with status 1")
     quit(save = "no", status = 1)
-  })
+  }, ignoreInit = TRUE)
 }
 
 shinyApp(ui, server)
