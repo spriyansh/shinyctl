@@ -21,4 +21,8 @@ const (
 type Action struct {
 	Type ActionType
 	Spec manifest.AppSpec
+
+	// Changed is set on a Start that replaces a live process: the manifest
+	// fields the process was started from no longer match, in fieldOrder.
+	Changed []string
 }

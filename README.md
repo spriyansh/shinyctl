@@ -57,14 +57,20 @@ including the crash. Remove the app with
 | Command | What it does |
 |---|---|
 | `init` | Writes a starter manifest. `-o` sets the path, `--force` overwrites. |
-| `apply -f <file>` | Starts the app if it isn't running. Starts `shinyctl-api` on first use. Also resumes a stopped app. |
+| `apply -f <file>` | Starts the app, or restarts it if the manifest changed. Starts `shinyctl-api` on first use. Also resumes a stopped app. |
 | `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. |
 | `stop -f <file>` | Sends SIGTERM to the app's own process, waits 10 seconds, then SIGKILL. The app stays down until the next `apply` or `restart`. |
-| `restart -f <file>` | Stops the app's own process and starts it again from the manifest as it is now, so new code and manifest edits take effect. Also starts a stopped or crash-looping app right away. |
+| `restart -f <file>` | Stops the app's own process and starts it again from the manifest as it is now, so new code in `app.R` and other app files takes effect. Also starts a stopped or crash-looping app right away. |
 | `logs -f <file>` | Prints the last 100 lines of the app's log. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
 | `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
 | `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
 | `version` | Prints the version. Source builds print `dev`. |
+
+`apply` restarts a running app when a manifest field that shapes its
+process changed: `app-group`, `app-name`, `entrypoint-file`, `port`, `host`,
+`working-dir` or `env`. A changed `restart-policy` takes effect without a
+restart. `apply` never looks at `app.R` or other app files: run `restart`
+for code changes.
 
 `stop`, `restart`, `delete` and a re-apply signal a process only if its
 command line contains the app's `entrypoint-file`. If the recorded process
@@ -120,13 +126,9 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
 
 ## Limitations
 
-- **Re-applying only acts on `port` and `app-name` changes.** Changing
-  either stops the running copy and starts a new one from the edited
-  manifest, so other edits made at the same time take effect too. For
-  anything else, including new code in `app.R`, run `restart`. Both stop
-  the old copy before checking the port, so a taken port leaves the app
-  down. Changing `app-state-file` makes it a different app, so `delete`
-  the old one with its old manifest first.
+- **A changed port is checked only after the old copy stops**, so a taken
+  port leaves the app down. Changing `app-state-file` makes it a different
+  app, so `delete` the old one with its old manifest first.
 - **Nothing restarts `shinyctl-api` after a reboot.** Apps keep running if
   `shinyctl-api` dies, but nothing watches them. Run `shinyctl serve -d`
   or any `apply` to bring it back. It resumes every app it was managing.

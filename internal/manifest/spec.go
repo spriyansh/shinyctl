@@ -1,5 +1,11 @@
 package manifest
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+)
+
 // RestartPolicy controls whether the reconcile loop restarts an app after
 // it exits on its own (a deliberate `stop` always bypasses this — it's
 // about unexpected exits only).
@@ -48,4 +54,41 @@ func (s AppSpec) EffectiveHost() string {
 		return DefaultHost
 	}
 	return s.Host
+}
+
+// StartFields returns the manifest settings that shape the process
+// process.Start launches and that the process record does not already
+// hold in typed fields (app-name, port and entrypoint-file are compared
+// through AppState.Name, Port and EntrypointFile). Start records the map,
+// and Decide compares it with the current manifest to see whether a
+// running app was started from something else.
+//
+// env is stored as a digest of the whole map rather than the map itself:
+// state.json usually sits in the app's folder, where it may be backed up
+// or committed, and env holds secrets. The cost is that a change can be
+// reported as "env" but not as which variable.
+//
+// A key missing from a record means "not known", never "changed": records
+// written before a key existed must not restart a running app on upgrade.
+// So add keys freely, but never change how an existing key is encoded,
+// or every running app would look changed.
+func (s AppSpec) StartFields() map[string]string {
+	return map[string]string{
+		"app-group":   s.AppGroup,
+		"host":        s.EffectiveHost(),
+		"working-dir": s.WorkingDir,
+		"env":         envDigest(s.Env),
+	}
+}
+
+// envDigest identifies env by content. json.Marshal sorts map keys, so the
+// same variables always give the same digest, and a nil map is the same
+// as an empty one.
+func envDigest(env map[string]string) string {
+	if env == nil {
+		env = map[string]string{}
+	}
+	data, _ := json.Marshal(env) // a map[string]string always marshals
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

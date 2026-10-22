@@ -1,6 +1,8 @@
 package reconcile
 
 import (
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
@@ -77,8 +79,17 @@ func backoffDelay(crashCount int) time.Duration {
 func Decide(spec manifest.AppSpec, current state.State, alive bool, now time.Time) Action {
 	app := current.App()
 
-	if app.Name == spec.AppName && app.Port == spec.Port && alive {
-		return Action{Type: ActionNone} // Spec left as zero value, unused
+	// A live process is judged only on whether it still matches the
+	// manifest. Restart policy and backoff describe what happens after an
+	// exit, so they don't apply to a process that is running: one started
+	// from an old manifest is replaced even if its predecessor crashed a
+	// moment ago, or the policy says never.
+	if alive {
+		changed := changedFields(app, spec)
+		if len(changed) == 0 {
+			return Action{Type: ActionNone} // Spec left as zero value, unused
+		}
+		return Action{Type: ActionStart, Spec: spec, Changed: changed}
 	}
 
 	// Gate the policy on "has this app ever exited," not on CrashCount:
@@ -101,4 +112,68 @@ func Decide(spec manifest.AppSpec, current state.State, alive bool, now time.Tim
 	}
 
 	return Action{Type: ActionStart, Spec: spec} // "start, and here's what to start"
+}
+
+// fieldOrder is the order manifest fields are listed in replies: the order
+// of the README's manifest example.
+var fieldOrder = []string{"app-group", "app-name", "entrypoint-file", "port", "host", "restart-policy", "working-dir", "env"}
+
+// OrderFields sorts manifest field names into fieldOrder. A name this
+// version doesn't know goes last, alphabetically.
+func OrderFields(fields []string) []string {
+	rank := func(f string) int {
+		if i := slices.Index(fieldOrder, f); i >= 0 {
+			return i
+		}
+		return len(fieldOrder)
+	}
+	out := slices.Clone(fields)
+	slices.SortFunc(out, func(a, b string) int {
+		if ra, rb := rank(a), rank(b); ra != rb {
+			return ra - rb
+		}
+		return strings.Compare(a, b)
+	})
+	return out
+}
+
+// changedFields lists the manifest fields that the process recorded in app
+// was not started from. Name and port are always compared. The entrypoint
+// is compared only for a record that has started-from: older daemons
+// recorded the entrypoint but answered "Nothing to change" to an edit of
+// it, so such a record may differ from the registry's spec without anyone
+// having asked for a restart. Each of spec.StartFields() is compared only
+// when the record has that key. A record that doesn't know a field (it
+// predates it) counts as matching, so upgrading shinyctl never restarts a
+// running app; its next start records everything. Only spec's keys are
+// looked at, so keys a newer version wrote are ignored too.
+func changedFields(app state.AppState, spec manifest.AppSpec) []string {
+	var changed []string
+	if app.Name != spec.AppName {
+		changed = append(changed, "app-name")
+	}
+	if app.Port != spec.Port {
+		changed = append(changed, "port")
+	}
+	if app.StartedFrom != nil && app.EntrypointFile != "" && app.EntrypointFile != spec.EntrypointFile {
+		changed = append(changed, "entrypoint-file")
+	}
+	for key, want := range spec.StartFields() {
+		if recorded, ok := app.StartedFrom[key]; ok && recorded != want {
+			changed = append(changed, key)
+		}
+	}
+	return OrderFields(changed)
+}
+
+// SettingsChanged lists the manifest fields that changed between the
+// previously applied spec and spec and take effect without restarting the
+// process. Today that is restart-policy, which Decide reads from the
+// registry on every pass. (replicas has one legal value, so it can't
+// meaningfully change.)
+func SettingsChanged(previous, spec manifest.AppSpec) []string {
+	if previous.RestartPolicy.Effective() != spec.RestartPolicy.Effective() {
+		return []string{"restart-policy"}
+	}
+	return nil
 }

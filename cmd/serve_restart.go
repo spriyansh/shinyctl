@@ -14,10 +14,10 @@ import (
 
 // handleRestart stops the app's process, if it is running and still this
 // app's, and starts it again from spec. It is the way to make a running
-// app pick up new code or manifest edits, which a re-apply doesn't do: the
-// reconcile only acts on a port or name change. It also starts an app that
-// is stopped, never applied, or crash-looping, right away and with a clean
-// crash history, the same as an explicit apply.
+// app pick up new code, which a re-apply never notices: apply compares
+// only the manifest, and restarts an app whose manifest changed. It also
+// starts an app that is stopped, never applied, or crash-looping, right
+// away and with a clean crash history, the same as an explicit apply.
 //
 // The order matters; each step is here for a reason:
 //   - Validate first, so a bad manifest fails with nothing touched.
@@ -79,14 +79,14 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := reconcileLocked(spec, true)
+	resp, err := reconcileLocked(spec, true, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if signaled {
-		resp.Message += previousInstanceNote(app)
+		resp.Message += previousInstanceNote(app, nil)
 	} else {
 		resp.Message += note
 	}

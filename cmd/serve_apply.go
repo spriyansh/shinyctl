@@ -8,6 +8,8 @@ import (
 	"net/http"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
+	"github.com/spriyansh/shinyctl/internal/reconcile"
+	"github.com/spriyansh/shinyctl/internal/state"
 )
 
 // handleApply is the server side of `shinyctl apply`: the CLI only loads,
@@ -16,7 +18,14 @@ import (
 // state.json.
 //
 // It also records spec in appRegistry, so the background reconcile loop
-// has something to check on its own even when no client is asking.
+// has something to check on its own even when no client is asking. The
+// loop compares a running process with the registry's spec, so a tick
+// between recording the spec and reconciling it could do the replacement
+// itself, and this apply would answer "Nothing to change" to an edit. The
+// state lock is therefore taken before the registry is updated and held
+// through the reconcile, the same cycle a tick runs under. The registry's
+// own mutex is a leaf (it never takes a state lock), so taking it inside
+// the state lock is safe.
 func handleApply(w http.ResponseWriter, r *http.Request) {
 	var spec manifest.AppSpec
 	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
@@ -29,6 +38,13 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	unlock := state.Lock(spec.AppStateFile)
+	defer unlock()
+
+	// Read before Remember overwrites it, to tell the user about changes
+	// that need no restart.
+	previous, known := appRegistry.Spec(spec.AppStateFile)
+
 	// A registry we can't persist is an app the next shinyctl-api won't
 	// know about — fail the apply rather than start something we'd forget.
 	if err := appRegistry.Remember(spec); err != nil {
@@ -36,7 +52,12 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := reconcileSpec(spec, true)
+	var settings []string
+	if known {
+		settings = reconcile.SettingsChanged(previous, spec)
+	}
+
+	resp, err := reconcileLocked(spec, true, settings)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

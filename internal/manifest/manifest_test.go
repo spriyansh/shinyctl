@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -301,4 +302,69 @@ env:
 	if spec.Env["R_LIBS_USER"] != "/home/me/Rlibs" || spec.Env["API_KEY"] != "secret" {
 		t.Errorf("Env = %v, missing expected entries", spec.Env)
 	}
+}
+
+func TestStartFields(t *testing.T) {
+	base := AppSpec{
+		AppGroup:   "g",
+		AppName:    "n",
+		Host:       "127.0.0.1",
+		WorkingDir: "/srv/app",
+		Env:        map[string]string{"API_KEY": "s3cret", "R_LIBS_USER": "/home/me/Rlibs"},
+	}
+
+	t.Run("exactly the fields the record does not already hold", func(t *testing.T) {
+		got := base.StartFields()
+		for _, key := range []string{"app-group", "host", "working-dir", "env"} {
+			if _, ok := got[key]; !ok {
+				t.Errorf("StartFields() has no %q", key)
+			}
+		}
+		if len(got) != 4 {
+			t.Errorf("StartFields() = %v, want exactly 4 keys", got)
+		}
+	})
+
+	t.Run("an omitted host is the default host", func(t *testing.T) {
+		a, b := base, base
+		a.Host = ""
+		b.Host = DefaultHost
+		if a.StartFields()["host"] != b.StartFields()["host"] {
+			t.Errorf("host %q and %q differ, want the same", a.StartFields()["host"], b.StartFields()["host"])
+		}
+		if base.StartFields()["host"] == b.StartFields()["host"] {
+			t.Error("127.0.0.1 and 0.0.0.0 are recorded as the same host")
+		}
+	})
+
+	t.Run("a nil env is an empty env", func(t *testing.T) {
+		a, b := base, base
+		a.Env = nil
+		b.Env = map[string]string{}
+		if a.StartFields()["env"] != b.StartFields()["env"] {
+			t.Error("nil and empty env differ")
+		}
+	})
+
+	t.Run("env is compared by content", func(t *testing.T) {
+		reordered := base
+		reordered.Env = map[string]string{"R_LIBS_USER": "/home/me/Rlibs", "API_KEY": "s3cret"}
+		if reordered.StartFields()["env"] != base.StartFields()["env"] {
+			t.Error("the same variables in another order differ")
+		}
+
+		changed := base
+		changed.Env = map[string]string{"API_KEY": "other", "R_LIBS_USER": "/home/me/Rlibs"}
+		if changed.StartFields()["env"] == base.StartFields()["env"] {
+			t.Error("a changed value left the digest unchanged")
+		}
+	})
+
+	t.Run("env values never appear in the record", func(t *testing.T) {
+		for key, value := range base.StartFields() {
+			if strings.Contains(value, "s3cret") || strings.Contains(value, "Rlibs") {
+				t.Errorf("field %q = %q contains an env value", key, value)
+			}
+		}
+	})
 }

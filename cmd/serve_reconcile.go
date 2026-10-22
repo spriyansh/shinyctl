@@ -24,9 +24,9 @@ var appRegistry = registry.New()
 
 const reconcileInterval = 5 * time.Second
 
-// runReconcileLoop re-runs reconcileSpec for every remembered app on a
-// fixed tick, until ctx is cancelled. This is what makes a killed app
-// come back on its own, instead of only on the next /apply request.
+// runReconcileLoop reconciles every remembered app on a fixed tick, until
+// ctx is cancelled. This is what makes a killed app come back on its own,
+// instead of only on the next /apply request.
 func runReconcileLoop(ctx context.Context) {
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
@@ -97,9 +97,10 @@ func rotateAPILog() {
 // process without the already-running exit-watcher goroutine (which calls
 // this same function, not reconcileLocked directly) immediately restarting
 // it — stopped and forgotten apps are both unmanaged. handleApply calls
-// reconcileSpec directly, bypassing this check entirely — applying always
+// reconcileLocked directly, bypassing this check entirely — applying always
 // means "ensure this is running now." handleRestart likewise calls
-// reconcileLocked directly, under its own hold of the state lock.
+// reconcileLocked directly. Both do it under their own hold of the state
+// lock.
 //
 // It takes the state key, not a spec, and reads the spec under the state
 // lock: a spec captured earlier (by an exit-watcher, or by the ticker's
@@ -120,7 +121,7 @@ func triggerReconcile(stateFile string) {
 		return
 	}
 
-	resp, err := reconcileLocked(spec, false)
+	resp, err := reconcileLocked(spec, false, nil)
 	if err != nil {
 		log.Printf("reconcile: %q: %v", spec.AppName, err)
 		return

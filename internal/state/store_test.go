@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 
 func TestSaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	want := State{AppGroup: "g", Apps: []AppState{{Name: "a", PID: 42, Port: 8881, EntrypointFile: "/srv/app.R", CrashCount: 2}}}
+	want := State{AppGroup: "g", Apps: []AppState{{Name: "a", PID: 42, Port: 8881, EntrypointFile: "/srv/app.R", CrashCount: 2, StartedFrom: map[string]string{"host": "127.0.0.1", "env": "sha256:ab"}}}}
 
 	if err := Save(path, want); err != nil {
 		t.Fatal(err)
@@ -20,7 +21,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.AppGroup != want.AppGroup || len(got.Apps) != 1 || got.Apps[0] != want.Apps[0] {
+	if got.AppGroup != want.AppGroup || len(got.Apps) != 1 || !reflect.DeepEqual(got.Apps[0], want.Apps[0]) {
 		t.Errorf("Load() = %+v, want %+v", got, want)
 	}
 
@@ -190,6 +191,9 @@ func TestLoadStateWithoutEntrypointFile(t *testing.T) {
 	app := got.App()
 	if app.EntrypointFile != "" {
 		t.Errorf("EntrypointFile = %q, want empty", app.EntrypointFile)
+	}
+	if app.StartedFrom != nil {
+		t.Errorf("StartedFrom = %v, want nil", app.StartedFrom)
 	}
 	if app.Name != "a" || app.PID != 42 || app.Port != 8881 || app.CrashCount != 2 || !app.LastExitFailed {
 		t.Errorf("other fields lost: %+v", app)

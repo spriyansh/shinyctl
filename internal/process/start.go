@@ -79,5 +79,6 @@ func Start(spec manifest.AppSpec) (state.AppState, <-chan Exit, error) {
 		Port:           spec.Port,
 		EntrypointFile: spec.EntrypointFile,
 		StartedAt:      time.Now(),
+		StartedFrom:    spec.StartFields(),
 	}, done, nil
 }

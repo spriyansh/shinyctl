@@ -15,11 +15,11 @@ import (
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
-// TestReconcileSpec_StartFailureRecordsCrash guards the fix for the gap
+// TestReconcileLocked_StartFailureRecordsCrash guards the fix for the gap
 // where a process that never even started (bad entrypoint, broken
 // working-dir, missing Rscript) retried every tick forever with no
 // backoff, because only a post-start exit ever reached RecordExit.
-func TestReconcileSpec_StartFailureRecordsCrash(t *testing.T) {
+func TestReconcileLocked_StartFailureRecordsCrash(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // keep process.AppLogPath off the real ~/.shinyctl
 
 	dir := t.TempDir()
@@ -41,8 +41,11 @@ func TestReconcileSpec_StartFailureRecordsCrash(t *testing.T) {
 		WorkingDir: filepath.Join(dir, "does-not-exist"),
 	}
 
-	if _, err := reconcileSpec(spec, true); err == nil {
-		t.Fatal("reconcileSpec() returned a nil error, want the Start failure")
+	unlock := state.Lock(spec.AppStateFile)
+	_, err := reconcileLocked(spec, true, nil)
+	unlock()
+	if err == nil {
+		t.Fatal("reconcileLocked() returned a nil error, want the Start failure")
 	}
 
 	got, err := state.Load(spec.AppStateFile)

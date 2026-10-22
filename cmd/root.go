@@ -23,7 +23,7 @@ watches every applied app; it is started automatically by the first apply.
   shinyctl status                      see what's running right now
   shinyctl stop -f shinyctl.yaml       take it down and keep it down
   shinyctl delete -f shinyctl.yaml     stop it and forget it entirely
-  shinyctl restart -f shinyctl.yaml    pick up new code or manifest edits
+  shinyctl restart -f shinyctl.yaml    pick up code changes
   shinyctl logs -f shinyctl.yaml       print the app's log (--follow to keep watching)`,
 }
 

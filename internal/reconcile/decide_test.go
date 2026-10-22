@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -8,6 +9,38 @@ import (
 	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
+
+// fullSpec and the helpers below build records the way process.Start does:
+// a live app started from a spec, with everything recorded.
+var fullSpec = manifest.AppSpec{
+	AppGroup:       "g",
+	AppName:        "a",
+	EntrypointFile: "/srv/app.R",
+	Host:           "127.0.0.1",
+	Port:           8881,
+	WorkingDir:     "/srv",
+	Env:            map[string]string{"A": "1"},
+}
+
+func withSpec(s manifest.AppSpec, mutate func(*manifest.AppSpec)) manifest.AppSpec {
+	mutate(&s)
+	return s
+}
+
+// startedFrom is the record of an app started from spec after mutate was
+// applied to it (nil for none), so a test can compare it with a different
+// current spec.
+func startedFrom(spec manifest.AppSpec, mutate func(*manifest.AppSpec)) state.AppState {
+	if mutate != nil {
+		mutate(&spec)
+	}
+	return state.AppState{
+		Name:           spec.AppName,
+		Port:           spec.Port,
+		EntrypointFile: spec.EntrypointFile,
+		StartedFrom:    spec.StartFields(),
+	}
+}
 
 func TestDecide(t *testing.T) {
 	now := time.Now()
@@ -86,6 +119,49 @@ func TestDecide(t *testing.T) {
 			alive: false,
 			want:  ActionBackoff,
 		},
+		{
+			name:    "live process started from an older env is replaced",
+			spec:    fullSpec,
+			current: state.State{Apps: []state.AppState{startedFrom(fullSpec, func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "old"} })}},
+			alive:   true,
+			want:    ActionStart,
+		},
+		{
+			name: "live process with a changed name is replaced despite a recent crash",
+			spec: manifest.AppSpec{AppName: "b", Port: 8881},
+			current: state.State{Apps: []state.AppState{{
+				Name: "a", Port: 8881,
+				CrashCount: 1, LastExitAt: now.Add(-time.Second), LastExitFailed: true,
+			}}},
+			alive: true,
+			want:  ActionStart,
+		},
+		{
+			name: "live process with a changed name is replaced under restart-policy never",
+			spec: manifest.AppSpec{AppName: "b", Port: 8881, RestartPolicy: manifest.RestartNever},
+			current: state.State{Apps: []state.AppState{{
+				Name: "a", Port: 8881,
+				LastExitAt: now.Add(-time.Hour),
+			}}},
+			alive: true,
+			want:  ActionStart,
+		},
+		{
+			name: "live process from an old record is left alone despite a changed env",
+			spec: withSpec(fullSpec, func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "2"} }),
+			current: state.State{Apps: []state.AppState{{
+				Name: "a", Port: 8881, // no entrypoint, no StartedFrom
+			}}},
+			alive: true,
+			want:  ActionNone,
+		},
+		{
+			name:    "a changed restart-policy alone leaves a live process alone",
+			spec:    withSpec(fullSpec, func(s *manifest.AppSpec) { s.RestartPolicy = manifest.RestartNever }),
+			current: state.State{Apps: []state.AppState{startedFrom(fullSpec, nil)}},
+			alive:   true,
+			want:    ActionNone,
+		},
 	}
 
 	for _, c := range cases {
@@ -95,6 +171,16 @@ func TestDecide(t *testing.T) {
 				t.Errorf("got %v, want %v", got.Type, c.want)
 			}
 		})
+	}
+}
+
+func TestDecide_ReportsChangedFields(t *testing.T) {
+	spec := withSpec(fullSpec, func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "new"} })
+	current := state.State{Apps: []state.AppState{startedFrom(fullSpec, nil)}}
+
+	got := Decide(spec, current, true, time.Now())
+	if got.Type != ActionStart || !reflect.DeepEqual(got.Changed, []string{"env"}) {
+		t.Errorf("Decide() = %+v, want Start with Changed [env]", got)
 	}
 }
 
@@ -177,4 +263,109 @@ func TestRecordExit(t *testing.T) {
 			t.Errorf("CrashCount = %d, want 3", app.CrashCount)
 		}
 	})
+}
+
+func TestChangedFields(t *testing.T) {
+	record := startedFrom(fullSpec, nil)
+
+	cases := []struct {
+		name   string
+		mutate func(*manifest.AppSpec)
+		app    state.AppState
+		want   []string
+	}{
+		{"identical", func(s *manifest.AppSpec) {}, record, nil},
+		{"app-group", func(s *manifest.AppSpec) { s.AppGroup = "h" }, record, []string{"app-group"}},
+		{"app-name", func(s *manifest.AppSpec) { s.AppName = "b" }, record, []string{"app-name"}},
+		{"entrypoint-file", func(s *manifest.AppSpec) { s.EntrypointFile = "/srv/other.R" }, record, []string{"entrypoint-file"}},
+		{"port", func(s *manifest.AppSpec) { s.Port = 9999 }, record, []string{"port"}},
+		{"host", func(s *manifest.AppSpec) { s.Host = "0.0.0.0" }, record, []string{"host"}},
+		{"working-dir", func(s *manifest.AppSpec) { s.WorkingDir = "/elsewhere" }, record, []string{"working-dir"}},
+		{"env", func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "2"} }, record, []string{"env"}},
+		{"restart-policy is not a start field", func(s *manifest.AppSpec) { s.RestartPolicy = manifest.RestartNever }, record, nil},
+		{"replicas is not a start field", func(s *manifest.AppSpec) { s.Replicas = 1 }, record, nil},
+		{
+			"several, in manifest order",
+			func(s *manifest.AppSpec) {
+				s.Env = map[string]string{"A": "2"}
+				s.WorkingDir = "/elsewhere"
+				s.Host = "0.0.0.0"
+				s.Port = 9999
+				s.AppGroup = "h"
+			},
+			record,
+			[]string{"app-group", "port", "host", "working-dir", "env"},
+		},
+		{
+			"old record: only name and port are known",
+			func(s *manifest.AppSpec) {
+				s.AppGroup = "h"
+				s.Host = "0.0.0.0"
+				s.WorkingDir = "/elsewhere"
+				s.Env = map[string]string{"A": "2"}
+				s.EntrypointFile = "/srv/other.R"
+			},
+			state.AppState{Name: "a", Port: 8881},
+			nil,
+		},
+		{
+			"old record: an edited entrypoint is not a restart",
+			func(s *manifest.AppSpec) { s.EntrypointFile = "/srv/other.R" },
+			state.AppState{Name: "a", Port: 8881, EntrypointFile: "/srv/app.R"},
+			nil,
+		},
+		{"old record: a changed name is still seen", func(s *manifest.AppSpec) { s.AppName = "b" }, state.AppState{Name: "a", Port: 8881}, []string{"app-name"}},
+		{"old record: a changed port is still seen", func(s *manifest.AppSpec) { s.Port = 9999 }, state.AppState{Name: "a", Port: 8881}, []string{"port"}},
+		{
+			"partial record: an unrecorded env is unknown",
+			func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "2"} },
+			state.AppState{Name: "a", Port: 8881, StartedFrom: map[string]string{"host": "127.0.0.1"}},
+			nil,
+		},
+		{
+			"partial record: a recorded host is compared",
+			func(s *manifest.AppSpec) { s.Host = "0.0.0.0" },
+			state.AppState{Name: "a", Port: 8881, StartedFrom: map[string]string{"host": "127.0.0.1"}},
+			[]string{"host"},
+		},
+		{
+			"a key from a newer version is ignored",
+			func(s *manifest.AppSpec) {},
+			func() state.AppState {
+				a := startedFrom(fullSpec, nil)
+				a.StartedFrom["future-field"] = "x"
+				return a
+			}(),
+			nil,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := withSpec(fullSpec, c.mutate)
+			if got := changedFields(c.app, spec); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("changedFields() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestSettingsChanged(t *testing.T) {
+	cases := []struct {
+		name     string
+		from, to manifest.AppSpec
+		want     []string
+	}{
+		{"unset and always are the same", manifest.AppSpec{}, manifest.AppSpec{RestartPolicy: manifest.RestartAlways}, nil},
+		{"always to never", manifest.AppSpec{RestartPolicy: manifest.RestartAlways}, manifest.AppSpec{RestartPolicy: manifest.RestartNever}, []string{"restart-policy"}},
+		{"replicas omitted to 1", manifest.AppSpec{}, manifest.AppSpec{Replicas: 1}, nil},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SettingsChanged(c.from, c.to); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("SettingsChanged() = %v, want %v", got, c.want)
+			}
+		})
+	}
 }
