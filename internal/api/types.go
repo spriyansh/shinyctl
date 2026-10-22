@@ -29,6 +29,11 @@ type AppStatus struct {
 	Ready      bool      `json:"ready"`
 	Stopped    bool      `json:"stopped"`
 	CrashCount int       `json:"crash-count"`
+
+	// RSSBytes is the resident memory of the app's main process; zero when
+	// it isn't running or couldn't be measured. A daemon from before this
+	// field existed omits it, which reads the same.
+	RSSBytes int64 `json:"rss-bytes,omitempty"`
 }
 
 // StatusResponse is shinyctl-api's response to a GET /status request:

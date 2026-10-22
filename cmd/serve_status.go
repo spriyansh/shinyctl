@@ -17,6 +17,7 @@ import (
 // restarts, since the registry persists to ~/.shinyctl/registry.json.
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := api.StatusResponse{Apps: []api.AppStatus{}}
+	var alivePIDs []int
 
 	for _, spec := range appRegistry.All() {
 		currentState, err := state.Load(spec.AppStateFile)
@@ -34,6 +35,10 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			ready = process.IsReady(spec.EffectiveHost(), app.Port)
 		}
 
+		if alive {
+			alivePIDs = append(alivePIDs, app.PID)
+		}
+
 		resp.Apps = append(resp.Apps, api.AppStatus{
 			// Name/Host/Port come from the desired spec, not the recorded
 			// state: after a stop, state.json is cleared, so app.Name/
@@ -49,6 +54,16 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			Stopped:    appRegistry.IsStopped(spec.AppStateFile),
 			CrashCount: app.CrashCount,
 		})
+	}
+
+	// Only processes that passed IsAlive are measured, so a recorded PID
+	// that now belongs to something else never shows that process's memory.
+	// One ps call for all of them.
+	rss := process.RSS(alivePIDs)
+	for i := range resp.Apps {
+		if resp.Apps[i].Alive {
+			resp.Apps[i].RSSBytes = rss[resp.Apps[i].PID]
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

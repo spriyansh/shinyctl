@@ -35,8 +35,8 @@ shinyctl status
 ```
 
 ```
-NAME    PORT  PID    STATUS  READY  CRASHES  STARTED
-my-app  8080  61429  alive   ready  -        2026-10-11T20:20:21+02:00
+NAME    PORT  PID    STATUS  READY  MEM   CRASHES  STARTED
+my-app  8080  61429  alive   ready  142M  -        2026-10-11T20:20:21+02:00
 ```
 
 ## Try the example
@@ -109,7 +109,8 @@ replicas: 1                     # optional; 1 is the only accepted value
   resets once the app stays up for a minute.
 - `STATUS` in `status` is `alive`, `dead`, `stopped` or `crash-looping`.
   `READY` turns from `starting` to `ready` once the port accepts
-  connections.
+  connections. `MEM` is the resident memory of the app's main R process;
+  worker processes it started aren't counted.
 
 ## Files
 
