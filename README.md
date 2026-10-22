@@ -63,6 +63,7 @@ including the crash. Remove the app with
 | `restart -f <file>` | Stops the app's own process and starts it again from the manifest as it is now, so new code in `app.R` and other app files takes effect. Also starts a stopped or crash-looping app right away. |
 | `logs -f <file>` | Prints the last 100 lines of the app's log. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
 | `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
+| `startup` | Prints a systemd user unit that starts `shinyctl-api` at boot (Linux), and on stderr how to install it. |
 | `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
 | `version` | Prints the version. Source builds print `dev`. |
 
@@ -112,6 +113,29 @@ replicas: 1                     # optional; 1 is the only accepted value
   connections. `MEM` is the resident memory of the app's main R process;
   worker processes it started aren't counted.
 
+## Survive reboots (Linux)
+
+Nothing restarts `shinyctl-api` after a reboot by itself. `shinyctl startup`
+prints a systemd user unit for it, and on stderr the commands to install it:
+
+```sh
+mkdir -p ~/.config/systemd/user && mkdir -p -m 700 ~/.shinyctl
+shinyctl startup > ~/.config/systemd/user/shinyctl.service
+systemctl --user daemon-reload
+pkill -u "$USER" -f '(^|/)shinyctl serve$'
+systemctl --user enable --now shinyctl
+loginctl enable-linger "$USER"
+```
+
+- Stop a `shinyctl-api` you started by hand first (the `pkill` line). It
+  would hold the socket and make the service's copy exit. Its apps keep
+  running, and the service's `shinyctl-api` adopts them.
+- The unit uses the `PATH` of the shell you ran `startup` in, plus
+  `Rscript`'s directory. Under systemd, apps get the user manager's
+  environment, that `PATH`, and the manifest's `env`.
+- Run `startup` again after moving `shinyctl` or R.
+- On macOS, run `shinyctl serve -d` after a reboot.
+
 ## Files
 
 Everything lives under `~/.shinyctl/`:
@@ -130,9 +154,10 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
 - **A changed port is checked only after the old copy stops**, so a taken
   port leaves the app down. Changing `app-state-file` makes it a different
   app, so `delete` the old one with its old manifest first.
-- **Nothing restarts `shinyctl-api` after a reboot.** Apps keep running if
-  `shinyctl-api` dies, but nothing watches them. Run `shinyctl serve -d`
-  or any `apply` to bring it back. It resumes every app it was managing.
+- **Apps keep running if `shinyctl-api` dies, but nothing watches them.**
+  Run `shinyctl serve -d` or any `apply` to bring it back. It resumes every
+  app it was managing. On Linux, [the unit above](#survive-reboots-linux)
+  starts it at boot and restarts it whenever it dies.
 - **Logging out can kill everything on systemd servers.** Enable
   lingering with `loginctl enable-linger $USER` if your server allows it.
   `shinyctl-api` writes a warning to `api.log` when lingering is off.
