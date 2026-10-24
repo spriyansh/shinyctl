@@ -18,6 +18,9 @@ import (
 	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp/headers"
 	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	_ "github.com/caddyserver/caddy/v2/modules/filestorage"
+
+	// shinyctl's own modules: the copies table and the sticky policy.
+	_ "github.com/spriyansh/shinyctl/internal/proxy/lb"
 )
 
 // The engine's package init redirects Go's standard log into its own
