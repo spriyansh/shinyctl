@@ -4,10 +4,14 @@ Copyright © 2026 Priyansh Srivastava <priyansh@metapriyansh.com>
 package cmd
 
 import (
+	"cmp"
 	"encoding/json"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/spriyansh/shinyctl/internal/api"
+	"github.com/spriyansh/shinyctl/internal/manifest"
 	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
@@ -19,7 +23,14 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := api.StatusResponse{Apps: []api.AppStatus{}}
 	var alivePIDs []int
 
-	for _, spec := range appRegistry.All() {
+	// The registry keeps its apps in a map: a fixed order is what makes two
+	// calls to status comparable.
+	specs := appRegistry.All()
+	slices.SortFunc(specs, func(a, b manifest.AppSpec) int {
+		return cmp.Or(strings.Compare(a.AppName, b.AppName), strings.Compare(a.AppGroup, b.AppGroup), cmp.Compare(a.Port, b.Port), strings.Compare(a.AppStateFile, b.AppStateFile))
+	})
+
+	for _, spec := range specs {
 		currentState, err := state.Load(spec.AppStateFile)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

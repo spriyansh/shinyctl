@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spriyansh/shinyctl/internal/api"
@@ -134,5 +136,43 @@ func TestHandleStatus_Ready(t *testing.T) {
 	}
 	if s := status()["unsynced"]; !s.Ready {
 		t.Errorf("unsynced after the sync = %+v, want ready", s)
+	}
+}
+
+// TestHandleStatus_AppsInAFixedOrder: by name, then group, then port, however
+// many times it is asked; the registry itself keeps its apps in a map. The
+// ports are chosen so that the group decides between two apps of one name.
+func TestHandleStatus_AppsInAFixedOrder(t *testing.T) {
+	type app struct {
+		name, group string
+		port        int
+	}
+	apps := []app{{"ord-d", "x", 18000}, {"ord-b", "x", 18001}, {"ord-a", "y", 18002}, {"ord-c", "b", 18003}, {"ord-a", "x", 18004}, {"ord-c", "a", 18005}}
+	for _, a := range apps {
+		spec := newTestSpec(t, t.TempDir(), a.name, "app.R", a.port)
+		spec.AppGroup = a.group
+		if err := appRegistry.Remember(spec); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { appRegistry.Forget(spec.AppStateFile) })
+	}
+	want := []int{18004, 18002, 18001, 18005, 18003, 18000}
+
+	for round := 0; round < 25; round++ {
+		rec := httptest.NewRecorder()
+		handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+		var resp api.StatusResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		var got []int
+		for _, s := range resp.Apps {
+			if strings.HasPrefix(s.Name, "ord-") {
+				got = append(got, s.Port)
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("round %d: ports in order %v, want %v", round, got, want)
+		}
 	}
 }
