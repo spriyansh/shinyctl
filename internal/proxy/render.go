@@ -1,0 +1,345 @@
+package proxy
+
+import (
+	"bytes"
+	"encoding/json"
+	"net"
+	"path/filepath"
+	"strconv"
+	"time"
+)
+
+// Settings says where the load balancer keeps its files and how patient it
+// is with an app that is down.
+type Settings struct {
+	ConfigPath  string // loaded by the proxy at start; written after each successful load
+	AdminSocket string // the proxy's control socket
+	StorageDir  string // the engine's storage root, kept here so nothing lands in its default directories
+
+	// TryDuration is how long a request waits for an app that isn't
+	// answering before the visitor gets the restarting page. Zero means
+	// DefaultTryDuration.
+	TryDuration time.Duration
+}
+
+// SettingsFor returns the settings for a load balancer living in dir
+// (~/.shinyctl/proxy).
+func SettingsFor(dir string) Settings {
+	return Settings{
+		ConfigPath:  filepath.Join(dir, "config.json"),
+		AdminSocket: filepath.Join(dir, "admin.sock"),
+		StorageDir:  filepath.Join(dir, "data"),
+	}
+}
+
+// DefaultTryDuration is long enough to cover an R process starting up, and
+// short enough that a visitor to an app that is not coming back sees the
+// restarting page rather than a hung tab.
+const DefaultTryDuration = 15 * time.Second
+
+// App is one app as the load balancer serves it.
+type App struct {
+	Key       string   // the app's state file; also the server's name in the config
+	Name      string   // app-name, for messages
+	Group     string   // app-group, for messages
+	Host      string   // EffectiveHost
+	Port      int      // the manifest's port
+	Upstreams []string // "127.0.0.1:<internal port>" of each copy, in copy order
+}
+
+// CanonicalHost writes an IP address the way the OS and the load balancer
+// name it: "::ffff:127.0.0.1" is "127.0.0.1" and "0:0:0:0:0:0:0:1" is
+// "::1". A bind error names the canonical form, so addresses are compared
+// and printed in it. Anything that isn't an IP address is returned as is.
+func CanonicalHost(host string) string {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
+}
+
+// Addr is the address the load balancer listens on for a, in canonical form.
+func (a App) Addr() string {
+	return net.JoinHostPort(CanonicalHost(a.Host), strconv.Itoa(a.Port))
+}
+
+// family names the address family a listens in. It is "tcp4" or "tcp6",
+// never plain "tcp": a plain listen on 0.0.0.0 binds dual-stack in Go,
+// which would expose the app on IPv6 too. This binds what the R process
+// bound before the load balancer existed, and what process.PortAvailable
+// checks.
+func (a App) family() string {
+	if ip := net.ParseIP(a.Host); ip != nil && ip.To4() == nil {
+		return "tcp6"
+	}
+	return "tcp4"
+}
+
+// Overlaps reports whether a and b would compete for the same port: the
+// same port in the same family, on the same host or with either one on the
+// family's wildcard address.
+func (a App) Overlaps(b App) bool {
+	if a.Port != b.Port || a.family() != b.family() {
+		return false
+	}
+	if a.isWildcard() || b.isWildcard() {
+		return true
+	}
+	return net.ParseIP(a.Host).Equal(net.ParseIP(b.Host))
+}
+
+func (a App) isWildcard() bool {
+	ip := net.ParseIP(a.Host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// listen is the config's form of a's address, with its family.
+func (a App) listen() string {
+	return a.family() + "/" + a.Addr()
+}
+
+// restartingPage is what a visitor sees while an app is down for longer
+// than TryDuration. It reloads itself, so the tab comes back on its own.
+// It is a static_response body, which expands {placeholders}, so it must
+// not contain a brace.
+const restartingPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="2">
+<title>Restarting</title>
+</head>
+<body style="font-family: sans-serif; margin: 3em; color: #333">
+<p>This app is restarting. This page reloads by itself every few seconds until the app is back.</p>
+</body>
+</html>
+`
+
+// The types below are the config's JSON, in the order Render writes it.
+// Their field order fixes the output; maps are sorted by encoding/json.
+
+type config struct {
+	Admin   adminConfig   `json:"admin"`
+	Logging loggingConfig `json:"logging"`
+	Storage storageConfig `json:"storage"`
+	Apps    *appsConfig   `json:"apps,omitempty"`
+}
+
+type adminConfig struct {
+	Listen string       `json:"listen"`
+	Config adminPersist `json:"config"`
+}
+
+type adminPersist struct {
+	Persist bool `json:"persist"`
+}
+
+type loggingConfig struct {
+	Logs map[string]logConfig `json:"logs"`
+}
+
+type logConfig struct {
+	Writer  logWriter `json:"writer"`
+	Level   string    `json:"level"`
+	Include []string  `json:"include,omitempty"`
+	Exclude []string  `json:"exclude,omitempty"`
+}
+
+type logWriter struct {
+	Output string `json:"output"`
+}
+
+type storageConfig struct {
+	Module string `json:"module"`
+	Root   string `json:"root"`
+}
+
+type appsConfig struct {
+	HTTP httpApp `json:"http"`
+	TLS  tlsApp  `json:"tls"`
+}
+
+type httpApp struct {
+	Servers map[string]server `json:"servers"`
+}
+
+type tlsApp struct {
+	DisableStorageClean bool `json:"disable_storage_clean"`
+}
+
+type server struct {
+	Listen         []string       `json:"listen"`
+	Protocols      []string       `json:"protocols"`
+	AutomaticHTTPS autoHTTPS      `json:"automatic_https"`
+	TrustedProxies trustedProxies `json:"trusted_proxies"`
+	Routes         []route        `json:"routes"`
+	Errors         errorsConfig   `json:"errors"`
+}
+
+type trustedProxies struct {
+	Source string   `json:"source"`
+	Ranges []string `json:"ranges"`
+}
+
+type autoHTTPS struct {
+	Disable bool `json:"disable"`
+}
+
+type route struct {
+	Match  []match `json:"match,omitempty"`
+	Handle []any   `json:"handle"`
+}
+
+type match struct {
+	Vars map[string][]string `json:"vars"`
+}
+
+type errorsConfig struct {
+	Routes []route `json:"routes"`
+}
+
+type headersHandler struct {
+	Handler  string    `json:"handler"`
+	Response headerOps `json:"response"`
+}
+
+type headerOps struct {
+	Delete   []string `json:"delete"`
+	Deferred bool     `json:"deferred,omitempty"`
+}
+
+type reverseProxy struct {
+	Handler          string         `json:"handler"`
+	Upstreams        []upstream     `json:"upstreams"`
+	LoadBalancing    loadBalancing  `json:"load_balancing"`
+	Headers          requestHeaders `json:"headers"`
+	StreamCloseDelay string         `json:"stream_close_delay"`
+}
+
+type upstream struct {
+	Dial string `json:"dial"`
+}
+
+type loadBalancing struct {
+	TryDuration string `json:"try_duration"`
+	TryInterval string `json:"try_interval"`
+}
+
+type requestHeaders struct {
+	Request struct {
+		Delete []string `json:"delete"`
+	} `json:"request"`
+}
+
+type staticResponse struct {
+	Handler    string              `json:"handler"`
+	StatusCode int                 `json:"status_code"`
+	Headers    map[string][]string `json:"headers"`
+	Body       string              `json:"body"`
+}
+
+// Render returns the load balancer's whole config for apps: one server per
+// app, listening on the app's own port and forwarding to its copies. It is
+// pure and deterministic, so a changed config is a changed document and an
+// unchanged one can be told apart from it. With no apps it returns the
+// bootstrap, which has no "apps" key at all.
+//
+// What each part is for:
+//   - stream_close_delay keeps open WebSockets (the Shiny sessions) alive
+//     across a config reload, which would otherwise close them.
+//   - try_duration and try_interval make a request wait for an app that is
+//     restarting. There are no passive health checks yet: with one copy per
+//     app they only keep the one upstream marked down for a couple of
+//     seconds after R is back, which delays every visitor of every restart.
+//     They come back with several copies, with a value tuned for them.
+//   - trusted_proxies makes the load balancer extend the X-Forwarded-*
+//     headers of a front proxy on this machine (nginx terminating TLS, say)
+//     instead of replacing them, so the app still sees the visitor's
+//     address and scheme. Only loopback is trusted: anyone else's are
+//     overwritten, as before.
+//   - the deferred headers handler removes Server and Via from the response
+//     (the engine sets both after the route's own header operations have
+//     run, and again on a WebSocket's 101), and the request-side delete
+//     keeps Via from reaching the app.
+//   - the errors routes strip the same headers, which the errors chain
+//     doesn't pass through the deferred handler for, and turn 502 and 503
+//     into a restarting page that reloads itself.
+func Render(s Settings, apps []App) ([]byte, error) {
+	try := s.TryDuration
+	if try <= 0 {
+		try = DefaultTryDuration
+	}
+
+	cfg := config{
+		Admin: adminConfig{
+			Listen: "unix/" + s.AdminSocket + "|0600",
+			Config: adminPersist{Persist: false},
+		},
+		Logging: loggingConfig{Logs: map[string]logConfig{
+			"admin_quiet": {Writer: logWriter{"stderr"}, Level: "ERROR", Include: []string{"admin"}},
+			"default":     {Writer: logWriter{"stderr"}, Level: "WARN", Exclude: []string{"admin"}},
+		}},
+		Storage: storageConfig{Module: "file_system", Root: s.StorageDir},
+	}
+
+	if len(apps) > 0 {
+		servers := make(map[string]server, len(apps))
+		for _, a := range apps {
+			servers[a.Key] = renderServer(a, try)
+		}
+		cfg.Apps = &appsConfig{
+			HTTP: httpApp{Servers: servers},
+			TLS:  tlsApp{DisableStorageClean: true},
+		}
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // the restarting page is HTML
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(cfg); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func renderServer(a App, try time.Duration) server {
+	var rp reverseProxy
+	rp.Handler = "reverse_proxy"
+	for _, u := range a.Upstreams {
+		rp.Upstreams = append(rp.Upstreams, upstream{Dial: u})
+	}
+	rp.LoadBalancing = loadBalancing{TryDuration: try.String(), TryInterval: "250ms"}
+	rp.Headers.Request.Delete = []string{"Via"}
+	rp.StreamCloseDelay = "12h"
+
+	return server{
+		Listen:         []string{a.listen()},
+		Protocols:      []string{"h1"},
+		AutomaticHTTPS: autoHTTPS{Disable: true},
+		TrustedProxies: trustedProxies{Source: "static", Ranges: []string{"127.0.0.0/8", "::1/128"}},
+		Routes: []route{{Handle: []any{
+			headersHandler{Handler: "headers", Response: headerOps{Delete: []string{"Server", "Via"}, Deferred: true}},
+			rp,
+		}}},
+		Errors: errorsConfig{Routes: []route{
+			{Handle: []any{
+				headersHandler{Handler: "headers", Response: headerOps{Delete: []string{"Server", "Via"}}},
+			}},
+			{
+				Match: []match{{Vars: map[string][]string{"{http.error.status_code}": {"502", "503"}}}},
+				Handle: []any{staticResponse{
+					Handler:    "static_response",
+					StatusCode: 503,
+					Headers: map[string][]string{
+						"Cache-Control": {"no-store"},
+						"Content-Type":  {"text/html; charset=utf-8"},
+						"Retry-After":   {"2"},
+					},
+					Body: restartingPage,
+				}},
+			},
+		}},
+	}
+}

@@ -1,0 +1,34 @@
+{
+  "admin": {
+    "listen": "unix//home/me/.shinyctl/proxy/admin.sock|0600",
+    "config": {
+      "persist": false
+    }
+  },
+  "logging": {
+    "logs": {
+      "admin_quiet": {
+        "writer": {
+          "output": "stderr"
+        },
+        "level": "ERROR",
+        "include": [
+          "admin"
+        ]
+      },
+      "default": {
+        "writer": {
+          "output": "stderr"
+        },
+        "level": "WARN",
+        "exclude": [
+          "admin"
+        ]
+      }
+    }
+  },
+  "storage": {
+    "module": "file_system",
+    "root": "/home/me/.shinyctl/proxy/data"
+  }
+}

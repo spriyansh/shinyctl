@@ -1,0 +1,245 @@
+{
+  "admin": {
+    "listen": "unix//home/me/.shinyctl/proxy/admin.sock|0600",
+    "config": {
+      "persist": false
+    }
+  },
+  "logging": {
+    "logs": {
+      "admin_quiet": {
+        "writer": {
+          "output": "stderr"
+        },
+        "level": "ERROR",
+        "include": [
+          "admin"
+        ]
+      },
+      "default": {
+        "writer": {
+          "output": "stderr"
+        },
+        "level": "WARN",
+        "exclude": [
+          "admin"
+        ]
+      }
+    }
+  },
+  "storage": {
+    "module": "file_system",
+    "root": "/home/me/.shinyctl/proxy/data"
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "/home/me/apps/explorer/state.json": {
+          "listen": [
+            "tcp4/0.0.0.0:8765"
+          ],
+          "protocols": [
+            "h1"
+          ],
+          "automatic_https": {
+            "disable": true
+          },
+          "trusted_proxies": {
+            "source": "static",
+            "ranges": [
+              "127.0.0.0/8",
+              "::1/128"
+            ]
+          },
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "127.0.0.1:20000"
+                    }
+                  ],
+                  "load_balancing": {
+                    "try_duration": "15s",
+                    "try_interval": "250ms"
+                  },
+                  "headers": {
+                    "request": {
+                      "delete": [
+                        "Via"
+                      ]
+                    }
+                  },
+                  "stream_close_delay": "12h"
+                }
+              ]
+            }
+          ],
+          "errors": {
+            "routes": [
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "match": [
+                  {
+                    "vars": {
+                      "{http.error.status_code}": [
+                        "502",
+                        "503"
+                      ]
+                    }
+                  }
+                ],
+                "handle": [
+                  {
+                    "handler": "static_response",
+                    "status_code": 503,
+                    "headers": {
+                      "Cache-Control": [
+                        "no-store"
+                      ],
+                      "Content-Type": [
+                        "text/html; charset=utf-8"
+                      ],
+                      "Retry-After": [
+                        "2"
+                      ]
+                    },
+                    "body": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta http-equiv=\"refresh\" content=\"2\">\n<title>Restarting</title>\n</head>\n<body style=\"font-family: sans-serif; margin: 3em; color: #333\">\n<p>This app is restarting. This page reloads by itself every few seconds until the app is back.</p>\n</body>\n</html>\n"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "/home/me/apps/maps/state.json": {
+          "listen": [
+            "tcp4/127.0.0.1:8080"
+          ],
+          "protocols": [
+            "h1"
+          ],
+          "automatic_https": {
+            "disable": true
+          },
+          "trusted_proxies": {
+            "source": "static",
+            "ranges": [
+              "127.0.0.0/8",
+              "::1/128"
+            ]
+          },
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "127.0.0.1:20001"
+                    }
+                  ],
+                  "load_balancing": {
+                    "try_duration": "15s",
+                    "try_interval": "250ms"
+                  },
+                  "headers": {
+                    "request": {
+                      "delete": [
+                        "Via"
+                      ]
+                    }
+                  },
+                  "stream_close_delay": "12h"
+                }
+              ]
+            }
+          ],
+          "errors": {
+            "routes": [
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "match": [
+                  {
+                    "vars": {
+                      "{http.error.status_code}": [
+                        "502",
+                        "503"
+                      ]
+                    }
+                  }
+                ],
+                "handle": [
+                  {
+                    "handler": "static_response",
+                    "status_code": 503,
+                    "headers": {
+                      "Cache-Control": [
+                        "no-store"
+                      ],
+                      "Content-Type": [
+                        "text/html; charset=utf-8"
+                      ],
+                      "Retry-After": [
+                        "2"
+                      ]
+                    },
+                    "body": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta http-equiv=\"refresh\" content=\"2\">\n<title>Restarting</title>\n</head>\n<body style=\"font-family: sans-serif; margin: 3em; color: #333\">\n<p>This app is restarting. This page reloads by itself every few seconds until the app is back.</p>\n</body>\n</html>\n"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "tls": {
+      "disable_storage_clean": true
+    }
+  }
+}
