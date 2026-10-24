@@ -32,7 +32,9 @@ app-state-file: %s
 
 # Optional fields — uncomment to use:
 # host: 0.0.0.0            # address the app's port listens on (default: every interface); 127.0.0.1 = this machine only
-# replicas: 1              # the only legal value for now
+# replicas: 1              # copies that serve visitors (1-16)
+# warm-replicas: 1         # ready spares that take over when a copy dies (0-16); each copy is an R process
+# lb-policy: least-conn    # how new visitors pick a copy: least-conn, round-robin, random, first
 # restart-policy: always   # always (default) / on-failure / never
 # working-dir: .           # defaults to entrypoint-file's own directory
 # env:

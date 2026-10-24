@@ -36,8 +36,9 @@ kernel has 47 bits. Run `make test` there.
 The `cmd` tests start the load balancer as a real process, the test binary
 itself run as `proxy --config`, in a short temp directory, because Unix
 socket paths are limited to 103 bytes on macOS. The in-process tests in
-`internal/proxy` share the load balancer library's global state and must
-never call `t.Parallel`.
+`internal/proxy` and `internal/proxy/lb` share the load balancer library's
+global state and the copies table. They must never call `t.Parallel`, and
+they reset the table with `lb.Set(nil)` in a cleanup.
 
 Every behavior change comes with a test. Its commit message says what
 changed for users and why.

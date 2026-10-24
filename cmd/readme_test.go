@@ -6,6 +6,7 @@ package cmd
 import (
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -18,6 +19,25 @@ func TestREADMEHasNoProductName(t *testing.T) {
 	}
 	if loc := regexp.MustCompile(`(?i)caddy`).FindIndex(data); loc != nil {
 		t.Errorf("README.md names the software behind the load balancer at byte %d", loc[0])
+	}
+}
+
+// TestREADMEDescribesCopies: the manifest example has the settings for
+// copies, and the line that said one copy was all there is is gone.
+func TestREADMEDescribesCopies(t *testing.T) {
+	data, err := os.ReadFile("../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"warm-replicas", "lb-policy", "lb_<port>", "--copy N", "port-in-use"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("README.md does not mention %q", want)
+		}
+	}
+	for _, gone := range []string{"1 is the only accepted value", "One process per app"} {
+		if strings.Contains(string(data), gone) {
+			t.Errorf("README.md still says %q", gone)
+		}
 	}
 }
 
