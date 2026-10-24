@@ -53,7 +53,7 @@ func TestReconcile_ExitPendingIsLeftToItsWatcher(t *testing.T) {
 			}
 			waitGone(t, a)
 
-			resp, err := reconcileLocked(spec, false, nil)
+			resp, err := reconcileLocked(spec, reconcileOpts{})
 			unlock()
 			if err != nil {
 				t.Fatal(err)
@@ -139,7 +139,7 @@ func deadRecord(t *testing.T, spec manifest.AppSpec) state.AppState {
 	if err := appRegistry.Remember(spec); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := startRaw(t, spec)
+	a, _ := startRaw(t, spec, 1)
 	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{a}}); err != nil {
 		t.Fatal(err)
 	}
@@ -173,11 +173,11 @@ func TestReconcile_AfterARebootEveryAppStarts(t *testing.T) {
 	})
 	for name, spec := range specs {
 		old[name] = deadRecord(t, spec)
-		forgetSeen(spec.AppStateFile) // a fresh daemon has seen nothing
+		forgetSeen(spec.AppStateFile, 1) // a fresh daemon has seen nothing
 	}
 	// What an earlier process of the same app left behind doesn't count as
 	// having seen this one (a reused PID, or another start).
-	markSeen(always.AppStateFile, state.AppState{PID: 1, StartedAt: time.Unix(1, 0)})
+	markSeen(always.AppStateFile, state.AppState{Copy: 1, PID: 1, StartedAt: time.Unix(1, 0)})
 
 	for name, spec := range specs {
 		if !reconcileApp(spec.AppStateFile) {
@@ -258,7 +258,7 @@ func TestReconcile_ApplyDoesNotWaitForAPendingExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitGone(t, a)
-	resp, err := reconcileLocked(spec, true, nil)
+	resp, err := reconcileLocked(spec, reconcileOpts{explicit: true})
 	unlock()
 	if err != nil {
 		t.Fatal(err)

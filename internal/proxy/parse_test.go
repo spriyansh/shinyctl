@@ -1,14 +1,11 @@
 package proxy
 
-import (
-	"reflect"
-	"testing"
-)
+import "testing"
 
 func TestParse_RoundTripsRender(t *testing.T) {
 	apps := []App{
 		testApp("/x/a/state.json", "a", "0.0.0.0", 8765),
-		{Key: "/x/b/state.json", Name: "b", Group: "g", Host: "::1", Port: 8080, Upstreams: []string{"127.0.0.1:20001", "127.0.0.1:20002"}},
+		{Key: "/x/b/state.json", Name: "b", Group: "g", Host: "::1", Port: 8080},
 	}
 	cfg, err := Render(testSettings, apps)
 	if err != nil {
@@ -24,8 +21,8 @@ func TestParse_RoundTripsRender(t *testing.T) {
 	}
 	for i, want := range apps {
 		g := got[i]
-		if g.Key != want.Key || g.Host != want.Host || g.Port != want.Port || !reflect.DeepEqual(g.Upstreams, want.Upstreams) {
-			t.Errorf("app %d = %+v, want key, host, port and upstreams of %+v", i, g, want)
+		if g.Key != want.Key || g.Host != want.Host || g.Port != want.Port {
+			t.Errorf("app %d = %+v, want the key, host and port of %+v", i, g, want)
 		}
 	}
 }

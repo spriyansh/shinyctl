@@ -509,6 +509,23 @@ func sameStrings(a, b []string) bool {
 	return reflect.DeepEqual(a, b)
 }
 
+func TestDescribeRoles(t *testing.T) {
+	for _, tc := range []struct {
+		active, warm []int
+		want         string
+	}{
+		{nil, nil, "no copy serves visitors yet"},
+		{[]int{1}, nil, "copy 1 serves visitors"},
+		{[]int{2, 3}, []int{1}, "copies 2 and 3 serve visitors; copy 1 is warm"},
+		{[]int{1}, []int{2, 4}, "copy 1 serves visitors; copies 2 and 4 are warm"},
+		{[]int{1, 2, 3}, nil, "copies 1, 2 and 3 serve visitors"},
+	} {
+		if got := DescribeRoles(tc.active, tc.warm); got != tc.want {
+			t.Errorf("DescribeRoles(%v, %v) = %q, want %q", tc.active, tc.warm, got, tc.want)
+		}
+	}
+}
+
 func TestDecideCopies_NewVersionWaitsForFreshSlots(t *testing.T) {
 	s := copySpec(1, 1)
 	p := DecideCopies(s, 1, []CopyView{ready(s, 1, 0)}, now)

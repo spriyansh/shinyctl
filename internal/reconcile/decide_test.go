@@ -43,7 +43,19 @@ func startedFrom(spec manifest.AppSpec, mutate func(*manifest.AppSpec)) state.Ap
 	}
 }
 
-func TestDecide(t *testing.T) {
+// decide is what DecideCopies makes of an app with one copy (no spares),
+// the shape every app had before copies: the plan, for a copy recorded in
+// current and alive or not.
+func decide(spec manifest.AppSpec, current state.State, alive bool, now time.Time) Plan {
+	spec.Replicas, spec.WarmReplicas = 1, intPtr(0)
+	var views []CopyView
+	for _, app := range current.Apps {
+		views = append(views, CopyView{App: app, Alive: alive, Ready: alive})
+	}
+	return DecideCopies(spec, current.Revision, views, now)
+}
+
+func TestDecideOneCopy(t *testing.T) {
 	now := time.Now()
 
 	cases := []struct {
@@ -192,38 +204,42 @@ func TestDecide(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Decide(c.spec, c.current, c.alive, now)
-			if got.Type != c.want {
-				t.Errorf("got %v, want %v", got.Type, c.want)
+			if got := decide(c.spec, c.current, c.alive, now).Action(); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})
 	}
 }
 
-func TestDecide_UpgradeFlag(t *testing.T) {
+func TestDecideOneCopy_UpgradeFlag(t *testing.T) {
 	spec := manifest.AppSpec{AppName: "a", Port: 8881}
-	old := state.State{Apps: []state.AppState{{Name: "a", Port: 8881}}}
-	if got := Decide(spec, old, true, time.Now()); got.Type != ActionStart || !got.Upgrade {
-		t.Errorf("alive record without a copy: Decide() = %+v, want Start with Upgrade", got)
+	old := state.State{Apps: []state.AppState{{Name: "a", Port: 8881, PID: 7}}}
+	got := decide(spec, old, true, time.Now())
+	if want := []string{"stop 0 pid=7", "start 1 upgrade"}; !reflect.DeepEqual(show(got.Steps), want) {
+		t.Errorf("alive record without a copy: steps %q, want %q", show(got.Steps), want)
 	}
 
-	current := state.State{Apps: []state.AppState{{Name: "b", Copy: 1, Port: 20000}}}
-	if got := Decide(spec, current, true, time.Now()); got.Type != ActionStart || got.Upgrade {
-		t.Errorf("alive copy with a changed name: Decide() = %+v, want Start without Upgrade", got)
+	current := state.State{Apps: []state.AppState{{Name: "b", Copy: 1, Port: 20000, PID: 8}}}
+	got = decide(spec, current, true, time.Now())
+	if want := []string{"start 1 pid=8 replace changed=[app-name]"}; !reflect.DeepEqual(show(got.Steps), want) {
+		t.Errorf("alive copy with a changed name: steps %q, want %q", show(got.Steps), want)
 	}
 
-	if got := Decide(spec, old, false, time.Now()); got.Upgrade {
-		t.Errorf("dead record without a copy: Decide() = %+v, want no Upgrade (a plain start)", got)
+	got = decide(spec, old, false, time.Now())
+	if want := []string{"start 1"}; !reflect.DeepEqual(show(got.Steps), want) {
+		t.Errorf("dead record without a copy: steps %q, want %q (a plain start)", show(got.Steps), want)
 	}
 }
 
-func TestDecide_ReportsChangedFields(t *testing.T) {
+func TestDecideOneCopy_ReportsChangedFields(t *testing.T) {
 	spec := withSpec(fullSpec, func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "new"} })
-	current := state.State{Apps: []state.AppState{startedFrom(fullSpec, nil)}}
+	rec := startedFrom(fullSpec, nil)
+	rec.PID = 9
+	current := state.State{Apps: []state.AppState{rec}}
 
-	got := Decide(spec, current, true, time.Now())
-	if got.Type != ActionStart || !reflect.DeepEqual(got.Changed, []string{"env"}) {
-		t.Errorf("Decide() = %+v, want Start with Changed [env]", got)
+	got := decide(spec, current, true, time.Now())
+	if want := []string{"start 1 pid=9 replace changed=[env]"}; !reflect.DeepEqual(show(got.Steps), want) {
+		t.Errorf("steps %q, want %q", show(got.Steps), want)
 	}
 }
 
@@ -259,13 +275,13 @@ func TestGaveUp(t *testing.T) {
 	}
 }
 
-// TestDecideRestartPolicy builds its state through RecordExit instead of
+// TestDecideOneCopyRestartPolicy builds its state through RecordExit instead of
 // by hand, so it can only ever test states the real exit path produces.
 // The hand-built version of these cases used CrashCount: 1 alongside a
 // clean exit — a combination RecordExit never emits (it zeroes CrashCount
 // on a clean exit) — and so passed while `never` and `on-failure` were
 // in fact restarting every clean exit.
-func TestDecideRestartPolicy(t *testing.T) {
+func TestDecideOneCopyRestartPolicy(t *testing.T) {
 	now := time.Now()
 	exitedAt := now.Add(-time.Hour) // every backoff delay has long elapsed
 
@@ -289,9 +305,8 @@ func TestDecideRestartPolicy(t *testing.T) {
 			app := state.AppState{Name: "a", Port: 8881, PID: 123, StartedAt: exitedAt.Add(-time.Second)}
 			app = RecordExit(app, process.Exit{At: exitedAt, Failed: c.failed})
 
-			got := Decide(spec, state.State{Apps: []state.AppState{app}}, false, now)
-			if got.Type != c.want {
-				t.Errorf("got %v, want %v", got.Type, c.want)
+			if got := decide(spec, state.State{Apps: []state.AppState{app}}, false, now).Action(); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})
 	}

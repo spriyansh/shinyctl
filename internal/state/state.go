@@ -17,7 +17,7 @@ type AppState struct {
 	// an internal port on 127.0.0.1, behind the load balancer that holds the
 	// app's own port. A record without a copy number was written by a build
 	// before the load balancer, and its process holds the app's port itself
-	// (see reconcile.Decide's Upgrade).
+	// (see reconcile.DecideCopies' upgrade).
 	Port int `json:"port"`
 
 	// Copy numbers the app's processes from 1. Zero marks a record from
@@ -61,15 +61,6 @@ type State struct {
 	Revision int `json:"revision,omitempty"`
 
 	Apps []AppState `json:"apps"`
-}
-
-// App returns the one app this state records, or a zero AppState if
-// nothing has been recorded yet (fresh file, or cleared by `stop`).
-func (s State) App() AppState {
-	if len(s.Apps) > 0 {
-		return s.Apps[0]
-	}
-	return AppState{}
 }
 
 // Copies returns the records sorted by copy number, as a new slice.

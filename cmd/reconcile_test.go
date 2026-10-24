@@ -34,6 +34,7 @@ func TestReconcileLocked_StartFailureRecordsCrash(t *testing.T) {
 		EntrypointFile: entrypoint,
 		Port:           18881,
 		Replicas:       1,
+		WarmReplicas:   intPtr(0),
 		AppStateFile:   filepath.Join(dir, "state.json"),
 		// A working-dir that doesn't exist makes exec.Cmd.Start fail
 		// deterministically and portably, without depending on Rscript
@@ -42,7 +43,7 @@ func TestReconcileLocked_StartFailureRecordsCrash(t *testing.T) {
 	}
 
 	unlock := state.Lock(spec.AppStateFile)
-	_, err := reconcileLocked(spec, true, nil)
+	_, err := reconcileLocked(spec, reconcileOpts{explicit: true})
 	unlock()
 	if err == nil {
 		t.Fatal("reconcileLocked() returned a nil error, want the Start failure")
@@ -122,7 +123,7 @@ func TestRecordExit_IgnoresReplacedProcess(t *testing.T) {
 	waitServed(t, spec1, a.PID)
 	b := applyOK(t, spec2)
 
-	if recordExit(spec1, a.PID, process.Exit{At: time.Now(), Failed: true}) {
+	if recordExit(spec1, 1, a.PID, process.Exit{At: time.Now(), Failed: true}) {
 		t.Error("recordExit() = true for a replaced process, want false")
 	}
 	got := loadApp(t, spec2)

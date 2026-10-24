@@ -1,11 +1,16 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"os/user"
 	"strings"
+	"time"
 )
+
+// lingerTimeout is how long LingerWarning waits for loginctl.
+const lingerTimeout = 2 * time.Second
 
 // LingerWarning returns a human-readable warning if this process risks being
 // killed when the current user logs out, or "" if there's nothing to warn
@@ -22,7 +27,12 @@ func LingerWarning() string {
 		return ""
 	}
 
-	out, err := exec.Command("loginctl", "show-user", u.Username, "--property=Linger").Output()
+	// A slow logind must not hold up the start of shinyctl-api.
+	ctx, cancel := context.WithTimeout(context.Background(), lingerTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "loginctl", "show-user", u.Username, "--property=Linger")
+	cmd.WaitDelay = time.Second // and not for a child of it that holds the pipe
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

@@ -16,7 +16,7 @@ import (
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
-// handleDelete is stop, then forget: kill the process if it's running,
+// handleDelete is stop, then forget: kill the processes if they're running,
 // drop the app from the registry (spec and stopped flag both), and remove
 // its state file — shinyctl is the only thing that ever wrote it, so
 // forgetting the app means removing it, not leaving a stale record behind.
@@ -56,13 +56,14 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Before Forget: identityFallbacks reads the applied spec.
-	_, note, err := stopRecorded("delete", spec, currentState.App())
+	note, err := stopAll("delete", spec, currentState.Copies())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	forgetSeen(spec.AppStateFile)
+	forgetApp(spec.AppStateFile)
+	clearNotStarted(spec.AppStateFile)
 	if err := appRegistry.Forget(spec.AppStateFile); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

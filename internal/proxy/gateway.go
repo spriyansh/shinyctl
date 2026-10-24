@@ -66,6 +66,7 @@ type Gateway struct {
 	pushes    int   // successful pushes, for tests
 	lastPush  string
 	badPools  map[string]bool // copies left out of the last table, to log each once
+	known     bool            // pools have been set: until then they are not the daemon's view, and a sync must not send them
 }
 
 // NewGateway returns a Gateway for the load balancer sup supervises.
@@ -192,7 +193,7 @@ func (g *Gateway) Sync(apps []App) (left map[string]error, err error) {
 			return left, err
 		}
 		if g.loadedCfg != nil && reflect.DeepEqual(next, g.loadedCfg) {
-			g.prunePools(keep)
+			g.prunePools(apps)
 			return left, nil
 		}
 
@@ -237,7 +238,7 @@ func (g *Gateway) Sync(apps []App) (left map[string]error, err error) {
 		if err := atomicfile.Write(g.settings.ConfigPath, cfg); err != nil {
 			log.Printf("proxy: could not save %s: %v", g.settings.ConfigPath, err)
 		}
-		g.prunePools(keep)
+		g.prunePools(apps)
 		return left, nil
 	}
 }
@@ -262,6 +263,7 @@ func (g *Gateway) BalancerPID() int {
 func (g *Gateway) SetPool(key string, p Pool) error {
 	g.poolMu.Lock()
 	defer g.poolMu.Unlock()
+	g.known = true
 	g.pools[key] = p
 	g.poolSeq++
 	g.poolSet[key] = g.poolSeq
@@ -292,6 +294,7 @@ func (g *Gateway) PoolSeq() uint64 {
 func (g *Gateway) ReplacePools(t Table, since uint64) error {
 	g.poolMu.Lock()
 	defer g.poolMu.Unlock()
+	g.known = true
 	for key, p := range t {
 		if g.poolSet[key] <= since {
 			g.pools[key] = p
@@ -327,14 +330,21 @@ func (g *Gateway) Sessions() map[string]int {
 	return open
 }
 
-// prunePools drops the pools of apps the load balancer no longer serves and
-// sends the table, so a stopped or deleted app leaves nothing behind. A push
-// that fails has been logged.
-func (g *Gateway) prunePools(keep []App) {
+// prunePools drops the pools of apps nobody asks the load balancer to serve
+// any more and sends the table, so a stopped or deleted app leaves nothing
+// behind. An app that is asked for but left out (its port is taken) keeps its
+// pool, so it is served from the first moment its port is free. A push that
+// fails has been logged. A gateway that has not been given any pool yet
+// (a new shinyctl-api that has not looked at its apps) sends nothing, or it
+// would empty the table of the load balancer it adopted.
+func (g *Gateway) prunePools(apps []App) {
 	g.poolMu.Lock()
 	defer g.poolMu.Unlock()
+	if !g.known {
+		return
+	}
 	for key := range g.pools {
-		if !slices.ContainsFunc(keep, func(a App) bool { return a.Key == key }) {
+		if !slices.ContainsFunc(apps, func(a App) bool { return a.Key == key }) {
 			delete(g.pools, key)
 			delete(g.poolSet, key)
 		}

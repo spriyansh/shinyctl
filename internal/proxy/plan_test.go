@@ -6,7 +6,7 @@ import (
 )
 
 func testApp(key, name, host string, port int) App {
-	return App{Key: key, Name: name, Group: "g", Host: host, Port: port, Upstreams: []string{"127.0.0.1:20000"}}
+	return App{Key: key, Name: name, Group: "g", Host: host, Port: port}
 }
 
 func TestPlan(t *testing.T) {

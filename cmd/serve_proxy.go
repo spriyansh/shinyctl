@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
@@ -36,6 +38,15 @@ type hooks struct {
 	ProbeAlongside func(host string, port int) error
 	PortWait       time.Duration
 	PortEvery      time.Duration
+	StartDelay     time.Duration // slept before each process is started
+
+	// Whether a copy accepts connections: the ready-watcher's probe and the
+	// reconcile's own are separate so that a test can make one of them miss.
+	WatchProbe   func(host string, port int) bool
+	ObserveProbe func(host string, port int) bool
+
+	// Signal0 is kill(pid, 0), the ready-watcher's "is it still there".
+	Signal0 func(pid int) error
 }
 
 var activeHooks atomic.Pointer[hooks]
@@ -47,6 +58,9 @@ func currentHooks() hooks {
 		ProbeAlongside: process.PortAvailableAlongside,
 		PortWait:       time.Second,
 		PortEvery:      100 * time.Millisecond,
+		WatchProbe:     process.IsReady,
+		ObserveProbe:   process.IsReady,
+		Signal0:        func(pid int) error { return syscall.Kill(pid, 0) },
 	}
 	if o := activeHooks.Load(); o != nil {
 		if o.Served != nil {
@@ -63,6 +77,16 @@ func currentHooks() hooks {
 		}
 		if o.PortEvery != 0 {
 			h.PortEvery = o.PortEvery
+		}
+		h.StartDelay = o.StartDelay
+		if o.WatchProbe != nil {
+			h.WatchProbe = o.WatchProbe
+		}
+		if o.ObserveProbe != nil {
+			h.ObserveProbe = o.ObserveProbe
+		}
+		if o.Signal0 != nil {
+			h.Signal0 = o.Signal0
 		}
 	}
 	return h
@@ -81,6 +105,10 @@ func newGateway(dir, exe, logPath string) (*proxy.Gateway, *proxy.Supervisor, er
 	if err := process.CheckSocketPath(settings.AdminSocket); err != nil {
 		return nil, nil, err
 	}
+	var err error
+	if settings.Secret, err = proxy.LoadSecret(dir); err != nil {
+		return nil, nil, fmt.Errorf("the key for the load balancer's cookies: %w", err)
+	}
 
 	sup := &proxy.Supervisor{
 		Settings: settings,
@@ -88,8 +116,13 @@ func newGateway(dir, exe, logPath string) (*proxy.Gateway, *proxy.Supervisor, er
 		Build:    proxy.BuildID(),
 		LogPath:  logPath,
 		// A load balancer that has just started or been adopted knows
-		// nothing of the apps; the gateway reports what it leaves out.
-		OnReady: func() { syncProxy("") },
+		// nothing of the apps, or only what it read from copies.json: it is
+		// told who serves what, from the state files, and then which apps to
+		// listen for. The gateway reports what it leaves out.
+		OnReady: func() {
+			refreshPools()
+			syncProxy("")
+		},
 	}
 	return proxy.NewGateway(settings, sup), sup, nil
 }
@@ -117,10 +150,10 @@ func syncProxyApp(stateFile string) (appErr, err error) {
 }
 
 // desiredApps lists what the load balancer should serve: the managed apps
-// that have an internal port recorded. An app that has given up (its
-// restart policy ends its story) and isn't running loses its port, as it
-// would without the load balancer; a restarting page there would never end.
-// Records are read without the state lock: they are written atomically.
+// that have an internal port recorded. An app whose copies have all given up
+// (their restart policy ends their story) and aren't running loses its port,
+// as it would without the load balancer; a restarting page there would never
+// end. Records are read without the state lock: they are written atomically.
 func desiredApps() []proxy.App {
 	var apps []proxy.App
 	for _, spec := range appRegistry.All() {
@@ -133,24 +166,62 @@ func desiredApps() []proxy.App {
 			log.Printf("proxy: %q: %v", spec.AppName, err)
 			continue
 		}
-		rec := current.App()
-		if rec.Copy < 1 || rec.Port == 0 {
+		var recs []state.AppState
+		for _, rec := range current.Copies() {
+			if rec.Copy >= 1 && rec.Port > 0 {
+				recs = append(recs, rec)
+			}
+		}
+		if len(recs) == 0 {
 			continue
 		}
-		if reconcile.GaveUp(spec, rec) && !process.IsAlive(spec, rec) {
+		if allGaveUp(spec, recs) && !slices.Contains(process.AliveAll(spec, recs), true) {
 			continue
 		}
 
 		apps = append(apps, proxy.App{
-			Key:       spec.AppStateFile,
-			Name:      spec.AppName,
-			Group:     spec.AppGroup,
-			Host:      spec.EffectiveHost(),
-			Port:      spec.Port,
-			Upstreams: []string{fmt.Sprintf("%s:%d", process.InternalHost, rec.Port)},
+			Key:      spec.AppStateFile,
+			Name:     spec.AppName,
+			Group:    spec.AppGroup,
+			Host:     spec.EffectiveHost(),
+			Port:     spec.Port,
+			LBPolicy: spec.EffectiveLBPolicy(),
 		})
 	}
 	return apps
+}
+
+func allGaveUp(spec manifest.AppSpec, recs []state.AppState) bool {
+	for _, rec := range recs {
+		if !reconcile.GaveUp(spec, rec) {
+			return false
+		}
+	}
+	return true
+}
+
+// refreshPools rebuilds the load balancer's copies table from the state
+// files, for when the daemon starts or the load balancer has just come up
+// (it holds nothing, or what copies.json said). Roles are derived, not
+// stored, so this gives the table the reconcile cycles would have made. A
+// cycle that set a pool while this ran saw something newer, and keeps it.
+func refreshPools() {
+	since := gateway.PoolSeq()
+	table := proxy.Table{}
+	for _, spec := range appRegistry.All() {
+		if !appRegistry.Managed(spec.AppStateFile) {
+			continue
+		}
+		st, err := state.Load(spec.AppStateFile)
+		if err != nil {
+			log.Printf("proxy: %q: %v", spec.AppName, err)
+			continue
+		}
+		views, _ := observe(spec, &st, observeReadOnly)
+		active, warm := reconcile.Roles(spec, views)
+		table[spec.AppStateFile] = poolOf(reconcile.Plan{Active: active, Warm: warm}, st)
+	}
+	gateway.ReplacePools(table, since)
 }
 
 // claimPort checks that spec's own port is there for the load balancer to
@@ -247,26 +318,27 @@ func syncMoved(spec, previous manifest.AppSpec, hadPrevious, wasServed bool) (st
 	return http.StatusInternalServerError, appErr
 }
 
-// copyPort returns the internal port app's process should run on. The one
-// it already has is kept while it is free, so a restart needs no reload of
-// the load balancer. A recorded port that looks busy is polled for about a
+// copyPort returns the internal port copy n of spec's app should run on. The
+// one it already has is kept while it is free, so a restart needs no reload
+// of the load balancer. A recorded port that looks busy is polled for about a
 // second first: the likeliest holder is the process that just died, whose
 // socket the OS has not released yet, and moving the port would reload the
 // load balancer and cut the requests waiting for the restart. Otherwise the
-// lowest free port that no other app has recorded is picked and saved to the
-// state file before returning, so a concurrent start can't pick it too. The
-// caller holds spec's state lock.
-func copyPort(spec manifest.AppSpec, app state.AppState) (int, error) {
+// lowest free port that no other copy has recorded is picked and saved to
+// the state file before returning, so a concurrent start can't pick it too.
+// The caller holds spec's state lock.
+func copyPort(spec manifest.AppSpec, st *state.State, n int) (int, error) {
 	h := currentHooks()
 	probe := func(p int) error { return process.PortAvailable(process.InternalHost, p) }
 
+	rec, _ := st.Copy(n)
 	var busy error
-	hadPort := app.Copy >= 1 && app.Port > 0
+	hadPort := rec.Port > 0
 	if hadPort {
 		deadline := time.Now().Add(h.PortWait)
 		for {
-			if busy = probe(app.Port); busy == nil {
-				return app.Port, nil
+			if busy = probe(rec.Port); busy == nil {
+				return rec.Port, nil
 			}
 			if !time.Now().Before(deadline) {
 				break
@@ -278,7 +350,7 @@ func copyPort(spec manifest.AppSpec, app state.AppState) (int, error) {
 	portMu.Lock()
 	defer portMu.Unlock()
 
-	port, err := process.PickPort(takenPorts(spec.AppStateFile), func(p int) bool { return probe(p) == nil })
+	port, err := process.PickPort(takenPorts(spec.AppStateFile, n), func(p int) bool { return probe(p) == nil })
 	if err != nil {
 		return 0, err
 	}
@@ -287,32 +359,36 @@ func copyPort(spec manifest.AppSpec, app state.AppState) (int, error) {
 		if why == nil {
 			why = busy
 		}
-		log.Printf("reconcile: %q: port %d is taken (%v); moving its process to port %d", spec.AppName, app.Port, why, port)
+		log.Printf("reconcile: %q: port %d is taken (%v); moving copy %d to port %d", spec.AppName, rec.Port, why, n, port)
 	}
 
-	app.Copy, app.Port = 1, port
-	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{app}}); err != nil {
+	rec.Copy, rec.Port = n, port
+	st.Put(rec)
+	if err := state.Save(spec.AppStateFile, *st); err != nil {
 		return 0, err
 	}
 	return port, nil
 }
 
-// takenPorts lists the ports an app's process must not be given: every
-// public port, and the internal port every other app has recorded, which
-// may belong to a process that happens to be down.
-func takenPorts(except string) map[int]bool {
+// takenPorts lists the ports copy n of the app at stateFile must not be
+// given: every public port, and the internal port every other copy has
+// recorded, the app's own other copies included, which may belong to a
+// process that happens to be down.
+func takenPorts(stateFile string, n int) map[int]bool {
 	taken := map[int]bool{}
 	for _, spec := range appRegistry.All() {
 		taken[spec.Port] = true
-		if spec.AppStateFile == except {
-			continue
-		}
 		current, err := state.Load(spec.AppStateFile)
 		if err != nil {
 			continue
 		}
-		if rec := current.App(); rec.Copy >= 1 && rec.Port > 0 {
-			taken[rec.Port] = true
+		for _, rec := range current.Copies() {
+			if spec.AppStateFile == stateFile && rec.Copy == n {
+				continue
+			}
+			if rec.Copy >= 1 && rec.Port > 0 {
+				taken[rec.Port] = true
+			}
 		}
 	}
 	return taken

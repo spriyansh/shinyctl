@@ -302,7 +302,9 @@ func Roles(spec manifest.AppSpec, copies []CopyView) (active, warm []int) {
 func rankRoles(copies []CopyView, replicas int) (active, warm []int) {
 	var ready []CopyView
 	for _, c := range copies {
-		if c.Alive && c.Ready {
+		// A process from before the load balancer holds the app's port
+		// itself, and is not a copy to send visitors to.
+		if c.Alive && c.Ready && c.App.Copy >= 1 {
 			ready = append(ready, c)
 		}
 	}
@@ -441,7 +443,7 @@ func Describe(spec manifest.AppSpec, before []CopyView, p Plan, settings []strin
 				parts = append(parts, "manifest changed: "+fields)
 			}
 			if len(stops) > 0 {
-				parts = append(parts, "stopping "+listCopies(stops))
+				parts = append(parts, "stopping "+ListCopies(stops))
 			}
 			parts = append(parts, fmt.Sprintf("stopped the previous instance: pid %d", replace.PID))
 			return fmt.Sprintf("Starting app %q on port %d (%s)", name, port, strings.Join(parts, "; "))
@@ -456,7 +458,7 @@ func Describe(spec manifest.AppSpec, before []CopyView, p Plan, settings []strin
 		}
 		msg += fmt.Sprintf(": copy %d %s (stopped pid %d)", replace.Copy, order, replace.PID)
 		if len(stops) > 0 {
-			msg += "; stopping " + listCopies(stops)
+			msg += "; stopping " + ListCopies(stops)
 		}
 		return msg
 
@@ -480,13 +482,13 @@ func Describe(spec manifest.AppSpec, before []CopyView, p Plan, settings []strin
 			parts = append(parts, "manifest changed: "+changedList(nil))
 		}
 		if len(fresh) > 0 {
-			parts = append(parts, "starting "+listCopies(fresh))
+			parts = append(parts, "starting "+ListCopies(fresh))
 		}
 		if len(again) > 0 {
-			parts = append(parts, "starting "+listCopies(again)+" again")
+			parts = append(parts, "starting "+ListCopies(again)+" again")
 		}
 		if len(stops) > 0 {
-			parts = append(parts, "stopping "+listCopies(stops))
+			parts = append(parts, "stopping "+ListCopies(stops))
 		}
 		if len(settings) > 0 {
 			return fmt.Sprintf("Updated %q without a restart (%s)", name, strings.Join(parts, "; "))
@@ -510,7 +512,7 @@ func Describe(spec manifest.AppSpec, before []CopyView, p Plan, settings []strin
 		if len(settings) > 0 {
 			msg += " (manifest changed: " + changedList(nil) + ")"
 		}
-		return msg + fmt.Sprintf(": waiting for %s to be ready", listCopies(p.Waiting))
+		return msg + fmt.Sprintf(": waiting for %s to be ready", ListCopies(p.Waiting))
 
 	case len(settings) > 0:
 		return fmt.Sprintf("Updated %q without a restart (manifest changed: %s)", name, strings.Join(settings, ", "))
@@ -544,8 +546,30 @@ func copiesSummary(replicas, warm int) string {
 	return s
 }
 
+// DescribeRoles says who serves visitors, for the log line written when the
+// roles change: "copy 1 serves visitors", "copies 2 and 3 serve visitors;
+// copy 1 is warm", or "no copy serves visitors yet".
+func DescribeRoles(active, warm []int) string {
+	if len(active) == 0 {
+		return "no copy serves visitors yet"
+	}
+	msg := ListCopies(active) + " serve"
+	if len(active) == 1 {
+		msg += "s"
+	}
+	msg += " visitors"
+	switch len(warm) {
+	case 0:
+	case 1:
+		msg += "; " + ListCopies(warm) + " is warm"
+	default:
+		msg += "; " + ListCopies(warm) + " are warm"
+	}
+	return msg
+}
+
 // listCopies reads "copy 3", "copies 3 and 4" or "copies 2, 4 and 5".
-func listCopies(copies []int) string {
+func ListCopies(copies []int) string {
 	nums := make([]string, len(copies))
 	for i, n := range copies {
 		nums[i] = fmt.Sprint(n)

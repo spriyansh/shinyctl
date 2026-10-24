@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/process"
+	"github.com/spriyansh/shinyctl/internal/proxy/lb"
 )
 
 // shortDir is a directory short enough for a Unix socket path on macOS
@@ -54,9 +55,28 @@ func hold(t *testing.T, port int) net.Listener {
 	return ln
 }
 
-// upstreamApp is an app on a public port whose copy listens at upstream.
-func upstreamApp(key string, publicPort int, upstream string) App {
-	return App{Key: key, Name: key, Group: "g", Host: "127.0.0.1", Port: publicPort, Upstreams: []string{upstream}}
+// settingsFor is SettingsFor with the secret the tests render apps with.
+func settingsFor(dir string) Settings {
+	s := SettingsFor(dir)
+	s.Secret = testSecret
+	return s
+}
+
+// plainApp is an app on a public port, for tests that send it no requests.
+func plainApp(key string, publicPort int) App {
+	return App{Key: key, Name: key, Group: "g", Host: "127.0.0.1", Port: publicPort}
+}
+
+// servedApp is an app on a public port whose active copies listen at dials,
+// in this process's copies table (the table is reset when the test ends).
+// A proxy started as a subprocess gets the table from proxyHome.
+func servedApp(t *testing.T, key string, publicPort int, dials ...string) App {
+	t.Helper()
+	table := lb.Current()
+	table[key] = Pool{Active: dials}
+	lb.Set(table)
+	t.Cleanup(func() { lb.Set(nil) })
+	return plainApp(key, publicPort)
 }
 
 // startUpstream serves handler on a fresh loopback port.
@@ -135,7 +155,7 @@ type subproxy struct {
 // `proxy --config` in homeDir (HOME), without waiting for it to answer.
 func startSubproxy(t *testing.T, dir, homeDir string, cfg []byte) *subproxy {
 	t.Helper()
-	path := SettingsFor(dir).ConfigPath
+	path := settingsFor(dir).ConfigPath
 	if err := os.WriteFile(path, cfg, 0600); err != nil {
 		t.Fatal(err)
 	}

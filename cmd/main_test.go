@@ -21,6 +21,7 @@ import (
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
 	"github.com/spriyansh/shinyctl/internal/process"
+	"github.com/spriyansh/shinyctl/internal/proxy"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
@@ -35,6 +36,10 @@ import (
 // would be a data race. They use the package's in-memory instance, key each
 // app by their own temp state file, and clean up through handleDelete,
 // which forgets the app.
+// testAdmin talks to the test load balancer's control socket, to look at what
+// it holds rather than at what the gateway believes.
+var testAdmin proxy.Admin
+
 const fakeRscriptEnv = "SHINYCTL_TEST_FAKE_RSCRIPT"
 
 // TestMain runs the whole package against one real load balancer: the test
@@ -80,6 +85,7 @@ func runTests(m *testing.M) int {
 		return 1
 	}
 	gateway = g
+	testAdmin = proxy.Admin{Socket: proxy.SettingsFor(dir).AdminSocket}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -141,6 +147,16 @@ func runFakeRscript(args string) {
 		os.Exit(1)
 	}
 
+	// FAKE_RSCRIPT_EXIT makes it die at once, the way a broken app does, and
+	// FAKE_RSCRIPT_DELAY makes it slow to start, the way a big app is.
+	if os.Getenv("FAKE_RSCRIPT_EXIT") == "1" {
+		os.Stderr.WriteString("fake Rscript: asked to exit\n")
+		os.Exit(1)
+	}
+	if d, err := time.ParseDuration(os.Getenv("FAKE_RSCRIPT_DELAY")); err == nil {
+		time.Sleep(d)
+	}
+
 	network := "tcp4"
 	if net.ParseIP(m[2]).To4() == nil {
 		network = "tcp6"
@@ -163,9 +179,16 @@ func runFakeRscript(args string) {
 	}()
 
 	// Answers with its own pid, so a test can tell which process a request
-	// reached through the load balancer.
+	// reached through the load balancer. /hold keeps the request open until
+	// the client goes: a session, as far as the load balancer can tell.
 	body := fmt.Sprintf("pid=%d", os.Getpid())
 	http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hold" {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
 		io.WriteString(w, body)
 	}))
 	os.Exit(1)
@@ -225,8 +248,14 @@ func newTestSpec(t *testing.T, dir, name, entrypoint string, port int) manifest.
 		Port:           port,
 		AppStateFile:   filepath.Join(dir, "state.json"),
 		WorkingDir:     dir,
+
+		// One copy, as before copies existed: tests that want a warm spare
+		// say so.
+		WarmReplicas: intPtr(0),
 	}
 }
+
+func intPtr(n int) *int { return &n }
 
 // applyOK applies spec through the real handler and returns the recorded app.
 func applyOK(t *testing.T, spec manifest.AppSpec) state.AppState {
@@ -238,13 +267,25 @@ func applyOK(t *testing.T, spec manifest.AppSpec) state.AppState {
 	return loadApp(t, spec)
 }
 
+// loadApp returns the record of copy 1, the only copy of an app with one.
 func loadApp(t *testing.T, spec manifest.AppSpec) state.AppState {
 	t.Helper()
 	st, err := state.Load(spec.AppStateFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return st.App()
+	app, _ := st.Copy(1)
+	return app
+}
+
+// loadCopies returns the record of every copy, in copy order.
+func loadCopies(t *testing.T, spec manifest.AppSpec) []state.AppState {
+	t.Helper()
+	st, err := state.Load(spec.AppStateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Copies()
 }
 
 func waitReady(t *testing.T, host string, port int) {
@@ -290,28 +331,30 @@ func startCopy(t *testing.T, spec manifest.AppSpec) state.AppState {
 	if err := appRegistry.Remember(spec); err != nil {
 		t.Fatal(err)
 	}
-	app, _ := startRaw(t, spec)
+	app, _ := startRaw(t, spec, 1)
 	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{app}}); err != nil {
 		t.Fatal(err)
 	}
 	waitReady(t, process.InternalHost, app.Port)
+	refreshPools()
 	if err := syncProxy(spec.AppStateFile); err != nil {
 		t.Fatalf("syncProxy: %v", err)
 	}
 	return app
 }
 
-// startRaw starts spec's process on a free internal port and returns its
-// record and exit channel, without registering, saving or syncing anything.
-func startRaw(t *testing.T, spec manifest.AppSpec) (state.AppState, <-chan process.Exit) {
+// startRaw starts copy n of spec's app on a free internal port and returns
+// its record and exit channel, without registering, saving or syncing
+// anything.
+func startRaw(t *testing.T, spec manifest.AppSpec, n int) (state.AppState, <-chan process.Exit) {
 	t.Helper()
-	port, err := process.PickPort(takenPorts(spec.AppStateFile), func(p int) bool {
+	port, err := process.PickPort(takenPorts(spec.AppStateFile, n), func(p int) bool {
 		return process.PortAvailable(process.InternalHost, p) == nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, done, err := process.Start(spec, port)
+	app, done, err := process.Start(spec, n, port, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +369,7 @@ func startOldStyle(t *testing.T, spec manifest.AppSpec) state.AppState {
 	if err := appRegistry.Remember(spec); err != nil {
 		t.Fatal(err)
 	}
-	app, _, err := process.Start(spec, spec.Port)
+	app, _, err := process.Start(spec, 1, spec.Port, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

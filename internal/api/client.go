@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
 )
@@ -101,4 +103,26 @@ func Status(socketPath string) (StatusResponse, error) {
 	}
 
 	return out, nil
+}
+
+// PIDHeader is the response header in which shinyctl-api names its process.
+const PIDHeader = "X-Shinyctl-Pid"
+
+// Healthy asks shinyctl-api at socketPath whether it is up: /healthz answers
+// only once it is, not merely listening. It also returns the process that
+// answered (0 from a shinyctl-api that doesn't say), which tells a daemon
+// just started from another that was already there.
+func Healthy(socketPath string) (pid int, ok bool) {
+	client := unixClient(socketPath)
+	client.Timeout = 500 * time.Millisecond
+	resp, err := client.Get("http://unix/healthz")
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	pid, _ = strconv.Atoi(resp.Header.Get(PIDHeader))
+	return pid, true
 }

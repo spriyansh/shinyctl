@@ -33,7 +33,7 @@ type supEnv struct {
 func newSupEnv(t *testing.T) *supEnv {
 	t.Helper()
 	dir := shortDir(t)
-	return &supEnv{settings: SettingsFor(dir), dir: dir}
+	return &supEnv{settings: settingsFor(dir), dir: dir}
 }
 
 func (e *supEnv) supervisor(t *testing.T, build string) *Supervisor {

@@ -111,6 +111,15 @@ func Validate(spec AppSpec) error {
 		return fmt.Errorf("entrypoint-file is required")
 	}
 
+	// "/" would break the log's path, and "@" keeps the name of a copy's log
+	// (<app-group>-<app-name>@<copy>.log) from being another app's.
+	if strings.ContainsAny(spec.AppGroup, "/@") {
+		return fmt.Errorf(`app-group must not contain "/" or "@"`)
+	}
+	if strings.ContainsAny(spec.AppName, "/@") {
+		return fmt.Errorf(`app-name must not contain "/" or "@"`)
+	}
+
 	// Catch the two most common first-run mistakes immediately and
 	// synchronously, instead of letting them surface as a silent,
 	// backoff-free retry loop on shinyctl-api's side: before this check
@@ -145,14 +154,18 @@ func Validate(spec AppSpec) error {
 		return fmt.Errorf("port must not be between %d and %d, which shinyctl keeps for the apps' own processes", InternalPortMin, InternalPortMax)
 	}
 
-	// shinyctl runs exactly one copy of each app for now. The load balancer
-	// in front of it could spread requests over more, but nothing starts or
-	// tracks a second copy yet. Reject rather than silently ignore, so a
-	// manifest never claims more than what's actually running. Omitting the
-	// field (0) is fine — it's optional precisely because 1 is its only
-	// legal value.
-	if spec.Replicas < 0 || spec.Replicas > 1 {
-		return fmt.Errorf("replicas must be 1 or omitted — shinyctl runs one copy of each app for now")
+	// Each copy is a full R process, so the limits catch typos.
+	if spec.Replicas < 0 || spec.Replicas > MaxReplicas {
+		return fmt.Errorf("replicas must be between 1 and %d", MaxReplicas)
+	}
+	if w := spec.WarmReplicas; w != nil && (*w < 0 || *w > MaxWarmReplicas) {
+		return fmt.Errorf("warm-replicas must be between 0 and %d", MaxWarmReplicas)
+	}
+
+	switch spec.LBPolicy {
+	case "", LBLeastConn, LBRoundRobin, LBRandom, LBFirst:
+	default:
+		return fmt.Errorf("lb-policy must be one of %q, %q, %q, %q", LBLeastConn, LBRoundRobin, LBRandom, LBFirst)
 	}
 
 	switch spec.RestartPolicy {

@@ -173,8 +173,9 @@ func TestHandleApply_PortChangeOntoTakenPort(t *testing.T) {
 }
 
 // TestHandleApply_StoppedAppOntoTakenPort: an app that isn't served has no
-// listener to protect, so applying it onto a taken port keeps today's
-// semantics: the start fails with one crash recorded and no stale PID.
+// listener to protect, so applying it onto a taken port fails. Nothing ran,
+// so it is not a crash: none is recorded, and status says why the app isn't
+// started.
 func TestHandleApply_StoppedAppOntoTakenPort(t *testing.T) {
 	useFakeRscript(t)
 	dir := t.TempDir()
@@ -195,14 +196,18 @@ func TestHandleApply_StoppedAppOntoTakenPort(t *testing.T) {
 
 	spec2 := spec1
 	spec2.Port = ports[1]
-	if rec := postJSON(t, handleApply, spec2); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("apply onto a taken port: status = %d, want 500", rec.Code)
+	rec := postJSON(t, handleApply, spec2)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "is not available") {
+		t.Fatalf("apply onto a taken port: status = %d, body = %s, want 500 with the bind message", rec.Code, rec.Body.String())
 	}
 
 	time.Sleep(250 * time.Millisecond)
 	app := loadApp(t, spec1)
-	if app.PID != 0 || app.CrashCount != 1 || !app.LastExitFailed {
-		t.Errorf("recorded app = %+v, want pid 0 and exactly one failed exit", app)
+	if app.PID != 0 || app.CrashCount != 0 || !app.LastExitAt.IsZero() || app.LastExitFailed {
+		t.Errorf("recorded app = %+v, want pid 0 and no exit recorded: the port is not the app's fault", app)
+	}
+	if s := statusOf(t, "app"); !strings.Contains(s.NotStarted, "is not available") {
+		t.Errorf("status = %+v, want NotStarted to say the port is taken", s)
 	}
 }
 
@@ -525,7 +530,7 @@ func TestHandleApply_StartsOnInternalPort(t *testing.T) {
 }
 
 // TestHandleApply_PortUsedByAnotherApp: two apps on one port. The second
-// fails with a message naming the first, one crash is recorded against it,
+// fails with a message naming the first, no crash is recorded against it,
 // and the first keeps serving.
 func TestHandleApply_PortUsedByAnotherApp(t *testing.T) {
 	useFakeRscript(t)
@@ -551,8 +556,11 @@ func TestHandleApply_PortUsedByAnotherApp(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 
-	if b := loadApp(t, specB); b.PID != 0 || b.CrashCount != 1 {
-		t.Errorf("recorded app B = %+v, want pid 0 and one crash", b)
+	if b := loadApp(t, specB); b.PID != 0 || b.CrashCount != 0 || !b.LastExitAt.IsZero() {
+		t.Errorf("recorded app B = %+v, want pid 0 and no crash", b)
+	}
+	if s := statusOf(t, "other"); s.NotStarted != want {
+		t.Errorf("status of B: NotStarted = %q, want %q", s.NotStarted, want)
 	}
 	waitServed(t, specA, a.PID)
 }
@@ -627,7 +635,7 @@ func TestHandleApply_ReplacementKeepsInternalPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	var err error
-	a, _, err = process.Start(spec1, high)
+	a, _, err = process.Start(spec1, 1, high, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,8 +701,8 @@ func TestHandleRestart_ControlCharacterInAPath(t *testing.T) {
 		t.Error("the spec was remembered")
 		appRegistry.Forget(spec.AppStateFile)
 	}
-	if app := loadApp(t, spec); app.PID != 0 {
-		t.Errorf("record = %+v, want nothing started", app)
+	if recs := loadCopies(t, spec); len(recs) != 0 {
+		t.Errorf("records = %+v, want nothing started", recs)
 	}
 }
 

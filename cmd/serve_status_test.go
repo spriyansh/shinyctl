@@ -16,6 +16,24 @@ import (
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
+// statusOf asks the status handler about the app called name.
+func statusOf(t *testing.T, name string) api.AppStatus {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	var resp api.StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range resp.Apps {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("no app %q in the status", name)
+	return api.AppStatus{}
+}
+
 // TestHandleStatus_ReportsMemory: a running app shows its memory, a stopped
 // one doesn't, and a record whose PID now belongs to a stranger never shows
 // the stranger's memory.
@@ -69,14 +87,17 @@ func TestHandleStatus_ReportsMemory(t *testing.T) {
 		byName[s.Name] = s
 	}
 
-	if s := byName["running"]; !s.Alive || s.RSSBytes <= 0 {
-		t.Errorf("running = %+v, want alive with a positive RSSBytes", s)
+	if s := byName["running"]; len(s.Copies) != 1 || !s.Copies[0].Alive || s.Copies[0].RSSBytes <= 0 {
+		t.Errorf("running = %+v, want one alive copy with a positive RSSBytes", s)
 	}
-	if s := byName["stopped"]; s.RSSBytes != 0 {
-		t.Errorf("stopped = %+v, want RSSBytes 0", s)
+	if s := byName["stopped"]; len(s.Copies) != 0 {
+		t.Errorf("stopped = %+v, want no copies", s)
 	}
-	if s := byName["reused"]; s.Alive || s.RSSBytes != 0 {
-		t.Errorf("reused = %+v, want not alive and RSSBytes 0 (the stranger %d is not ours)", s, strangerPID)
+	if s := byName["reused"]; len(s.Copies) != 1 || s.Copies[0].Alive || s.Copies[0].RSSBytes != 0 {
+		t.Errorf("reused = %+v, want one copy, not alive and RSSBytes 0 (the stranger %d is not ours)", s, strangerPID)
+	}
+	if resp.BalancerRSS <= 0 {
+		t.Errorf("BalancerRSS = %d, want the load balancer's memory", resp.BalancerRSS)
 	}
 }
 
@@ -103,7 +124,7 @@ func TestHandleStatus_Ready(t *testing.T) {
 	if err := appRegistry.Remember(unsynced); err != nil {
 		t.Fatal(err)
 	}
-	b, _ = startRaw(t, unsynced)
+	b, _ = startRaw(t, unsynced, 1)
 	if err := state.Save(unsynced.AppStateFile, state.State{AppGroup: unsynced.AppGroup, Apps: []state.AppState{b}}); err != nil {
 		t.Fatal(err)
 	}
@@ -124,19 +145,33 @@ func TestHandleStatus_Ready(t *testing.T) {
 	}
 
 	got := status()
-	if s := got["running"]; !s.Alive || !s.Ready || s.Port != running.Port {
-		t.Errorf("running = %+v, want alive and ready on the app's own port", s)
+	if s := got["running"]; len(s.Copies) != 1 || !s.Copies[0].Alive || !s.Copies[0].Ready || s.Port != running.Port {
+		t.Errorf("running = %+v, want an alive, ready copy on the app's own port", s)
 	}
-	if s := got["unsynced"]; !s.Alive || s.Ready {
-		t.Errorf("unsynced = %+v, want alive but not ready", s)
+	if s := got["unsynced"]; len(s.Copies) != 1 || !s.Copies[0].Alive || s.Copies[0].Ready {
+		t.Errorf("unsynced = %+v, want an alive copy that is not ready", s)
 	}
 
+	refreshPools()
 	if err := syncProxy(""); err != nil {
 		t.Fatal(err)
 	}
-	if s := status()["unsynced"]; !s.Ready {
-		t.Errorf("unsynced after the sync = %+v, want ready", s)
+	if s := status()["unsynced"]; len(s.Copies) != 1 || !s.Copies[0].Ready || s.Copies[0].Role != "active" {
+		t.Errorf("unsynced after the sync = %+v, want an active, ready copy", s)
 	}
+}
+
+func newStatusRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }
+
+func newStatusRequest() *http.Request { return httptest.NewRequest(http.MethodGet, "/status", nil) }
+
+func decodeStatus(t *testing.T, rec *httptest.ResponseRecorder) api.StatusResponse {
+	t.Helper()
+	var resp api.StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding %q: %v", rec.Body.String(), err)
+	}
+	return resp
 }
 
 // TestHandleStatus_AppsInAFixedOrder: by name, then group, then port, however

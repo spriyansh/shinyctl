@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/spriyansh/shinyctl/internal/proxy/lb"
 )
 
 // proxyHome is a fresh HOME for a subprocess proxy, with its proxy
@@ -23,7 +26,7 @@ func proxyHome(t *testing.T, apps ...App) (home, dir string, s Settings) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	s = SettingsFor(dir)
+	s = settingsFor(dir)
 	cfg, err := Render(s, apps)
 	if err != nil {
 		t.Fatal(err)
@@ -31,12 +34,20 @@ func proxyHome(t *testing.T, apps ...App) (home, dir string, s Settings) {
 	if err := os.WriteFile(s.ConfigPath, cfg, 0600); err != nil {
 		t.Fatal(err)
 	}
+	// The copies this process's table holds, for the proxy to read at start.
+	copies, err := json.Marshal(lb.Current())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.CopiesPath, copies, 0600); err != nil {
+		t.Fatal(err)
+	}
 	return home, dir, s
 }
 
 func TestRun_SecondInstanceRefused(t *testing.T) {
 	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "up") }))
-	app := upstreamApp("a", freePort(t), up)
+	app := servedApp(t, "a", freePort(t), up)
 	home, _, s := proxyHome(t, app)
 	admin := Admin{Socket: s.AdminSocket}
 
@@ -95,7 +106,7 @@ func TestRun_SIGTERMExitsAndReleasesLock(t *testing.T) {
 func TestRun_FallsBackWhenConfigFails(t *testing.T) {
 	taken := freePort(t)
 	hold(t, taken)
-	home, _, s := proxyHome(t, upstreamApp("a", taken, "127.0.0.1:20000"))
+	home, _, s := proxyHome(t, plainApp("a", taken))
 	admin := Admin{Socket: s.AdminSocket}
 
 	p := startSubproxyAt(t, s.ConfigPath, home)
@@ -158,10 +169,10 @@ func TestRun_FallsBackWhenConfigIsUnusable(t *testing.T) {
 // the other directory is left alone.
 func TestRun_ConfigCannotMoveTheControlSocket(t *testing.T) {
 	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "up") }))
-	app := upstreamApp("a", freePort(t), up)
+	app := servedApp(t, "a", freePort(t), up)
 	home, _, s := proxyHome(t, app)
 
-	other := SettingsFor(shortDir(t))
+	other := settingsFor(shortDir(t))
 	cfg, err := Render(other, []App{app})
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +197,7 @@ func TestRun_ConfigCannotMoveTheControlSocket(t *testing.T) {
 // directories.
 func TestRun_WritesNothingOutsideItsDir(t *testing.T) {
 	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "up") }))
-	app := upstreamApp("a", freePort(t), up)
+	app := servedApp(t, "a", freePort(t), up)
 	home, dir, s := proxyHome(t, app)
 	admin := Admin{Socket: s.AdminSocket}
 
@@ -213,8 +224,8 @@ func TestRun_WritesNothingOutsideItsDir(t *testing.T) {
 // and storage, the proxy's own directory's settings are used, and the file's
 // apps are kept.
 func TestWithOwnSettings(t *testing.T) {
-	app := upstreamApp("a", 8080, "127.0.0.1:20000")
-	file, err := Render(SettingsFor("/somewhere/else/proxy"), []App{app})
+	app := plainApp("a", 8080)
+	file, err := Render(settingsFor("/somewhere/else/proxy"), []App{app})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +234,7 @@ func TestWithOwnSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want, err := Render(SettingsFor("/home/me/.shinyctl/proxy"), []App{app})
+	want, err := Render(settingsFor("/home/me/.shinyctl/proxy"), []App{app})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,5 +242,69 @@ func TestWithOwnSettings(t *testing.T) {
 	wantV, _ := decodeConfig(want)
 	if !reflect.DeepEqual(gotV, wantV) {
 		t.Errorf("config = %s\nwant %s", got, want)
+	}
+}
+
+// TestRun_ReadsCopiesFile: a proxy that starts on its own serves from
+// copies.json at once, with no push from shinyctl-api.
+func TestRun_ReadsCopiesFile(t *testing.T) {
+	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "up") }))
+	app := plainApp("a", freePort(t))
+	home, _, s := proxyHome(t, app)
+	copies, _ := json.Marshal(Table{"a": {Active: []string{up}}})
+	if err := os.WriteFile(s.CopiesPath, copies, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	p := startSubproxyAt(t, s.ConfigPath, home)
+	p.waitAnswering(t, Admin{Socket: s.AdminSocket})
+
+	if status, body, _ := get(t, appURL(app)); status != 200 || body != "up" {
+		t.Errorf("response = %d %q, want 200 up", status, body)
+	}
+	if got, err := (Admin{Socket: s.AdminSocket}).Copies(); err != nil || len(got["a"].Active) != 1 {
+		t.Errorf("the table = %v, %v", got, err)
+	}
+}
+
+// TestRun_UnusableCopiesFileServesNoCopies: a copies.json that can't be read
+// is not fatal; the proxy runs, says so, and waits for shinyctl-api.
+func TestRun_UnusableCopiesFileServesNoCopies(t *testing.T) {
+	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "up") }))
+	app := plainApp("a", freePort(t))
+	home, _, s := proxyHome(t, app)
+	s.TryDuration = time.Second
+	cfg, err := Render(s, []App{app})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.ConfigPath, cfg, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.CopiesPath, []byte("{ not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	p := startSubproxyAt(t, s.ConfigPath, home)
+	admin := Admin{Socket: s.AdminSocket}
+	p.waitAnswering(t, admin)
+
+	want := "could not read " + s.CopiesPath + ": the file is not usable; serving no copies until shinyctl-api sends them"
+	if !strings.Contains(p.stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to say %q", p.stderr.String(), want)
+	}
+	if productName.MatchString(p.stderr.String()) {
+		t.Errorf("stderr names the software:\n%s", p.stderr.String())
+	}
+	if status, body, _ := get(t, appURL(app)); status != 503 || !strings.Contains(body, "This app is restarting") {
+		t.Errorf("response = %d %q, want the restarting page", status, body)
+	}
+
+	// shinyctl-api's push puts it right.
+	if err := admin.PutCopies(Table{"a": {Active: []string{up}}}); err != nil {
+		t.Fatal(err)
+	}
+	if status, body, _ := get(t, appURL(app)); status != 200 || body != "up" {
+		t.Errorf("after the push: %d %q", status, body)
 	}
 }

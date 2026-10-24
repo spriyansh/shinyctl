@@ -3,11 +3,14 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/spriyansh/shinyctl/internal/manifest"
 	"github.com/spriyansh/shinyctl/internal/proxy/lb"
 )
 
@@ -61,12 +64,12 @@ const DefaultTryDuration = 15 * time.Second
 
 // App is one app as the load balancer serves it.
 type App struct {
-	Key       string   // the app's state file; also the server's name in the config
-	Name      string   // app-name, for messages
-	Group     string   // app-group, for messages
-	Host      string   // EffectiveHost
-	Port      int      // the manifest's port
-	Upstreams []string // "127.0.0.1:<internal port>" of each copy, in copy order
+	Key      string // the app's state file; also the server's name in the config
+	Name     string // app-name, for messages
+	Group    string // app-group, for messages
+	Host     string // EffectiveHost
+	Port     int    // the manifest's port
+	LBPolicy string // the manifest's lb-policy: how a new visitor picks a copy; "" means least-conn
 }
 
 // CanonicalHost writes an IP address the way the OS and the load balancer
@@ -232,20 +235,48 @@ type headerOps struct {
 }
 
 type reverseProxy struct {
-	Handler          string         `json:"handler"`
-	Upstreams        []upstream     `json:"upstreams"`
-	LoadBalancing    loadBalancing  `json:"load_balancing"`
-	Headers          requestHeaders `json:"headers"`
-	StreamCloseDelay string         `json:"stream_close_delay"`
+	Handler          string           `json:"handler"`
+	DynamicUpstreams dynamicUpstreams `json:"dynamic_upstreams"`
+	LoadBalancing    loadBalancing    `json:"load_balancing"`
+	HealthChecks     healthChecks     `json:"health_checks"`
+	Headers          requestHeaders   `json:"headers"`
+	StreamCloseDelay string           `json:"stream_close_delay"`
 }
 
-type upstream struct {
-	Dial string `json:"dial"`
+// dynamicUpstreams names the source of the app's copies: the copies table
+// (see package lb), under the app's key.
+type dynamicUpstreams struct {
+	Source string `json:"source"`
+	App    string `json:"app"`
 }
 
 type loadBalancing struct {
-	TryDuration string `json:"try_duration"`
-	TryInterval string `json:"try_interval"`
+	SelectionPolicy selectionPolicy `json:"selection_policy"`
+	TryDuration     string          `json:"try_duration"`
+	TryInterval     string          `json:"try_interval"`
+}
+
+// selectionPolicy keeps a visitor on one copy; Fallback picks among the
+// copies of a role for a visitor who has none.
+type selectionPolicy struct {
+	Policy   string     `json:"policy"`
+	App      string     `json:"app"`
+	Cookie   string     `json:"cookie"`
+	Secret   string     `json:"secret"`
+	Fallback policyName `json:"fallback"`
+}
+
+type policyName struct {
+	Policy string `json:"policy"`
+}
+
+type healthChecks struct {
+	Passive passiveChecks `json:"passive"`
+}
+
+type passiveChecks struct {
+	FailDuration string `json:"fail_duration"`
+	MaxFails     int    `json:"max_fails"`
 }
 
 type requestHeaders struct {
@@ -270,11 +301,20 @@ type staticResponse struct {
 // What each part is for:
 //   - stream_close_delay keeps open WebSockets (the Shiny sessions) alive
 //     across a config reload, which would otherwise close them.
+//   - the copies come from the copies table (dynamic_upstreams), not from
+//     the settings, so a copy that dies, a spare that takes over and a
+//     scale change take effect without a reload; a reload binds every
+//     listener again and drops the connections that arrive meanwhile.
+//   - the selection policy keeps each visitor on one copy with a cookie
+//     (see CookieName), and sends new visitors to the active copies, never
+//     to a warm one while an active one is up.
 //   - try_duration and try_interval make a request wait for an app that is
-//     restarting. There are no passive health checks yet: with one copy per
-//     app they only keep the one upstream marked down for a couple of
-//     seconds after R is back, which delays every visitor of every restart.
-//     They come back with several copies, with a value tuned for them.
+//     restarting.
+//   - passive health checks are a backstop for a copy that died before the
+//     table says so: one failed dial marks it down for two seconds and the
+//     visitor moves on within a try_interval. The policy dials a copy that
+//     is marked down when nothing else is up, so a lone copy that restarts
+//     is not held back for those two seconds.
 //   - trusted_proxies makes the load balancer extend the X-Forwarded-*
 //     headers of a front proxy on this machine (nginx terminating TLS, say)
 //     instead of replacing them, so the app still sees the visitor's
@@ -288,6 +328,9 @@ type staticResponse struct {
 //     doesn't pass through the deferred handler for, and turn 502 and 503
 //     into a restarting page that reloads itself.
 func Render(s Settings, apps []App) ([]byte, error) {
+	if len(apps) > 0 && s.Secret == "" {
+		return nil, errors.New("rendering settings: no secret")
+	}
 	try := s.TryDuration
 	if try <= 0 {
 		try = DefaultTryDuration
@@ -308,7 +351,11 @@ func Render(s Settings, apps []App) ([]byte, error) {
 	if len(apps) > 0 {
 		servers := make(map[string]server, len(apps))
 		for _, a := range apps {
-			servers[a.Key] = renderServer(a, try)
+			fallback, err := fallbackPolicy(a.LBPolicy)
+			if err != nil {
+				return nil, fmt.Errorf("rendering settings: app %q: %w", a.Name, err)
+			}
+			servers[a.Key] = renderServer(a, s.Secret, fallback, try)
 		}
 		cfg.Apps = &appsConfig{
 			HTTP: httpApp{Servers: servers},
@@ -326,13 +373,35 @@ func Render(s Settings, apps []App) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func renderServer(a App, try time.Duration) server {
+// fallbackPolicy is the engine's name for a manifest's lb-policy.
+func fallbackPolicy(lbPolicy string) (string, error) {
+	switch lbPolicy {
+	case "", manifest.LBLeastConn:
+		return "least_conn", nil
+	case manifest.LBRoundRobin:
+		return "round_robin", nil
+	case manifest.LBRandom, manifest.LBFirst:
+		return lbPolicy, nil
+	}
+	return "", fmt.Errorf("unknown lb-policy %q", lbPolicy)
+}
+
+func renderServer(a App, secret, fallback string, try time.Duration) server {
 	var rp reverseProxy
 	rp.Handler = "reverse_proxy"
-	for _, u := range a.Upstreams {
-		rp.Upstreams = append(rp.Upstreams, upstream{Dial: u})
+	rp.DynamicUpstreams = dynamicUpstreams{Source: "shinyctl_copies", App: a.Key}
+	rp.LoadBalancing = loadBalancing{
+		SelectionPolicy: selectionPolicy{
+			Policy:   "shinyctl_sticky",
+			App:      a.Key,
+			Cookie:   CookieName(a.Port),
+			Secret:   secret,
+			Fallback: policyName{Policy: fallback},
+		},
+		TryDuration: try.String(),
+		TryInterval: "250ms",
 	}
-	rp.LoadBalancing = loadBalancing{TryDuration: try.String(), TryInterval: "250ms"}
+	rp.HealthChecks = healthChecks{Passive: passiveChecks{FailDuration: "2s", MaxFails: 1}}
 	rp.Headers.Request.Delete = []string{"Via"}
 	rp.StreamCloseDelay = "12h"
 

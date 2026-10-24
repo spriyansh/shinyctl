@@ -21,12 +21,16 @@ type Exit struct {
 	Failed bool // true unless the process exited cleanly (status 0)
 }
 
-// Start launches spec's R process on InternalHost:port and returns its
-// initial state (copy 1, on that port), plus a channel that receives a
-// single Exit the instant the process exits — for any reason, crash or
-// otherwise. The caller can block on it to react to death immediately
-// instead of waiting for the next periodic liveness check.
-func Start(spec manifest.AppSpec, port int) (state.AppState, <-chan Exit, error) {
+// Start launches copy number copy of spec's app, an R process on
+// InternalHost:port, and returns its initial state (that copy, on that port,
+// started at revision), plus a channel that receives a single Exit the
+// instant the process exits — for any reason, crash or otherwise. The caller
+// can block on it to react to death immediately instead of waiting for the
+// next periodic liveness check.
+//
+// The copy's log gets a marker line before R starts, so a log that holds
+// several starts can be read as separate runs.
+func Start(spec manifest.AppSpec, copy, port, revision int) (state.AppState, <-chan Exit, error) {
 	command := RunAppExpression(spec.EntrypointFile, port, InternalHost)
 
 	proc := exec.Command(
@@ -37,7 +41,7 @@ func Start(spec manifest.AppSpec, port int) (state.AppState, <-chan Exit, error)
 	proc.Dir = spec.WorkingDir
 	proc.Env = buildEnv(spec.Env)
 
-	logPath, err := AppLogPath(spec)
+	logPath, err := CopyLogPath(spec, copy)
 	if err != nil {
 		return state.AppState{}, nil, err
 	}
@@ -48,6 +52,12 @@ func Start(spec manifest.AppSpec, port int) (state.AppState, <-chan Exit, error)
 		0644,
 	)
 	if err != nil {
+		return state.AppState{}, nil, err
+	}
+
+	startedAt := time.Now()
+	if _, err := fmt.Fprintf(logFile, "--- shinyctl: starting copy %d at %s ---\n", copy, startedAt.Format(time.RFC3339)); err != nil {
+		logFile.Close()
 		return state.AppState{}, nil, err
 	}
 
@@ -80,10 +90,11 @@ func Start(spec manifest.AppSpec, port int) (state.AppState, <-chan Exit, error)
 	return state.AppState{
 		Name:           spec.AppName,
 		PID:            proc.Process.Pid,
-		Copy:           1,
+		Copy:           copy,
 		Port:           port,
 		EntrypointFile: spec.EntrypointFile,
-		StartedAt:      time.Now(),
+		StartedAt:      startedAt,
 		StartedFrom:    spec.StartFields(),
+		Revision:       revision,
 	}, done, nil
 }

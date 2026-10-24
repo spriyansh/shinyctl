@@ -67,7 +67,7 @@ func TestStopAndDelete_LeaveReusedPIDAlone(t *testing.T) {
 			spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
 			t.Cleanup(func() { appRegistry.Forget(spec.AppStateFile) })
 
-			a, done := startRaw(t, spec)
+			a, done := startRaw(t, spec, 1)
 			killIfAlive(spec, a)
 			select {
 			case <-done:
@@ -126,7 +126,7 @@ func TestStopAndDelete_DeadPIDGetsNoNote(t *testing.T) {
 			spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
 			t.Cleanup(func() { appRegistry.Forget(spec.AppStateFile) })
 
-			a, done := startRaw(t, spec)
+			a, done := startRaw(t, spec, 1)
 			killIfAlive(spec, a)
 			select {
 			case <-done:
@@ -223,7 +223,7 @@ func TestStopAndDelete_OldFormatRecord(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		a, _ = startRaw(t, spec)
+		a, _ = startRaw(t, spec, 1)
 		a.EntrypointFile = ""
 		if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{a}}); err != nil {
 			t.Fatal(err)

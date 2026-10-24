@@ -66,14 +66,28 @@
                 },
                 {
                   "handler": "reverse_proxy",
-                  "upstreams": [
-                    {
-                      "dial": "127.0.0.1:20000"
-                    }
-                  ],
+                  "dynamic_upstreams": {
+                    "source": "shinyctl_copies",
+                    "app": "/home/me/apps/explorer/state.json"
+                  },
                   "load_balancing": {
+                    "selection_policy": {
+                      "policy": "shinyctl_sticky",
+                      "app": "/home/me/apps/explorer/state.json",
+                      "cookie": "lb_8765",
+                      "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                      "fallback": {
+                        "policy": "least_conn"
+                      }
+                    },
                     "try_duration": "15s",
                     "try_interval": "250ms"
+                  },
+                  "health_checks": {
+                    "passive": {
+                      "fail_duration": "2s",
+                      "max_fails": 1
+                    }
                   },
                   "headers": {
                     "request": {
@@ -167,14 +181,28 @@
                 },
                 {
                   "handler": "reverse_proxy",
-                  "upstreams": [
-                    {
-                      "dial": "127.0.0.1:20001"
-                    }
-                  ],
+                  "dynamic_upstreams": {
+                    "source": "shinyctl_copies",
+                    "app": "/home/me/apps/maps/state.json"
+                  },
                   "load_balancing": {
+                    "selection_policy": {
+                      "policy": "shinyctl_sticky",
+                      "app": "/home/me/apps/maps/state.json",
+                      "cookie": "lb_8080",
+                      "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                      "fallback": {
+                        "policy": "round_robin"
+                      }
+                    },
                     "try_duration": "15s",
                     "try_interval": "250ms"
+                  },
+                  "health_checks": {
+                    "passive": {
+                      "fail_duration": "2s",
+                      "max_fails": 1
+                    }
                   },
                   "headers": {
                     "request": {

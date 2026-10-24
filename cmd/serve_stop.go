@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/manifest"
@@ -16,10 +17,10 @@ import (
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
-// handleStop marks spec's app as stopped *before* signaling the process,
-// so that by the time the kill causes its exit-channel to close, the
-// already-running exit-watcher goroutine's call into triggerReconcile is
-// a no-op instead of an instant, unwanted restart. It signals the recorded
+// handleStop marks spec's app as stopped *before* signaling the processes,
+// so that by the time the kill causes their exit-channels to close, the
+// already-running exit-watcher goroutines' calls into triggerReconcile are
+// no-ops instead of instant, unwanted restarts. It signals each recorded
 // process only if that process is still this app.
 func handleStop(w http.ResponseWriter, r *http.Request) {
 	var spec manifest.AppSpec
@@ -50,20 +51,23 @@ func handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, note, err := stopRecorded("stop", spec, currentState.App())
+	note, err := stopAll("stop", spec, currentState.Copies())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Nothing should be running now — clear the record rather than leave
-	// a stale dead PID sitting in state.json.
+	// Nothing should be running now — clear the records rather than leave
+	// stale dead PIDs sitting in state.json.
 	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	forgetApp(spec.AppStateFile)
+	clearNotStarted(spec.AppStateFile)
 
-	// The app is unmanaged now, so its port closes. A failure here is the
+	// The app is unmanaged now, so its port closes and its pool is dropped. A
+	// failure here is the
 	// load balancer's to retry on the next tick; the stop itself is done.
 	if err := syncProxy(""); err != nil {
 		log.Printf("stop: %q: %v", spec.AppName, err)
@@ -111,4 +115,30 @@ func stopRecorded(op string, spec manifest.AppSpec, app state.AppState) (signale
 
 	log.Printf("%s: %q: recorded pid %d is not running this app; not signaling it", op, spec.AppName, app.PID)
 	return false, fmt.Sprintf(" (recorded pid %d is not running this app, so it was not signaled)", app.PID), nil
+}
+
+// stopAll is stopRecorded for every copy at once: they are stopped in
+// parallel, since each may take up to ten seconds to answer SIGTERM, and the
+// notes come back in copy order. The first error is returned after all have
+// been tried.
+func stopAll(op string, spec manifest.AppSpec, recs []state.AppState) (notes string, err error) {
+	results := make([]string, len(recs))
+	errs := make([]error, len(recs))
+	var wg sync.WaitGroup
+	for i, rec := range recs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, results[i], errs[i] = stopRecorded(op, spec, rec)
+		}()
+	}
+	wg.Wait()
+
+	for i := range recs {
+		if errs[i] != nil {
+			return "", errs[i]
+		}
+		notes += results[i]
+	}
+	return notes, nil
 }

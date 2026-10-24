@@ -180,7 +180,7 @@ func (l *logBuffer) String() string {
 func TestCopyPort_WaitsForTheRecordedPort(t *testing.T) {
 	spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
 	recorded := freeInternalPort(t)
-	app := state.AppState{Copy: 1, Port: recorded}
+	st := state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{{Copy: 1, Port: recorded}}}
 	useHooks(t, hooks{PortWait: 2 * time.Second, PortEvery: 20 * time.Millisecond})
 
 	t.Run("a socket the OS releases a moment later is waited for", func(t *testing.T) {
@@ -192,7 +192,7 @@ func TestCopyPort_WaitsForTheRecordedPort(t *testing.T) {
 			time.Sleep(150 * time.Millisecond)
 			ln.Close()
 		}()
-		got, err := copyPort(spec, app)
+		got, err := copyPort(spec, &st, 1)
 		if err != nil || got != recorded {
 			t.Errorf("copyPort = %d, %v, want the recorded port %d kept", got, err, recorded)
 		}
@@ -210,11 +210,11 @@ func TestCopyPort_WaitsForTheRecordedPort(t *testing.T) {
 		log.SetOutput(&logs)
 		defer log.SetOutput(os.Stderr)
 
-		got, err := copyPort(spec, app)
+		got, err := copyPort(spec, &st, 1)
 		if err != nil || got == recorded || got < manifest.InternalPortMin || got > manifest.InternalPortMax {
 			t.Fatalf("copyPort = %d, %v, want another internal port than %d", got, err, recorded)
 		}
-		want := fmt.Sprintf("port %d is taken (listen tcp4 127.0.0.1:%d: bind: address already in use); moving its process to port %d", recorded, recorded, got)
+		want := fmt.Sprintf("port %d is taken (listen tcp4 127.0.0.1:%d: bind: address already in use); moving copy 1 to port %d", recorded, recorded, got)
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log = %q, want it to contain %q", logs.String(), want)
 		}
@@ -308,8 +308,8 @@ func TestHandleStatus_OldStyleRecordReadyByItsOwnPort(t *testing.T) {
 	}
 	for _, s := range resp.Apps {
 		if s.Name == "old" {
-			if !s.Alive || !s.Ready {
-				t.Errorf("status = %+v, want alive and ready", s)
+			if len(s.Copies) != 1 || !s.Copies[0].Alive || !s.Copies[0].Ready {
+				t.Errorf("status = %+v, want one copy, alive and ready", s)
 			}
 			return
 		}

@@ -189,7 +189,7 @@ func TestLoadStateWithoutEntrypointFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := got.App()
+	app := got.Copies()[0]
 	if app.EntrypointFile != "" {
 		t.Errorf("EntrypointFile = %q, want empty", app.EntrypointFile)
 	}
@@ -211,8 +211,8 @@ func TestCopyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.App().Copy != 1 || got.App().Port != 20001 {
-		t.Errorf("App() = %+v, want copy 1 on port 20001", got.App())
+	if app, ok := got.Copy(1); !ok || app.Port != 20001 {
+		t.Errorf("Copy(1) = %+v, %v, want copy 1 on port 20001", app, ok)
 	}
 }
 
@@ -229,8 +229,8 @@ func TestCopyIsOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.App().Copy != 0 || got.App().Port != 8881 {
-		t.Errorf("App() = %+v, want copy 0 on port 8881", got.App())
+	if app, ok := got.Copy(0); !ok || app.Port != 8881 {
+		t.Errorf("Copy(0) = %+v, %v, want copy 0 on port 8881", app, ok)
 	}
 
 	if err := Save(path, got); err != nil {

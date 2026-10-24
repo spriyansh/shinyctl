@@ -236,6 +236,8 @@ func TestValidate(t *testing.T) {
 		Replicas:       1,
 	}
 
+	zero, sixteen, seventeen, minusOne := 0, 16, 17, -1
+
 	cases := []struct {
 		name    string
 		mutate  func(s AppSpec) AppSpec
@@ -243,9 +245,26 @@ func TestValidate(t *testing.T) {
 	}{
 		{"valid as-is", func(s AppSpec) AppSpec { return s }, false},
 		{"omitted replicas accepted", func(s AppSpec) AppSpec { s.Replicas = 0; return s }, false},
-		{"replicas of 2 rejected", func(s AppSpec) AppSpec { s.Replicas = 2; return s }, true},
+		{"replicas of 16 accepted", func(s AppSpec) AppSpec { s.Replicas = 16; return s }, false},
+		{"replicas of 17 rejected", func(s AppSpec) AppSpec { s.Replicas = 17; return s }, true},
 		{"negative replicas rejected", func(s AppSpec) AppSpec { s.Replicas = -1; return s }, true},
-		{"a space in the working dir accepted", func(s AppSpec) AppSpec { s.WorkingDir = "/srv/my apps"; return s }, false},
+		{"warm-replicas of 0 accepted", func(s AppSpec) AppSpec { s.WarmReplicas = &zero; return s }, false},
+		{"warm-replicas of 16 accepted", func(s AppSpec) AppSpec { s.WarmReplicas = &sixteen; return s }, false},
+		{"warm-replicas of 17 rejected", func(s AppSpec) AppSpec { s.WarmReplicas = &seventeen; return s }, true},
+		{"negative warm-replicas rejected", func(s AppSpec) AppSpec { s.WarmReplicas = &minusOne; return s }, true},
+		{"lb-policy least-conn accepted", func(s AppSpec) AppSpec { s.LBPolicy = "least-conn"; return s }, false},
+		{"lb-policy round-robin accepted", func(s AppSpec) AppSpec { s.LBPolicy = "round-robin"; return s }, false},
+		{"lb-policy random accepted", func(s AppSpec) AppSpec { s.LBPolicy = "random"; return s }, false},
+		{"lb-policy first accepted", func(s AppSpec) AppSpec { s.LBPolicy = "first"; return s }, false},
+		{"the engine's spelling least_conn rejected", func(s AppSpec) AppSpec { s.LBPolicy = "least_conn"; return s }, true},
+		{"unknown lb-policy rejected", func(s AppSpec) AppSpec { s.LBPolicy = "ip-hash"; return s }, true},
+		{"a space in the entrypoint path accepted", func(s AppSpec) AppSpec { s.WorkingDir = "/srv/my apps"; return s }, false},
+		{"a tab in the working dir is Validate's business no more", func(s AppSpec) AppSpec { s.WorkingDir = "/srv/a\tb"; return s }, false},
+		{"app-name with @ rejected", func(s AppSpec) AppSpec { s.AppName = "a@2"; return s }, true},
+		{"app-name with / rejected", func(s AppSpec) AppSpec { s.AppName = "a/b"; return s }, true},
+		{"app-group with @ rejected", func(s AppSpec) AppSpec { s.AppGroup = "g@x"; return s }, true},
+		{"app-group with / rejected", func(s AppSpec) AppSpec { s.AppGroup = "g/x"; return s }, true},
+		{"app-name with a dash and a dot accepted", func(s AppSpec) AppSpec { s.AppName = "my-app.v2"; return s }, false},
 		{"omitted host accepted", func(s AppSpec) AppSpec { s.Host = ""; return s }, false},
 		{"loopback host accepted", func(s AppSpec) AppSpec { s.Host = "127.0.0.1"; return s }, false},
 		{"IPv6 host accepted", func(s AppSpec) AppSpec { s.Host = "::1"; return s }, false},
@@ -284,11 +303,21 @@ func TestValidate(t *testing.T) {
 			t.Errorf("reserved port: %v, want %q", err, want)
 		}
 
-		spec = base
-		spec.Replicas = 2
-		want = "replicas must be 1 or omitted — shinyctl runs one copy of each app for now"
-		if err := Validate(spec); err == nil || err.Error() != want {
-			t.Errorf("replicas: %v, want %q", err, want)
+		for name, c := range map[string]struct {
+			mutate func(*AppSpec)
+			want   string
+		}{
+			"replicas":      {func(s *AppSpec) { s.Replicas = 17 }, "replicas must be between 1 and 16"},
+			"warm-replicas": {func(s *AppSpec) { s.WarmReplicas = &seventeen }, "warm-replicas must be between 0 and 16"},
+			"lb-policy":     {func(s *AppSpec) { s.LBPolicy = "least_conn" }, `lb-policy must be one of "least-conn", "round-robin", "random", "first"`},
+			"app-name":      {func(s *AppSpec) { s.AppName = "a@b" }, `app-name must not contain "/" or "@"`},
+			"app-group":     {func(s *AppSpec) { s.AppGroup = "g/h" }, `app-group must not contain "/" or "@"`},
+		} {
+			spec = base
+			c.mutate(&spec)
+			if err := Validate(spec); err == nil || err.Error() != c.want {
+				t.Errorf("%s: %v, want %q", name, err, c.want)
+			}
 		}
 	})
 

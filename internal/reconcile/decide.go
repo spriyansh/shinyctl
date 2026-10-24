@@ -27,9 +27,9 @@ const (
 )
 
 // RecordExit folds one process exit into app's crash-tracking fields. It's
-// a pure function deliberately kept separate from Decide: an exit is a
-// fact that happened once and must be persisted, whereas Decide re-runs on
-// every reconcile tick and must stay re-derivable from whatever's already
+// a pure function deliberately kept separate from DecideCopies: an exit is a
+// fact that happened once and must be persisted, whereas DecideCopies re-runs
+// on every reconcile tick and must stay re-derivable from whatever's already
 // on disk.
 func RecordExit(app state.AppState, exit process.Exit) state.AppState {
 	app.LastExitAt = exit.At
@@ -74,8 +74,9 @@ func backoffDelay(crashCount int) time.Duration {
 
 // GaveUp reports whether the restart policy has ended app's story: it has
 // exited at least once, and the policy says not to bring back an exit like
-// its last. Decide stops restarting such an app, and its port stops
-// answering with a restarting page that would never end.
+// its last. DecideCopies stops restarting such a copy, and when every copy
+// has given up the app's port stops answering with a restarting page that
+// would never end.
 //
 // It gates on "has this app ever exited," not on CrashCount: RecordExit
 // zeroes CrashCount on a clean exit, so keying off it would make `never`
@@ -92,47 +93,6 @@ func GaveUp(spec manifest.AppSpec, app state.AppState) bool {
 		return !app.LastExitFailed
 	}
 	return false
-}
-
-// Decide is the reconcile loop's pure decision function: given what spec
-// wants, what state.json last recorded, and a freshly-probed alive bool,
-// it says what to do — never does it itself. now is the caller's
-// time.Now(), passed in rather than read here so this stays deterministic
-// and table-testable.
-func Decide(spec manifest.AppSpec, current state.State, alive bool, now time.Time) Action {
-	app := current.App()
-
-	// A live process is judged only on whether it still matches the
-	// manifest. Restart policy and backoff describe what happens after an
-	// exit, so they don't apply to a process that is running: one started
-	// from an old manifest is replaced even if its predecessor crashed a
-	// moment ago, or the policy says never.
-	if alive {
-		// A record without a copy number is a process from before the load
-		// balancer, holding the app's port itself. Replacing it is not a
-		// manifest change; it is the move behind the load balancer.
-		if app.Copy == 0 {
-			return Action{Type: ActionStart, Spec: spec, Upgrade: true}
-		}
-
-		changed := changedFields(app, spec)
-		if len(changed) == 0 {
-			return Action{Type: ActionNone} // Spec left as zero value, unused
-		}
-		return Action{Type: ActionStart, Spec: spec, Changed: changed}
-	}
-
-	if GaveUp(spec, app) {
-		return Action{Type: ActionNone}
-	}
-
-	if !app.LastExitAt.IsZero() {
-		if now.Sub(app.LastExitAt) < backoffDelay(app.CrashCount) {
-			return Action{Type: ActionBackoff, Spec: spec}
-		}
-	}
-
-	return Action{Type: ActionStart, Spec: spec} // "start, and here's what to start"
 }
 
 // fieldOrder is the order manifest fields are listed in replies: the order

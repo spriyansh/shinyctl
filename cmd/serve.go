@@ -10,16 +10,25 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/proxy"
 	"github.com/spriyansh/shinyctl/internal/registry"
 )
 
 var detach bool
+
+// handleHealthz answers once shinyctl-api is up, naming its process so that
+// `serve -d` can tell its own child from a daemon that was already running.
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set(api.PIDHeader, strconv.Itoa(os.Getpid()))
+	fmt.Fprintln(w, "ok")
+}
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
@@ -37,13 +46,11 @@ var serveCmd = &cobra.Command{
 				return err
 			}
 
-			pid, err := process.LaunchDetached(exePath, []string{"serve"}, logPath)
+			socketPath, err := process.SocketPath()
 			if err != nil {
 				return err
 			}
-
-			fmt.Printf("shinyctl-api started in background: pid %d, logs at %s\n", pid, logPath)
-			return nil
+			return newDetacher(exePath, socketPath, logPath).run()
 		}
 
 		// Daemon-side output goes through log, not fmt, so api.log carries
@@ -113,9 +120,7 @@ var serveCmd = &cobra.Command{
 		go sup.Run(loopCtx)
 
 		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintln(w, "ok")
-		})
+		mux.HandleFunc("/healthz", handleHealthz)
 		mux.HandleFunc("/apply", handleApply)
 		mux.HandleFunc("/status", handleStatus)
 		mux.HandleFunc("/stop", handleStop)

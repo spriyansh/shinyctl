@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -34,6 +35,16 @@ func newGwEnv(t *testing.T) *gwEnv {
 	}
 	e.gw = NewGateway(e.settings, e.sup)
 	return e
+}
+
+// app is an app on a public port whose active copy listens at dial, in the
+// table of this env's proxy.
+func (e *gwEnv) app(t *testing.T, key string, publicPort int, dial string) App {
+	t.Helper()
+	if err := e.gw.SetPool(key, Pool{Active: []string{dial}}); err != nil {
+		t.Fatal(err)
+	}
+	return plainApp(key, publicPort)
 }
 
 func okUpstream(t *testing.T, body string) string {
@@ -62,7 +73,7 @@ func configApps(t *testing.T, path string) []App {
 
 func TestGateway_SyncServesAndRemoves(t *testing.T) {
 	e := newGwEnv(t)
-	a := upstreamApp("a", freePort(t), okUpstream(t, "a"))
+	a := e.app(t, "a", freePort(t), okUpstream(t, "a"))
 
 	left, err := e.gw.Sync([]App{a})
 	if err != nil || len(left) != 0 {
@@ -90,10 +101,10 @@ func TestGateway_SyncServesAndRemoves(t *testing.T) {
 
 func TestGateway_LeavesOutTakenPort(t *testing.T) {
 	e := newGwEnv(t)
-	a := upstreamApp("a", freePort(t), okUpstream(t, "a"))
+	a := e.app(t, "a", freePort(t), okUpstream(t, "a"))
 	taken := freePort(t)
 	ln := hold(t, taken)
-	b := upstreamApp("b", taken, okUpstream(t, "b"))
+	b := e.app(t, "b", taken, okUpstream(t, "b"))
 
 	left, err := e.gw.Sync([]App{a, b})
 	if err != nil {
@@ -164,9 +175,9 @@ func TestGateway_NonCanonicalHostOnTakenPort(t *testing.T) {
 			e := newGwEnv(t)
 			taken := freePort(t)
 			c.holder(t, taken)
-			a := upstreamApp("a", taken, okUpstream(t, "a"))
+			a := e.app(t, "a", taken, okUpstream(t, "a"))
 			a.Host = c.host
-			b := upstreamApp("b", freePort(t), okUpstream(t, "b"))
+			b := e.app(t, "b", freePort(t), okUpstream(t, "b"))
 
 			left, err := e.gw.Sync([]App{a, b})
 			if err != nil {
@@ -181,7 +192,7 @@ func TestGateway_NonCanonicalHostOnTakenPort(t *testing.T) {
 			}
 
 			// Not tried again, and b's changes still go through.
-			c2 := upstreamApp("c", freePort(t), okUpstream(t, "c"))
+			c2 := e.app(t, "c", freePort(t), okUpstream(t, "c"))
 			left, err = e.gw.Sync([]App{a, b, c2})
 			if err != nil || left["a"] == nil {
 				t.Fatalf("second Sync = %v, %v", left, err)
@@ -197,8 +208,8 @@ func TestGateway_NonCanonicalHostOnTakenPort(t *testing.T) {
 func TestGateway_ConflictingApps(t *testing.T) {
 	e := newGwEnv(t)
 	port := freePort(t)
-	a := upstreamApp("a", port, okUpstream(t, "a"))
-	b := upstreamApp("b", port, okUpstream(t, "b"))
+	a := e.app(t, "a", port, okUpstream(t, "a"))
+	b := e.app(t, "b", port, okUpstream(t, "b"))
 
 	left, err := e.gw.Sync([]App{a, b})
 	if err != nil {
@@ -213,7 +224,7 @@ func TestGateway_ConflictingApps(t *testing.T) {
 
 func TestGateway_NoReloadWhenUnchanged(t *testing.T) {
 	e := newGwEnv(t)
-	a := upstreamApp("a", freePort(t), okUpstream(t, "a"))
+	a := e.app(t, "a", freePort(t), okUpstream(t, "a"))
 
 	for i := 0; i < 2; i++ {
 		if _, err := e.gw.Sync([]App{a}); err != nil {
@@ -228,7 +239,8 @@ func TestGateway_NoReloadWhenUnchanged(t *testing.T) {
 func TestGateway_NoReloadAfterAdoption(t *testing.T) {
 	e := newSupEnv(t)
 	e.cleanupProxy(t)
-	a := upstreamApp("a", freePort(t), okUpstream(t, "a"))
+	a := plainApp("a", freePort(t))
+	up := okUpstream(t, "a")
 
 	supA := e.supervisor(t, "")
 	stopA := run(t, supA)
@@ -236,6 +248,9 @@ func TestGateway_NoReloadAfterAdoption(t *testing.T) {
 		t.Fatal("the load balancer did not become ready")
 	}
 	gwA := NewGateway(e.settings, supA)
+	if err := gwA.SetPool(a.Key, Pool{Active: []string{up}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := gwA.Sync([]App{a}); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +293,7 @@ func (f fakeProc) Generation() int              { return 1 }
 func (f fakeProc) PID() int                     { return 4242 }
 
 func TestGateway_RejectedConfigNotWritten(t *testing.T) {
-	s := SettingsFor(shortDir(t))
+	s := settingsFor(shortDir(t))
 	s.AdminSocket = filepath.Join(filepath.Dir(s.ConfigPath), "fake.sock")
 	ln, err := net.Listen("unix", s.AdminSocket)
 	if err != nil {
@@ -301,7 +316,7 @@ func TestGateway_RejectedConfigNotWritten(t *testing.T) {
 	}
 
 	g := newGateway(s, fakeProc{ready: true})
-	a := upstreamApp("a", freePort(t), "127.0.0.1:20000")
+	a := plainApp("a", freePort(t))
 	if _, err := g.Sync([]App{a}); err != errRejected {
 		t.Errorf("Sync error = %v, want errRejected", err)
 	}
@@ -311,7 +326,7 @@ func TestGateway_RejectedConfigNotWritten(t *testing.T) {
 }
 
 func TestGateway_NotRunning(t *testing.T) {
-	g := newGateway(SettingsFor(shortDir(t)), fakeProc{ready: false})
+	g := newGateway(settingsFor(shortDir(t)), fakeProc{ready: false})
 	g.readyWait = 50 * time.Millisecond
 	if _, err := g.Sync(nil); err != ErrNotRunning {
 		t.Errorf("Sync error = %v, want ErrNotRunning", err)
@@ -324,7 +339,7 @@ func TestGateway_NotRunning(t *testing.T) {
 // TestGateway_InvalidSettingsAreNotSent: settings that fail the check never
 // reach the load balancer.
 func TestGateway_InvalidSettingsAreNotSent(t *testing.T) {
-	s := SettingsFor(shortDir(t))
+	s := settingsFor(shortDir(t))
 	s.AdminSocket = filepath.Join(filepath.Dir(s.ConfigPath), "fake.sock")
 	ln, err := net.Listen("unix", s.AdminSocket)
 	if err != nil {
@@ -342,7 +357,7 @@ func TestGateway_InvalidSettingsAreNotSent(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 
 	g := newGateway(s, fakeProc{ready: true})
-	bad := upstreamApp("a", 70000, "127.0.0.1:20000") // not a port
+	bad := plainApp("a", 70000) // not a port
 	if _, err := g.Sync([]App{bad}); err != errInvalid {
 		t.Errorf("Sync error = %v, want errInvalid", err)
 	}
@@ -354,13 +369,13 @@ func TestGateway_InvalidSettingsAreNotSent(t *testing.T) {
 // TestGateway_NotRunningServesNothing: what the load balancer last served is
 // not reported while it is down, even when its socket still answers.
 func TestGateway_NotRunningServesNothing(t *testing.T) {
-	s := SettingsFor(shortDir(t))
+	s := settingsFor(shortDir(t))
 	s.AdminSocket = filepath.Join(filepath.Dir(s.ConfigPath), "fake.sock")
 	ln, err := net.Listen("unix", s.AdminSocket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Render(s, []App{upstreamApp("a", 8080, "127.0.0.1:20000")})
+	cfg, err := Render(s, []App{plainApp("a", 8080)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +400,7 @@ func TestGateway_NotRunningServesNothing(t *testing.T) {
 // dies and is started again comes back with the apps it had, before any sync.
 func TestGateway_RestartedBalancerServesLastGoodConfig(t *testing.T) {
 	e := newGwEnv(t)
-	a := upstreamApp("a", freePort(t), okUpstream(t, "a"))
+	a := e.app(t, "a", freePort(t), okUpstream(t, "a"))
 	if _, err := e.gw.Sync([]App{a}); err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +450,7 @@ func TestBindsTo(t *testing.T) {
 // and a correct retry would be refused.
 func TestGateway_RetriedWideningIsProbedBesideItsOwnSocket(t *testing.T) {
 	e := newGwEnv(t)
-	a := upstreamApp("a", freePort(t), okUpstream(t, "a"))
+	a := e.app(t, "a", freePort(t), okUpstream(t, "a"))
 	if _, err := e.gw.Sync([]App{a}); err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +478,7 @@ func TestGateway_RetriedWideningIsProbedBesideItsOwnSocket(t *testing.T) {
 // held against the app once it asks for a different one again.
 func TestGateway_ForgetsAddressesNobodyAsksFor(t *testing.T) {
 	e := newGwEnv(t)
-	a := upstreamApp("a", freePort(t), okUpstream(t, "a"))
+	a := e.app(t, "a", freePort(t), okUpstream(t, "a"))
 	e.gw.failed["0.0.0.0:"+fmt.Sprint(a.Port)] = true
 	e.gw.failed["127.0.0.1:1"] = true
 
@@ -563,7 +578,7 @@ func TestGateway_PushAfterRestart(t *testing.T) {
 }
 
 func TestGateway_ReplacePoolsKeepsNewer(t *testing.T) {
-	g := newGateway(SettingsFor(shortDir(t)), fakeProc{ready: false})
+	g := newGateway(settingsFor(shortDir(t)), fakeProc{ready: false})
 	p1, p2, p3 := twoCopies(20000, 20001), twoCopies(20002, 20003), twoCopies(20004, 20005)
 
 	g.SetPool("x", p1)
@@ -592,7 +607,7 @@ func TestGateway_ReplacePoolsKeepsNewer(t *testing.T) {
 
 func TestGateway_SyncPrunesPools(t *testing.T) {
 	e := newGwEnv(t)
-	x := upstreamApp("x", freePort(t), okUpstream(t, "x"))
+	x := e.app(t, "x", freePort(t), okUpstream(t, "x"))
 	if err := e.gw.SetPool("x", twoCopies(20000, 20001)); err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +640,7 @@ func TestGateway_SyncPrunesPools(t *testing.T) {
 }
 
 func TestGateway_SetPoolWhenNotRunning(t *testing.T) {
-	g := newGateway(SettingsFor(shortDir(t)), fakeProc{ready: false})
+	g := newGateway(settingsFor(shortDir(t)), fakeProc{ready: false})
 	g.readyWait = 5 * time.Second // a push must not use it
 
 	start := time.Now()
@@ -645,13 +660,50 @@ func TestGateway_SetPoolWhenNotRunning(t *testing.T) {
 }
 
 func TestGateway_SessionsNeedARunningBalancer(t *testing.T) {
-	g := newGateway(SettingsFor(shortDir(t)), fakeProc{ready: false})
+	g := newGateway(settingsFor(shortDir(t)), fakeProc{ready: false})
 	if got := g.Sessions(); got != nil {
 		t.Errorf("Sessions = %v, want nil", got)
 	}
 	if g.BalancerPID() != 4242 {
 		t.Errorf("BalancerPID = %d", g.BalancerPID())
 	}
+}
+
+func TestGateway_SessionsCountOpenRequests(t *testing.T) {
+	e := newGwEnv(t)
+	hold := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(hold) }) }
+	defer release()
+	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hold" {
+			w.WriteHeader(200)
+			w.(http.Flusher).Flush()
+			<-hold
+		}
+	}))
+	app := e.app(t, "a", freePort(t), up)
+	if _, err := e.gw.Sync([]App{app}); err != nil {
+		t.Fatal(err)
+	}
+	served(t, app, "")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if resp, err := http.Get(appURL(app) + "hold"); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	waitFor(t, "the open request to be counted", 5*time.Second, func() bool { return e.gw.Sessions()[up] == 1 })
+
+	release()
+	<-done
+	waitFor(t, "the count to drop", 5*time.Second, func() bool {
+		n, listed := e.gw.Sessions()[up]
+		return listed && n == 0
+	})
 }
 
 // One copy the load balancer would refuse must not take its app out of the

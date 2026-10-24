@@ -126,8 +126,8 @@ func (s AppSpec) CopyCount() int {
 // StartFields returns the manifest settings that shape the process
 // process.Start launches and that the process record does not already
 // hold in typed fields (app-name and entrypoint-file are compared through
-// AppState.Name and EntrypointFile). Start records the map, and Decide
-// compares it with the current manifest to see whether a running app was
+// AppState.Name and EntrypointFile). Start records the map, and
+// DecideCopies compares it with the current manifest to see whether a running app was
 // started from something else.
 //
 // port, host, replicas, warm-replicas and lb-policy are not here: they say

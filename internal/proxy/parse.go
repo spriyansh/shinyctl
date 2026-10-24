@@ -11,9 +11,12 @@ import (
 
 // Parse reads back the apps a config serves: the inverse of Render for what
 // shinyctl-api needs to know about a load balancer it didn't start, or has
-// restarted. Name and Group are not in the config and stay empty. A config
-// of any other shape is an error, so the caller reloads instead of
-// trusting it.
+// restarted: each server's key, host and port. Name, Group and LBPolicy are
+// not read and stay empty. A config of any other shape is an error, so the
+// caller reloads instead of trusting it. A config from a build before the
+// copies table (its servers list their copies themselves) reads the same as
+// a current one, and differs from what Render makes now, so the next sync
+// replaces it.
 func Parse(cfg []byte) ([]App, error) {
 	var c struct {
 		Apps struct {
@@ -54,18 +57,12 @@ func Parse(cfg []byte) ([]App, error) {
 		for _, r := range s.Routes {
 			for _, h := range r.Handle {
 				var rp struct {
-					Handler   string `json:"handler"`
-					Upstreams []struct {
-						Dial string `json:"dial"`
-					} `json:"upstreams"`
+					Handler string `json:"handler"`
 				}
 				if err := json.Unmarshal(h, &rp); err != nil || rp.Handler != "reverse_proxy" {
 					continue
 				}
 				found = true
-				for _, u := range rp.Upstreams {
-					app.Upstreams = append(app.Upstreams, u.Dial)
-				}
 			}
 		}
 		if !found {

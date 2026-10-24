@@ -234,7 +234,7 @@ func TestHandleRestart_LeavesReusedPIDAlone(t *testing.T) {
 		killIfAlive(spec, b)
 	})
 
-	a, done := startRaw(t, spec)
+	a, done := startRaw(t, spec, 1)
 	killIfAlive(spec, a)
 	select {
 	case <-done:
@@ -280,7 +280,7 @@ func TestHandleRestart_DeadPIDGetsNoNote(t *testing.T) {
 		killIfAlive(spec, b)
 	})
 
-	a, done := startRaw(t, spec)
+	a, done := startRaw(t, spec, 1)
 	killIfAlive(spec, a)
 	select {
 	case <-done:
@@ -308,9 +308,9 @@ func TestHandleRestart_DeadPIDGetsNoNote(t *testing.T) {
 
 // TestHandleRestart_OntoTakenPort: a restart onto a port the load balancer
 // can't take is refused before the app is stopped, so it keeps serving where
-// it was. An app that is not being served has no listener to protect, and
-// keeps today's semantics: the start fails with exactly one crash recorded
-// and no stale PID.
+// it was. An app that is not being served has no listener to protect: the
+// start fails, and since nothing ran it is reported as a port in use, not
+// counted as a crash.
 func TestHandleRestart_OntoTakenPort(t *testing.T) {
 	hold := func(t *testing.T, spec manifest.AppSpec) {
 		ln, err := net.Listen("tcp4", net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port)))
@@ -354,7 +354,7 @@ func TestHandleRestart_OntoTakenPort(t *testing.T) {
 		}
 	})
 
-	t.Run("crash-looping app whose port is now taken", func(t *testing.T) {
+	t.Run("crash-looping app whose port is now taken is port-in-use", func(t *testing.T) {
 		useFakeRscript(t)
 		spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
 		t.Cleanup(func() { postJSON(t, handleDelete, spec) })
@@ -371,8 +371,11 @@ func TestHandleRestart_OntoTakenPort(t *testing.T) {
 
 		time.Sleep(250 * time.Millisecond)
 		app := loadApp(t, spec)
-		if app.PID != 0 || app.CrashCount != 1 || !app.LastExitFailed {
-			t.Errorf("recorded app = %+v, want pid 0 and one crash (the history starts over)", app)
+		if app.PID != 0 || app.CrashCount != 0 || !app.LastExitAt.IsZero() {
+			t.Errorf("recorded app = %+v, want pid 0 and no crash (the restart cleared the history, and the port is not the app's fault)", app)
+		}
+		if s := statusOf(t, "app"); !strings.Contains(s.NotStarted, "is not available") {
+			t.Errorf("status = %+v, want NotStarted to say the port is taken", s)
 		}
 	})
 }

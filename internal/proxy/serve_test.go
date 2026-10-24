@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"reflect"
 	"regexp"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+
+	"github.com/spriyansh/shinyctl/internal/proxy/lb"
 )
 
 // These tests run the load balancer inside the test process, so they share
@@ -22,7 +25,7 @@ import (
 // and returns its settings. The socket and storage live in a short temp dir.
 func startInProcess(t *testing.T, try time.Duration, apps ...App) Settings {
 	t.Helper()
-	s := SettingsFor(shortDir(t))
+	s := settingsFor(shortDir(t))
 	s.TryDuration = try
 	cfg, err := Render(s, apps)
 	if err != nil {
@@ -43,7 +46,7 @@ func TestServe_ForwardsAndHidesHeaders(t *testing.T) {
 		gotVia, gotXFF = r.Header.Get("Via"), r.Header.Get("X-Forwarded-For")
 		io.WriteString(w, "from the app")
 	}))
-	app := upstreamApp("a", freePort(t), up)
+	app := servedApp(t, "a", freePort(t), up)
 	startInProcess(t, 0, app)
 
 	// A client-supplied Via must not reach the app either.
@@ -132,7 +135,7 @@ func echoes(t *testing.T, conn net.Conn, r *bufio.Reader, msg string) {
 }
 
 func TestServe_WebSocket(t *testing.T) {
-	app := upstreamApp("a", freePort(t), startUpstream(t, upgradeHandler))
+	app := servedApp(t, "a", freePort(t), startUpstream(t, upgradeHandler))
 	startInProcess(t, 0, app)
 
 	conn, r, head := upgrade(t, app.Addr())
@@ -148,7 +151,7 @@ func TestServe_WebSocket(t *testing.T) {
 }
 
 func TestServe_StreamSurvivesReload(t *testing.T) {
-	a := upstreamApp("a", freePort(t), startUpstream(t, upgradeHandler))
+	a := servedApp(t, "a", freePort(t), startUpstream(t, upgradeHandler))
 	s := startInProcess(t, 0, a)
 
 	conn, r, head := upgrade(t, a.Addr())
@@ -157,7 +160,7 @@ func TestServe_StreamSurvivesReload(t *testing.T) {
 	}
 	echoes(t, conn, r, "before")
 
-	b := upstreamApp("b", freePort(t), startUpstream(t, upgradeHandler))
+	b := servedApp(t, "b", freePort(t), startUpstream(t, upgradeHandler))
 	cfg, err := Render(s, []App{a, b})
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +174,7 @@ func TestServe_StreamSurvivesReload(t *testing.T) {
 
 func TestServe_WaitsOutRestart(t *testing.T) {
 	port := freePort(t)
-	app := upstreamApp("a", freePort(t), fmt.Sprintf("127.0.0.1:%d", port))
+	app := servedApp(t, "a", freePort(t), fmt.Sprintf("127.0.0.1:%d", port))
 	startInProcess(t, 0, app)
 
 	go func() {
@@ -192,7 +195,7 @@ func TestServe_WaitsOutRestart(t *testing.T) {
 var productName = regexp.MustCompile(`(?i)caddy`)
 
 func TestServe_RestartingPage(t *testing.T) {
-	app := upstreamApp("a", freePort(t), fmt.Sprintf("127.0.0.1:%d", freePort(t)))
+	app := servedApp(t, "a", freePort(t), fmt.Sprintf("127.0.0.1:%d", freePort(t)))
 	startInProcess(t, time.Second, app)
 
 	status, body, h := get(t, appURL(app))
@@ -224,7 +227,7 @@ func TestServe_RestartingPage(t *testing.T) {
 // TestServe_ReloadDuringRetryShowsPage: a reload cancels requests that are
 // waiting for a copy, and they come back as 502, which the page must cover.
 func TestServe_ReloadDuringRetryShowsPage(t *testing.T) {
-	app := upstreamApp("a", freePort(t), fmt.Sprintf("127.0.0.1:%d", freePort(t)))
+	app := servedApp(t, "a", freePort(t), fmt.Sprintf("127.0.0.1:%d", freePort(t)))
 	s := startInProcess(t, 15*time.Second, app)
 
 	type result struct {
@@ -238,7 +241,7 @@ func TestServe_ReloadDuringRetryShowsPage(t *testing.T) {
 	}()
 
 	time.Sleep(300 * time.Millisecond)
-	other := upstreamApp("b", freePort(t), startUpstream(t, upgradeHandler))
+	other := servedApp(t, "b", freePort(t), startUpstream(t, upgradeHandler))
 	cfg, err := Render(s, []App{app, other})
 	if err != nil {
 		t.Fatal(err)
@@ -258,12 +261,13 @@ func TestServe_ReloadDuringRetryShowsPage(t *testing.T) {
 }
 
 func TestServe_RejectedConfigKeepsOld(t *testing.T) {
-	a := upstreamApp("a", freePort(t), startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "a") })))
+	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "a") }))
+	a := servedApp(t, "a", freePort(t), up)
 	s := startInProcess(t, 0, a)
 
 	taken := freePort(t)
 	hold(t, taken)
-	b := upstreamApp("b", taken, a.Upstreams[0])
+	b := servedApp(t, "b", taken, up)
 	cfg, err := Render(s, []App{a, b})
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +288,7 @@ func TestServe_RejectedConfigKeepsOld(t *testing.T) {
 
 func TestServe_HostChangeOnSamePort(t *testing.T) {
 	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") }))
-	app := upstreamApp("a", freePort(t), up)
+	app := servedApp(t, "a", freePort(t), up)
 	app.Host = "0.0.0.0"
 	s := startInProcess(t, 0, app)
 
@@ -305,8 +309,8 @@ func TestServe_HostChangeOnSamePort(t *testing.T) {
 // a freshly started shinyctl-api can compare it with what it would render
 // and skip a reload.
 func TestServe_ConfigRoundTrip(t *testing.T) {
-	a := upstreamApp("a", freePort(t), "127.0.0.1:20000")
-	b := upstreamApp("b", freePort(t), "127.0.0.1:20001")
+	a := servedApp(t, "a", freePort(t), "127.0.0.1:20000")
+	b := servedApp(t, "b", freePort(t), "127.0.0.1:20001")
 	s := startInProcess(t, 0, a, b)
 
 	want, err := Render(s, []App{a, b})
@@ -334,7 +338,7 @@ func TestServe_ForwardsFrontProxyHeaders(t *testing.T) {
 		gotProto = r.Header.Get("X-Forwarded-Proto")
 		gotHost = r.Header.Get("X-Forwarded-Host")
 	}))
-	app := upstreamApp("a", freePort(t), up)
+	app := servedApp(t, "a", freePort(t), up)
 	startInProcess(t, 0, app)
 
 	req, _ := http.NewRequest("GET", appURL(app), nil)
@@ -355,5 +359,178 @@ func TestServe_ForwardsFrontProxyHeaders(t *testing.T) {
 	}
 	if gotHost != "lab.example.org" {
 		t.Errorf("X-Forwarded-Host = %q, want lab.example.org", gotHost)
+	}
+}
+
+// copyHandler answers with the copy's name; /hold keeps the request open
+// until the client goes.
+func copyHandler(name string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hold" {
+			w.WriteHeader(200)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		io.WriteString(w, name)
+	})
+}
+
+func jarClient(t *testing.T) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Client{Jar: jar, Timeout: 20 * time.Second}
+}
+
+func bodyOf(t *testing.T, c *http.Client, url string) string {
+	t.Helper()
+	resp, err := c.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
+}
+
+func TestServe_StickyTwoCopies(t *testing.T) {
+	a, b := startUpstream(t, copyHandler("A")), startUpstream(t, copyHandler("B"))
+	app := servedApp(t, "x", freePort(t), a, b)
+	startInProcess(t, 0, app)
+
+	one, two := jarClient(t), jarClient(t)
+
+	// The first visitor holds a request open on its copy, so the second
+	// lands on the other one (least_conn).
+	resp, err := one.Get(appURL(app) + "hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var cookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		cookie = c
+	}
+	if cookie == nil || cookie.Name != CookieName(app.Port) || cookie.Path != "/" || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("cookie = %+v, want %s; Path=/; HttpOnly; SameSite=Lax", cookie, CookieName(app.Port))
+	}
+
+	second := bodyOf(t, two, appURL(app))
+	first := bodyOf(t, one, appURL(app))
+	if first == second {
+		t.Fatalf("both visitors landed on copy %s", first)
+	}
+	for i := 0; i < 10; i++ {
+		if got := bodyOf(t, one, appURL(app)); got != first {
+			t.Fatalf("visitor 1 moved from %s to %s", first, got)
+		}
+		if got := bodyOf(t, two, appURL(app)); got != second {
+			t.Fatalf("visitor 2 moved from %s to %s", second, got)
+		}
+	}
+}
+
+func TestServe_WarmGetsNoNewVisitors(t *testing.T) {
+	a, b, w := startUpstream(t, copyHandler("A")), startUpstream(t, copyHandler("B")), startUpstream(t, copyHandler("W"))
+	app := servedApp(t, "x", freePort(t), a, b)
+	table := lb.Current()
+	table["x"] = Pool{Active: []string{a, b}, Warm: []string{w}}
+	lb.Set(table)
+	startInProcess(t, 0, app)
+
+	seen := map[string]int{}
+	for i := 0; i < 40; i++ {
+		_, body, _ := get(t, appURL(app))
+		seen[body]++
+	}
+	if seen["W"] != 0 || seen["A"] == 0 || seen["B"] == 0 {
+		t.Errorf("40 new visitors reached %v; want only A and B", seen)
+	}
+}
+
+func TestServe_EmptyPoolShowsRestartingPage(t *testing.T) {
+	app := plainApp("x", freePort(t))
+	startInProcess(t, time.Second, app)
+
+	start := time.Now()
+	status, body, h := get(t, appURL(app))
+	if status != 503 || !strings.Contains(body, "This app is restarting") {
+		t.Errorf("response = %d %q, want the 503 page", status, body)
+	}
+	if took := time.Since(start); took < 900*time.Millisecond {
+		t.Errorf("answered after %v, want the request to wait out try_duration", took)
+	}
+	for _, name := range []string{"Server", "Via"} {
+		if v := h.Values(name); len(v) > 0 {
+			t.Errorf("response has %s: %v", name, v)
+		}
+	}
+	if productName.MatchString(fmt.Sprint(h)) || productName.MatchString(body) {
+		t.Errorf("the response names the software:\n%v", h)
+	}
+}
+
+func TestServe_TableSurvivesLoad(t *testing.T) {
+	a := servedApp(t, "a", freePort(t), startUpstream(t, copyHandler("A")))
+	s := startInProcess(t, 0, a)
+	b := servedApp(t, "b", freePort(t), startUpstream(t, copyHandler("B")))
+
+	cfg, err := Render(s, []App{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (Admin{Socket: s.AdminSocket}).Load(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, body, _ := get(t, appURL(a)); body != "A" {
+		t.Errorf("app a after the load: %q", body)
+	}
+	if _, body, _ := get(t, appURL(b)); body != "B" {
+		t.Errorf("app b after the load: %q", body)
+	}
+}
+
+// A cookie is never named after the software, whatever the visitor does.
+func TestServe_CookieAndHeadersNameNothing(t *testing.T) {
+	app := servedApp(t, "x", freePort(t), startUpstream(t, copyHandler("A")))
+	startInProcess(t, 0, app)
+
+	_, _, h := get(t, appURL(app))
+	if productName.MatchString(fmt.Sprint(h)) {
+		t.Errorf("headers name the software: %v", h)
+	}
+	if got := h.Values("Set-Cookie"); len(got) != 1 || !strings.HasPrefix(got[0], "lb_") {
+		t.Errorf("Set-Cookie = %v, want one lb_ cookie", got)
+	}
+}
+
+func TestServe_TakeoverByPush(t *testing.T) {
+	a, w := startUpstream(t, copyHandler("A")), startUpstream(t, copyHandler("W"))
+	app := servedApp(t, "x", freePort(t), a)
+	table := lb.Current()
+	table["x"] = Pool{Active: []string{a}, Warm: []string{w}}
+	lb.Set(table)
+	s := startInProcess(t, 0, app)
+
+	client := jarClient(t)
+	if got := bodyOf(t, client, appURL(app)); got != "A" {
+		t.Fatalf("first visit: %s", got)
+	}
+	// A's copy is gone, and the table says so.
+	if err := (Admin{Socket: s.AdminSocket}).PutCopies(Table{"x": {Active: []string{w}}}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if got := bodyOf(t, client, appURL(app)); got != "W" {
+		t.Errorf("after the push, the visitor of A reached %s, want W", got)
+	}
+	if took := time.Since(start); took > 100*time.Millisecond {
+		t.Errorf("took %v", took)
+	}
+	if got := bodyOf(t, client, appURL(app)); got != "W" {
+		t.Errorf("the visitor was not re-pinned: %s", got)
 	}
 }

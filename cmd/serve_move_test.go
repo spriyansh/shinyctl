@@ -294,7 +294,7 @@ func TestHandleStatus_ReportsWhyAPortIsNotServed(t *testing.T) {
 	if err := appRegistry.Remember(spec); err != nil {
 		t.Fatal(err)
 	}
-	a, _ = startRaw(t, spec)
+	a, _ = startRaw(t, spec, 1)
 	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{a}}); err != nil {
 		t.Fatal(err)
 	}
