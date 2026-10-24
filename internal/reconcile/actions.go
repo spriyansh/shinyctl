@@ -25,4 +25,9 @@ type Action struct {
 	// Changed is set on a Start that replaces a live process: the manifest
 	// fields the process was started from no longer match, in fieldOrder.
 	Changed []string
+
+	// Upgrade is set on a Start that replaces a process from before the
+	// load balancer: it holds the app's own port itself, so it is stopped,
+	// the port claimed, and the app started again behind the load balancer.
+	Upgrade bool
 }

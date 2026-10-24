@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spriyansh/shinyctl/internal/process"
+	"github.com/spriyansh/shinyctl/internal/proxy"
 	"github.com/spriyansh/shinyctl/internal/registry"
 )
 
@@ -59,6 +60,17 @@ var serveCmd = &cobra.Command{
 			return err
 		}
 
+		// Both socket paths are checked before either is bound, so a home
+		// directory that is too long fails here, with a message, and not
+		// halfway through starting.
+		if err := process.CheckSocketPaths(); err != nil {
+			return err
+		}
+		proxyDir, err := process.ProxyDir()
+		if err != nil {
+			return err
+		}
+
 		listener, err := process.ListenUnix(socketPath)
 		if err != nil {
 			return err
@@ -80,6 +92,26 @@ var serveCmd = &cobra.Command{
 			log.Printf("restored %d app(s) from %s", n, registryPath)
 		}
 
+		// The load balancer comes up with shinyctl-api, after the registry
+		// is restored so its first sync already knows every app.
+		exePath, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		logPath, err := process.LogPath()
+		if err != nil {
+			return err
+		}
+		var sup *proxy.Supervisor
+		gateway, sup, err = newGateway(proxyDir, exePath, logPath)
+		if err != nil {
+			return err
+		}
+
+		loopCtx, cancelLoop := context.WithCancel(context.Background())
+		defer cancelLoop()
+		go sup.Run(loopCtx)
+
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintln(w, "ok")
@@ -98,8 +130,6 @@ var serveCmd = &cobra.Command{
 			}
 		}()
 
-		loopCtx, cancelLoop := context.WithCancel(context.Background())
-		defer cancelLoop()
 		go runReconcileLoop(loopCtx)
 
 		log.Printf("listening on %s, reconciling every %s", socketPath, reconcileInterval)
@@ -110,6 +140,8 @@ var serveCmd = &cobra.Command{
 		sig := <-sigs
 		log.Printf("received %s, shutting down", sig)
 
+		// Only shinyctl-api's own loops stop. The load balancer keeps
+		// serving the apps, and the next shinyctl-api adopts it.
 		cancelLoop()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

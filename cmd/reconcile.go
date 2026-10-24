@@ -8,6 +8,7 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/api"
@@ -17,14 +18,76 @@ import (
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
+// watched holds the PIDs of the processes this daemon has an exit-watcher on:
+// started by this daemon run, with the watcher still to record their exit. A
+// process that dies has its exit recorded by its watcher, which has to wait
+// for the state lock a tick may be holding; a tick that finds the process
+// gone before the watcher got there must leave the decision to it, or it
+// starts the app again without the exit ever being counted (a
+// restart-policy never app would come back). A process adopted from an
+// earlier daemon has no watcher, and the tick records its exit itself.
+var watched sync.Map
+
+func isWatched(pid int) bool {
+	_, ok := watched.Load(pid)
+	return ok
+}
+
+// seen is the process of each app that this daemon has found alive, by state
+// file: one entry per app, so it can't grow past the number of apps, and
+// dropped when the app is forgotten. A process that is gone and was never
+// seen alive here died while no daemon was looking (a reboot, or a daemon
+// that was down), which is not a crash to count: the app just starts, as it
+// always has. Only a process seen alive and found dead later, with nobody
+// having recorded its exit, is an unseen exit. The started-at time is part of
+// the key so a reused PID can't match a different record.
+var seen struct {
+	sync.Mutex
+	m map[string]seenProcess
+}
+
+type seenProcess struct {
+	pid     int
+	started time.Time
+}
+
+func markSeen(stateFile string, app state.AppState) {
+	seen.Lock()
+	defer seen.Unlock()
+	if seen.m == nil {
+		seen.m = make(map[string]seenProcess)
+	}
+	seen.m[stateFile] = seenProcess{app.PID, app.StartedAt}
+}
+
+func wasSeen(stateFile string, app state.AppState) bool {
+	seen.Lock()
+	defer seen.Unlock()
+	return seen.m[stateFile] == seenProcess{app.PID, app.StartedAt}
+}
+
+// forgetSeen drops stateFile's entry: its exit has been counted, or the app
+// is gone.
+func forgetSeen(stateFile string) {
+	seen.Lock()
+	defer seen.Unlock()
+	delete(seen.m, stateFile)
+}
+
 // previousInstanceNote is the reply suffix for a start that first stopped
 // app's process: the replacement path here, and restart. changed names the
-// manifest fields behind it, if any.
-func previousInstanceNote(app state.AppState, changed []string) string {
-	if len(changed) == 0 {
-		return fmt.Sprintf(" (stopped the previous instance: pid %d, port %d)", app.PID, app.Port)
+// manifest fields behind it, if any; upgrade says the process was one from
+// before the load balancer. The port is left out: it is an internal one.
+func previousInstanceNote(app state.AppState, changed []string, upgrade bool) string {
+	var parts []string
+	if len(changed) > 0 {
+		parts = append(parts, "manifest changed: "+strings.Join(changed, ", "))
 	}
-	return fmt.Sprintf(" (manifest changed: %s; stopped the previous instance: pid %d, port %d)", strings.Join(changed, ", "), app.PID, app.Port)
+	if upgrade {
+		parts = append(parts, "moved behind the load balancer")
+	}
+	parts = append(parts, fmt.Sprintf("stopped the previous instance: pid %d", app.PID))
+	return " (" + strings.Join(parts, "; ") + ")"
 }
 
 // reconcileLocked runs one decide-and-act cycle for spec: load state,
@@ -61,6 +124,28 @@ func reconcileLocked(spec manifest.AppSpec, resetBackoff bool, settings []string
 	}
 
 	alive := process.IsAlive(spec, app)
+	if alive && app.PID > 0 {
+		markSeen(spec.AppStateFile, app)
+	}
+
+	// An explicit apply or restart means "run it now" and takes none of this.
+	if !alive && !resetBackoff && app.PID > 0 {
+		if isWatched(app.PID) {
+			return api.ApplyResponse{Action: reconcile.ActionNone, Message: "Nothing to change"}, nil // the watcher records the exit and reconciles
+		}
+		if !app.StartedAt.IsZero() && app.LastExitAt.Before(app.StartedAt) && wasSeen(spec.AppStateFile, app) {
+			// This daemon saw the process alive, nobody saw it exit and
+			// nobody will: count it, as a failure since its status is
+			// unknown.
+			forgetSeen(spec.AppStateFile)
+			log.Printf("reconcile: %q: pid %d is gone and its exit was not seen; counting it as a failure", spec.AppName, app.PID)
+			app = reconcile.RecordExit(app, process.Exit{At: time.Now(), Failed: true})
+			if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{app}}); err != nil {
+				return api.ApplyResponse{}, err
+			}
+		}
+	}
+
 	action := reconcile.Decide(spec, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{app}}, alive, time.Now())
 	resp := api.ApplyResponse{Action: action.Type}
 
@@ -77,28 +162,41 @@ func reconcileLocked(spec manifest.AppSpec, resetBackoff bool, settings []string
 	case reconcile.ActionStart:
 		// Decide only answers Start for a live recorded process when the
 		// manifest it was started from has changed in a field that shapes
-		// the process. Left running, that process is orphaned: it keeps
+		// the process, or when it is a process from before the load
+		// balancer. Left running, that process is orphaned: it keeps
 		// serving, but the Save below drops it from state.json, so status
 		// can't see it and delete can't stop it. IsAlive matched its
 		// recorded entrypoint, so it is ours to stop. This happens before
 		// the port check because most changes keep the port, which the old
-		// process still holds.
+		// process still holds (an old-style one holds the app's own).
 		var replaced string
 		fields := reconcile.OrderFields(append(slices.Clone(action.Changed), settings...))
 		if alive {
-			log.Printf("reconcile: %q: manifest changed (%s): stopping the previous instance (%q, pid %d, port %d) to replace it", spec.AppName, strings.Join(fields, ", "), app.Name, app.PID, app.Port)
+			if action.Upgrade {
+				log.Printf("reconcile: %q: moving behind the load balancer: stopping the previous instance (pid %d), which holds port %d itself", spec.AppName, app.PID, app.Port)
+			} else {
+				log.Printf("reconcile: %q: manifest changed (%s): stopping the previous instance (%q, pid %d) to replace it", spec.AppName, strings.Join(fields, ", "), app.Name, app.PID)
+			}
 			// Stop re-checks identity before each signal, so a PID that
 			// changed hands since the check above is left alone. A failed
 			// Stop records no crash: nothing new ran.
 			if _, err := process.Stop(app, spec.EntrypointFile); err != nil {
 				return api.ApplyResponse{}, fmt.Errorf("stopping the previous instance of %q (pid %d): %w", spec.AppName, app.PID, err)
 			}
-			replaced = previousInstanceNote(app, fields)
+			replaced = previousInstanceNote(app, fields, action.Upgrade)
 
-			// Keep only the crash history. Any failure below is recorded
-			// on this cleared record, and the stopped process's
-			// exit-watcher sees a PID that isn't its own and stays quiet.
-			app = state.AppState{CrashCount: app.CrashCount, LastExitAt: app.LastExitAt, LastExitFailed: app.LastExitFailed}
+			// Keep only the crash history, and the copy's internal port so
+			// the replacement reuses it: the load balancer already points
+			// there, so the restart needs no reload. An old-style record's
+			// port is the app's own, not an internal one, so it is dropped.
+			// Any failure below is recorded on this cleared record, and the
+			// stopped process's exit-watcher sees a PID that isn't its own
+			// and stays quiet.
+			kept := state.AppState{CrashCount: app.CrashCount, LastExitAt: app.LastExitAt, LastExitFailed: app.LastExitFailed}
+			if app.Copy >= 1 {
+				kept.Copy, kept.Port = app.Copy, app.Port
+			}
+			app = kept
 			if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{app}}); err != nil {
 				return api.ApplyResponse{}, err
 			}
@@ -110,13 +208,22 @@ func reconcileLocked(spec manifest.AppSpec, resetBackoff bool, settings []string
 		// genuinely belongs to something else — Validate has no state to
 		// make that distinction and would wrongly reject every routine
 		// re-apply of an app that's correctly, already running on its own
-		// port.
-		if err := process.PortAvailable(spec.EffectiveHost(), spec.Port); err != nil {
+		// port. claimPort also knows which ports the load balancer itself
+		// holds, which a bind check would trip over. It comes before the
+		// internal port is chosen so that a refused port leaves the app out
+		// of the load balancer's settings.
+		if err := claimPort(spec); err != nil {
 			recordExitLocked(spec, process.Exit{At: time.Now(), Failed: true})
 			return api.ApplyResponse{}, err
 		}
 
-		newApp, done, err := process.Start(spec)
+		port, err := copyPort(spec, app)
+		if err != nil {
+			recordExitLocked(spec, process.Exit{At: time.Now(), Failed: true})
+			return api.ApplyResponse{}, err
+		}
+
+		newApp, done, err := process.Start(spec, port)
 		if err != nil {
 			// A failed exec() is a crash too — it just never produces an
 			// exit-channel event, since there was never a process to
@@ -142,9 +249,12 @@ func reconcileLocked(spec manifest.AppSpec, resetBackoff bool, settings []string
 		// reconciled. The reconcile itself uses the registry's current
 		// spec, not the one captured here, which may predate a re-apply.
 		pid := newApp.PID
+		watched.Store(pid, struct{}{})
 		go func() {
 			exit := <-done
-			if recordExit(spec, pid, exit) {
+			recorded := recordExit(spec, pid, exit)
+			watched.Delete(pid)
+			if recorded {
 				triggerReconcile(spec.AppStateFile)
 			}
 		}()

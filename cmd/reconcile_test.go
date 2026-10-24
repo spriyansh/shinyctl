@@ -80,7 +80,7 @@ func TestExitWatcher_RecordsCrashOfRecordedProcess(t *testing.T) {
 		killIfAlive(spec, a)
 	})
 	a = applyOK(t, spec)
-	waitReady(t, spec.Host, spec.Port)
+	waitServed(t, spec, a.PID)
 
 	if !process.IsAlive(spec, a) {
 		t.Fatal("started process is not alive")
@@ -109,18 +109,17 @@ func TestExitWatcher_RecordsCrashOfRecordedProcess(t *testing.T) {
 func TestRecordExit_IgnoresReplacedProcess(t *testing.T) {
 	useFakeRscript(t)
 	dir := t.TempDir()
-	ports := freePorts(t, 2)
-	spec1 := newTestSpec(t, dir, "app", "app.R", ports[0])
+	spec1 := newTestSpec(t, dir, "app", "app.R", freePorts(t, 1)[0])
 
 	spec2 := spec1
-	spec2.Port = ports[1]
+	spec2.Env = map[string]string{"GREETING": "again"}
 	var a state.AppState
 	t.Cleanup(func() {
 		postJSON(t, handleDelete, spec2)
 		killIfAlive(spec1, a)
 	})
 	a = applyOK(t, spec1)
-	waitReady(t, spec1.Host, spec1.Port)
+	waitServed(t, spec1, a.PID)
 	b := applyOK(t, spec2)
 
 	if recordExit(spec1, a.PID, process.Exit{At: time.Now(), Failed: true}) {
@@ -129,5 +128,33 @@ func TestRecordExit_IgnoresReplacedProcess(t *testing.T) {
 	got := loadApp(t, spec2)
 	if got.PID != b.PID || got.CrashCount != 0 || !got.LastExitAt.IsZero() || got.LastExitFailed {
 		t.Errorf("state changed: %+v, want pid %d with no exit recorded", got, b.PID)
+	}
+}
+
+// TestGivenUpAppClosesItsPort: an app whose restart policy ends its story
+// stops answering on its port, as it would without the load balancer,
+// instead of showing a restarting page that would never end.
+func TestGivenUpAppClosesItsPort(t *testing.T) {
+	useFakeRscript(t)
+	spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
+	spec.RestartPolicy = manifest.RestartNever
+	var a state.AppState
+	t.Cleanup(func() {
+		postJSON(t, handleDelete, spec)
+		killIfAlive(spec, a)
+	})
+	a = applyOK(t, spec)
+	waitServed(t, spec, a.PID)
+
+	if err := syscall.Kill(a.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for process.IsReady(spec.Host, spec.Port) {
+		if time.Now().After(deadline) {
+			t.Fatal("the port still accepts connections 3s after the app gave up")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }

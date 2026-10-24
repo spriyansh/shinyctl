@@ -67,10 +67,7 @@ func TestStopAndDelete_LeaveReusedPIDAlone(t *testing.T) {
 			spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
 			t.Cleanup(func() { appRegistry.Forget(spec.AppStateFile) })
 
-			a, done, err := process.Start(spec)
-			if err != nil {
-				t.Fatal(err)
-			}
+			a, done := startRaw(t, spec)
 			killIfAlive(spec, a)
 			select {
 			case <-done:
@@ -129,10 +126,7 @@ func TestStopAndDelete_DeadPIDGetsNoNote(t *testing.T) {
 			spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
 			t.Cleanup(func() { appRegistry.Forget(spec.AppStateFile) })
 
-			a, done, err := process.Start(spec)
-			if err != nil {
-				t.Fatal(err)
-			}
+			a, done := startRaw(t, spec)
 			killIfAlive(spec, a)
 			select {
 			case <-done:
@@ -177,21 +171,11 @@ func TestStopAndDelete_StopOurProcess(t *testing.T) {
 				})
 
 				if adopted {
-					if err := appRegistry.Remember(spec); err != nil {
-						t.Fatal(err)
-					}
-					var err error
-					a, _, err = process.Start(spec)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{a}}); err != nil {
-						t.Fatal(err)
-					}
+					a = startCopy(t, spec)
 				} else {
 					a = applyOK(t, spec)
 				}
-				waitReady(t, spec.Host, spec.Port)
+				waitServed(t, spec, a.PID)
 
 				rec := postJSON(t, h.handler, spec)
 				if rec.Code != http.StatusOK {
@@ -200,9 +184,7 @@ func TestStopAndDelete_StopOurProcess(t *testing.T) {
 				if process.IsAlive(spec, a) {
 					t.Error("process still running")
 				}
-				if process.IsReady(spec.Host, spec.Port) {
-					t.Error("port still serving")
-				}
+				waitClosed(t, spec.Host, spec.Port)
 				if msg := responseMessage(t, rec); strings.Contains(msg, "not signaled") {
 					t.Errorf("message %q reports nothing was signaled", msg)
 				}
@@ -241,16 +223,12 @@ func TestStopAndDelete_OldFormatRecord(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		var err error
-		a, _, err = process.Start(spec)
-		if err != nil {
-			t.Fatal(err)
-		}
+		a, _ = startRaw(t, spec)
 		a.EntrypointFile = ""
 		if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{a}}); err != nil {
 			t.Fatal(err)
 		}
-		waitReady(t, spec.Host, spec.Port)
+		waitReady(t, process.InternalHost, a.Port)
 		return spec, a
 	}
 

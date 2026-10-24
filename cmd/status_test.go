@@ -39,6 +39,7 @@ func TestWriteStatus(t *testing.T) {
 		{Name: "my-app", Port: 8080, PID: 61429, Alive: true, Ready: true, StartedAt: started, RSSBytes: 142 << 20},
 		{Name: "flaky", Port: 8081, PID: 0, CrashCount: 3},
 		{Name: "parked", Port: 8082, Stopped: true},
+		{Name: "blocked", Port: 8083, Alive: true, NotServed: "127.0.0.1:8083 is not available (taken) — pick a different port"},
 	}
 
 	var out bytes.Buffer
@@ -46,10 +47,13 @@ func TestWriteStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := `NAME    PORT  PID    STATUS         READY  MEM   CRASHES  STARTED
-my-app  8080  61429  alive          ready  142M  -        2026-10-11T18:20:21Z
-flaky   8081  0      crash-looping  -      -     3        -
-parked  8082  0      stopped        -      -     -        -
+	want := `NAME     PORT  PID    STATUS         READY     MEM   CRASHES  STARTED
+my-app   8080  61429  alive          ready     142M  -        2026-10-11T18:20:21Z
+flaky    8081  0      crash-looping  -         -     3        -
+parked   8082  0      stopped        -         -     -        -
+blocked  8083  0      alive          starting  -     -        -
+
+blocked: its port is not served: 127.0.0.1:8083 is not available (taken) — pick a different port
 `
 	if out.String() != want {
 		t.Errorf("table =\n%s\nwant\n%s", out.String(), want)

@@ -43,9 +43,17 @@ func runReconcileLoop(ctx context.Context) {
 
 func reconcileOnce() {
 	for _, spec := range appRegistry.All() {
-		triggerReconcile(spec.AppStateFile)
+		// Right after each start, not once at the end of the tick: an app
+		// moving behind the load balancer has no listener on its port
+		// until the sync, and the apps after it in this tick may each take
+		// several seconds to stop their old process. The gateway logs what
+		// it can't do, so the error isn't repeated here.
+		if reconcileApp(spec.AppStateFile) {
+			syncProxy("")
+		}
 		rotateAppLog(spec)
 	}
+	syncProxy("")
 	rotateAPILog()
 }
 
@@ -84,9 +92,18 @@ func rotateAPILog() {
 	}
 }
 
-// triggerReconcile runs one reconcile cycle for the app at stateFile and
-// logs the outcome if it started something or backed off. Called both by
-// the ticker, on its fixed interval, and directly the instant a managed
+// triggerReconcile is reconcileApp followed by a sync of the load balancer,
+// which is what a process exit needs: an app that has given up loses its
+// port. Called by an exit-watcher the instant a process dies.
+func triggerReconcile(stateFile string) {
+	reconcileApp(stateFile)
+	syncProxy("")
+}
+
+// reconcileApp runs one reconcile cycle for the app at stateFile and
+// logs the outcome if it started something or backed off. It reports
+// whether it took ActionStart. Called both by the ticker, on its fixed
+// interval, and (through triggerReconcile) directly the instant a managed
 // process is detected to have exited (see reconcileLocked's exit-watcher in
 // cmd/reconcile.go) — the ticker is the safety net, the direct call is
 // what makes restart near-instant for apps shinyctl-api itself started
@@ -95,7 +112,7 @@ func rotateAPILog() {
 // Checking appRegistry.Managed here, rather than inside reconcileLocked or
 // Decide, is deliberate: it's what lets handleStop and handleDelete kill a
 // process without the already-running exit-watcher goroutine (which calls
-// this same function, not reconcileLocked directly) immediately restarting
+// this function, not reconcileLocked directly) immediately restarting
 // it — stopped and forgotten apps are both unmanaged. handleApply calls
 // reconcileLocked directly, bypassing this check entirely — applying always
 // means "ensure this is running now." handleRestart likewise calls
@@ -106,11 +123,11 @@ func rotateAPILog() {
 // lock: a spec captured earlier (by an exit-watcher, or by the ticker's
 // snapshot) may predate a re-apply, and reconciling with it would undo the
 // replacement.
-func triggerReconcile(stateFile string) {
+func reconcileApp(stateFile string) bool {
 	// Cheap gate before the lock, so this never queues behind a stop or
 	// delete that is holding it.
 	if !appRegistry.Managed(stateFile) {
-		return
+		return false
 	}
 
 	unlock := state.Lock(stateFile)
@@ -118,16 +135,17 @@ func triggerReconcile(stateFile string) {
 
 	spec, ok := appRegistry.ManagedSpec(stateFile)
 	if !ok {
-		return
+		return false
 	}
 
 	resp, err := reconcileLocked(spec, false, nil)
 	if err != nil {
 		log.Printf("reconcile: %q: %v", spec.AppName, err)
-		return
+		return false
 	}
 
 	if resp.Action == reconcile.ActionStart || resp.Action == reconcile.ActionBackoff {
 		log.Printf("reconcile: %s", resp.Message)
 	}
+	return resp.Action == reconcile.ActionStart
 }

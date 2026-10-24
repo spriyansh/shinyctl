@@ -21,17 +21,17 @@ type Exit struct {
 	Failed bool // true unless the process exited cleanly (status 0)
 }
 
-// Start launches spec's R process and returns its initial state, plus a
-// channel that receives a single Exit the instant the process exits — for
-// any reason, crash or otherwise. The caller can block on it to react to
-// death immediately instead of waiting for the next periodic liveness
-// check.
-func Start(spec manifest.AppSpec) (state.AppState, <-chan Exit, error) {
+// Start launches spec's R process on InternalHost:port and returns its
+// initial state (copy 1, on that port), plus a channel that receives a
+// single Exit the instant the process exits — for any reason, crash or
+// otherwise. The caller can block on it to react to death immediately
+// instead of waiting for the next periodic liveness check.
+func Start(spec manifest.AppSpec, port int) (state.AppState, <-chan Exit, error) {
 	command := fmt.Sprintf(
 		"shiny::runApp(%q, port=%d, host=%q)",
 		spec.EntrypointFile,
-		spec.Port,
-		spec.EffectiveHost(),
+		port,
+		InternalHost,
 	)
 
 	proc := exec.Command(
@@ -59,6 +59,10 @@ func Start(spec manifest.AppSpec) (state.AppState, <-chan Exit, error) {
 	proc.Stdout = logFile
 	proc.Stderr = logFile
 
+	// The child holds its own copy of the descriptor; the parent's would only
+	// leak one per start.
+	defer logFile.Close()
+
 	if err := proc.Start(); err != nil {
 		return state.AppState{}, nil, fmt.Errorf(
 			"starting %q: %w",
@@ -81,7 +85,8 @@ func Start(spec manifest.AppSpec) (state.AppState, <-chan Exit, error) {
 	return state.AppState{
 		Name:           spec.AppName,
 		PID:            proc.Process.Pid,
-		Port:           spec.Port,
+		Copy:           1,
+		Port:           port,
 		EntrypointFile: spec.EntrypointFile,
 		StartedAt:      time.Now(),
 		StartedFrom:    spec.StartFields(),

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/spriyansh/shinyctl/internal/api"
+	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
@@ -33,7 +34,7 @@ func TestHandleStatus_ReportsMemory(t *testing.T) {
 	})
 
 	a = applyOK(t, running)
-	waitReady(t, running.Host, running.Port)
+	waitServed(t, running, a.PID)
 
 	applyOK(t, stopped)
 	if rec := postJSON(t, handleStop, stopped); rec.Code != http.StatusOK {
@@ -74,5 +75,64 @@ func TestHandleStatus_ReportsMemory(t *testing.T) {
 	}
 	if s := byName["reused"]; s.Alive || s.RSSBytes != 0 {
 		t.Errorf("reused = %+v, want not alive and RSSBytes 0 (the stranger %d is not ours)", s, strangerPID)
+	}
+}
+
+// TestHandleStatus_Ready: an app is ready once its process answers and the
+// load balancer serves its port. A process the load balancer was never told
+// about is alive but not ready.
+func TestHandleStatus_Ready(t *testing.T) {
+	useFakeRscript(t)
+	ports := freePorts(t, 2)
+	running := newTestSpec(t, t.TempDir(), "running", "app.R", ports[0])
+	unsynced := newTestSpec(t, t.TempDir(), "unsynced", "app.R", ports[1])
+
+	var a, b state.AppState
+	t.Cleanup(func() {
+		postJSON(t, handleDelete, running)
+		postJSON(t, handleDelete, unsynced)
+		killIfAlive(running, a)
+		killIfAlive(unsynced, b)
+	})
+	a = applyOK(t, running)
+	waitServed(t, running, a.PID)
+
+	// Started and recorded, but not synced into the load balancer.
+	if err := appRegistry.Remember(unsynced); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = startRaw(t, unsynced)
+	if err := state.Save(unsynced.AppStateFile, state.State{AppGroup: unsynced.AppGroup, Apps: []state.AppState{b}}); err != nil {
+		t.Fatal(err)
+	}
+	waitReady(t, process.InternalHost, b.Port)
+
+	status := func() map[string]api.AppStatus {
+		rec := httptest.NewRecorder()
+		handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+		var resp api.StatusResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		byName := map[string]api.AppStatus{}
+		for _, s := range resp.Apps {
+			byName[s.Name] = s
+		}
+		return byName
+	}
+
+	got := status()
+	if s := got["running"]; !s.Alive || !s.Ready || s.Port != running.Port {
+		t.Errorf("running = %+v, want alive and ready on the app's own port", s)
+	}
+	if s := got["unsynced"]; !s.Alive || s.Ready {
+		t.Errorf("unsynced = %+v, want alive but not ready", s)
+	}
+
+	if err := syncProxy(""); err != nil {
+		t.Fatal(err)
+	}
+	if s := status()["unsynced"]; !s.Ready {
+		t.Errorf("unsynced after the sync = %+v, want ready", s)
 	}
 }

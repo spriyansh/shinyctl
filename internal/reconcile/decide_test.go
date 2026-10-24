@@ -36,7 +36,8 @@ func startedFrom(spec manifest.AppSpec, mutate func(*manifest.AppSpec)) state.Ap
 	}
 	return state.AppState{
 		Name:           spec.AppName,
-		Port:           spec.Port,
+		Copy:           1,
+		Port:           20000, // internal: not the spec's port
 		EntrypointFile: spec.EntrypointFile,
 		StartedFrom:    spec.StartFields(),
 	}
@@ -55,14 +56,14 @@ func TestDecide(t *testing.T) {
 		{
 			name:    "matching state, alive is a no-op",
 			spec:    manifest.AppSpec{AppName: "a", Port: 8881},
-			current: state.State{Apps: []state.AppState{{Name: "a", Port: 8881}}},
+			current: state.State{Apps: []state.AppState{{Name: "a", Copy: 1, Port: 20000}}},
 			alive:   true,
 			want:    ActionNone,
 		},
 		{
 			name:    "matching name/port but dead process restarts",
 			spec:    manifest.AppSpec{AppName: "a", Port: 8881},
-			current: state.State{Apps: []state.AppState{{Name: "a", Port: 8881}}},
+			current: state.State{Apps: []state.AppState{{Name: "a", Copy: 1, Port: 20000}}},
 			alive:   false,
 			want:    ActionStart,
 		},
@@ -74,16 +75,41 @@ func TestDecide(t *testing.T) {
 			want:    ActionStart,
 		},
 		{
-			name:    "port mismatch starts the app",
+			// The record's port is internal: the manifest's port moves with
+			// no restart.
+			name:    "a record port that differs from the manifest port is left alone",
 			spec:    manifest.AppSpec{AppName: "a", Port: 9999},
+			current: state.State{Apps: []state.AppState{{Name: "a", Copy: 1, Port: 20000}}},
+			alive:   true,
+			want:    ActionNone,
+		},
+		{
+			name:    "a host change alone leaves a live process alone",
+			spec:    withSpec(fullSpec, func(s *manifest.AppSpec) { s.Host = "0.0.0.0" }),
+			current: state.State{Apps: []state.AppState{startedFrom(fullSpec, nil)}},
+			alive:   true,
+			want:    ActionNone,
+		},
+		{
+			name:    "a live process from before the load balancer is moved behind it",
+			spec:    manifest.AppSpec{AppName: "a", Port: 8881},
 			current: state.State{Apps: []state.AppState{{Name: "a", Port: 8881}}},
 			alive:   true,
 			want:    ActionStart,
 		},
 		{
+			name: "a dead process under restart-policy never that has exited is left alone",
+			spec: manifest.AppSpec{AppName: "a", Port: 8881, RestartPolicy: manifest.RestartNever},
+			current: state.State{Apps: []state.AppState{{
+				Name: "a", Copy: 1, Port: 20000, LastExitAt: now.Add(-time.Hour),
+			}}},
+			alive: false,
+			want:  ActionNone,
+		},
+		{
 			name:    "name mismatch starts the app",
 			spec:    manifest.AppSpec{AppName: "b", Port: 8881},
-			current: state.State{Apps: []state.AppState{{Name: "a", Port: 8881}}},
+			current: state.State{Apps: []state.AppState{{Name: "a", Copy: 1, Port: 20000}}},
 			alive:   true,
 			want:    ActionStart,
 		},
@@ -91,7 +117,7 @@ func TestDecide(t *testing.T) {
 			name: "first crash with no elapsed time backs off",
 			spec: manifest.AppSpec{AppName: "a", Port: 8881},
 			current: state.State{Apps: []state.AppState{{
-				Name: "a", Port: 8881,
+				Name: "a", Copy: 1, Port: 20000,
 				CrashCount: 1, LastExitAt: now, LastExitFailed: true,
 			}}},
 			alive: false,
@@ -101,7 +127,7 @@ func TestDecide(t *testing.T) {
 			name: "restarts once the backoff delay has elapsed",
 			spec: manifest.AppSpec{AppName: "a", Port: 8881},
 			current: state.State{Apps: []state.AppState{{
-				Name: "a", Port: 8881,
+				Name: "a", Copy: 1, Port: 20000,
 				CrashCount: 1, LastExitAt: now.Add(-backoffBase - time.Second), LastExitFailed: true,
 			}}},
 			alive: false,
@@ -111,7 +137,7 @@ func TestDecide(t *testing.T) {
 			name: "later crash waits out a longer backoff",
 			spec: manifest.AppSpec{AppName: "a", Port: 8881},
 			current: state.State{Apps: []state.AppState{{
-				Name: "a", Port: 8881,
+				Name: "a", Copy: 1, Port: 20000,
 				// 2nd crash's delay (4s) hasn't elapsed, even though the
 				// 1st crash's delay (2s) would have.
 				CrashCount: 2, LastExitAt: now.Add(-3 * time.Second), LastExitFailed: true,
@@ -130,7 +156,7 @@ func TestDecide(t *testing.T) {
 			name: "live process with a changed name is replaced despite a recent crash",
 			spec: manifest.AppSpec{AppName: "b", Port: 8881},
 			current: state.State{Apps: []state.AppState{{
-				Name: "a", Port: 8881,
+				Name: "a", Copy: 1, Port: 20000,
 				CrashCount: 1, LastExitAt: now.Add(-time.Second), LastExitFailed: true,
 			}}},
 			alive: true,
@@ -140,7 +166,7 @@ func TestDecide(t *testing.T) {
 			name: "live process with a changed name is replaced under restart-policy never",
 			spec: manifest.AppSpec{AppName: "b", Port: 8881, RestartPolicy: manifest.RestartNever},
 			current: state.State{Apps: []state.AppState{{
-				Name: "a", Port: 8881,
+				Name: "a", Copy: 1, Port: 20000,
 				LastExitAt: now.Add(-time.Hour),
 			}}},
 			alive: true,
@@ -150,7 +176,7 @@ func TestDecide(t *testing.T) {
 			name: "live process from an old record is left alone despite a changed env",
 			spec: withSpec(fullSpec, func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "2"} }),
 			current: state.State{Apps: []state.AppState{{
-				Name: "a", Port: 8881, // no entrypoint, no StartedFrom
+				Name: "a", Copy: 1, Port: 20000, // no entrypoint, no StartedFrom
 			}}},
 			alive: true,
 			want:  ActionNone,
@@ -174,6 +200,23 @@ func TestDecide(t *testing.T) {
 	}
 }
 
+func TestDecide_UpgradeFlag(t *testing.T) {
+	spec := manifest.AppSpec{AppName: "a", Port: 8881}
+	old := state.State{Apps: []state.AppState{{Name: "a", Port: 8881}}}
+	if got := Decide(spec, old, true, time.Now()); got.Type != ActionStart || !got.Upgrade {
+		t.Errorf("alive record without a copy: Decide() = %+v, want Start with Upgrade", got)
+	}
+
+	current := state.State{Apps: []state.AppState{{Name: "b", Copy: 1, Port: 20000}}}
+	if got := Decide(spec, current, true, time.Now()); got.Type != ActionStart || got.Upgrade {
+		t.Errorf("alive copy with a changed name: Decide() = %+v, want Start without Upgrade", got)
+	}
+
+	if got := Decide(spec, old, false, time.Now()); got.Upgrade {
+		t.Errorf("dead record without a copy: Decide() = %+v, want no Upgrade (a plain start)", got)
+	}
+}
+
 func TestDecide_ReportsChangedFields(t *testing.T) {
 	spec := withSpec(fullSpec, func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "new"} })
 	current := state.State{Apps: []state.AppState{startedFrom(fullSpec, nil)}}
@@ -181,6 +224,38 @@ func TestDecide_ReportsChangedFields(t *testing.T) {
 	got := Decide(spec, current, true, time.Now())
 	if got.Type != ActionStart || !reflect.DeepEqual(got.Changed, []string{"env"}) {
 		t.Errorf("Decide() = %+v, want Start with Changed [env]", got)
+	}
+}
+
+func TestGaveUp(t *testing.T) {
+	exited := func(failed bool) state.AppState {
+		return state.AppState{LastExitAt: time.Now(), LastExitFailed: failed}
+	}
+
+	cases := []struct {
+		name   string
+		policy manifest.RestartPolicy
+		app    state.AppState
+		want   bool
+	}{
+		{"never exited, always", manifest.RestartAlways, state.AppState{}, false},
+		{"never exited, never", manifest.RestartNever, state.AppState{}, false},
+		{"crashed, always", manifest.RestartAlways, exited(true), false},
+		{"crashed, unset policy", "", exited(true), false},
+		{"clean exit, always", manifest.RestartAlways, exited(false), false},
+		{"crashed, on-failure", manifest.RestartOnFailure, exited(true), false},
+		{"clean exit, on-failure", manifest.RestartOnFailure, exited(false), true},
+		{"crashed, never", manifest.RestartNever, exited(true), true},
+		{"clean exit, never", manifest.RestartNever, exited(false), true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := manifest.AppSpec{RestartPolicy: c.policy}
+			if got := GaveUp(spec, c.app); got != c.want {
+				t.Errorf("GaveUp() = %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 
@@ -278,8 +353,8 @@ func TestChangedFields(t *testing.T) {
 		{"app-group", func(s *manifest.AppSpec) { s.AppGroup = "h" }, record, []string{"app-group"}},
 		{"app-name", func(s *manifest.AppSpec) { s.AppName = "b" }, record, []string{"app-name"}},
 		{"entrypoint-file", func(s *manifest.AppSpec) { s.EntrypointFile = "/srv/other.R" }, record, []string{"entrypoint-file"}},
-		{"port", func(s *manifest.AppSpec) { s.Port = 9999 }, record, []string{"port"}},
-		{"host", func(s *manifest.AppSpec) { s.Host = "0.0.0.0" }, record, []string{"host"}},
+		{"port is not a start field", func(s *manifest.AppSpec) { s.Port = 9999 }, record, nil},
+		{"host is not a start field", func(s *manifest.AppSpec) { s.Host = "0.0.0.0" }, record, nil},
 		{"working-dir", func(s *manifest.AppSpec) { s.WorkingDir = "/elsewhere" }, record, []string{"working-dir"}},
 		{"env", func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "2"} }, record, []string{"env"}},
 		{"restart-policy is not a start field", func(s *manifest.AppSpec) { s.RestartPolicy = manifest.RestartNever }, record, nil},
@@ -294,10 +369,10 @@ func TestChangedFields(t *testing.T) {
 				s.AppGroup = "h"
 			},
 			record,
-			[]string{"app-group", "port", "host", "working-dir", "env"},
+			[]string{"app-group", "working-dir", "env"},
 		},
 		{
-			"old record: only name and port are known",
+			"old record: only the name is known",
 			func(s *manifest.AppSpec) {
 				s.AppGroup = "h"
 				s.Host = "0.0.0.0"
@@ -315,18 +390,23 @@ func TestChangedFields(t *testing.T) {
 			nil,
 		},
 		{"old record: a changed name is still seen", func(s *manifest.AppSpec) { s.AppName = "b" }, state.AppState{Name: "a", Port: 8881}, []string{"app-name"}},
-		{"old record: a changed port is still seen", func(s *manifest.AppSpec) { s.Port = 9999 }, state.AppState{Name: "a", Port: 8881}, []string{"port"}},
 		{
 			"partial record: an unrecorded env is unknown",
 			func(s *manifest.AppSpec) { s.Env = map[string]string{"A": "2"} },
-			state.AppState{Name: "a", Port: 8881, StartedFrom: map[string]string{"host": "127.0.0.1"}},
+			state.AppState{Name: "a", Port: 8881, StartedFrom: map[string]string{"app-group": "g"}},
 			nil,
 		},
 		{
-			"partial record: a recorded host is compared",
+			"partial record: a recorded app-group is compared",
+			func(s *manifest.AppSpec) { s.AppGroup = "h" },
+			state.AppState{Name: "a", Port: 8881, StartedFrom: map[string]string{"app-group": "g"}},
+			[]string{"app-group"},
+		},
+		{
+			"a host recorded by an earlier version is ignored",
 			func(s *manifest.AppSpec) { s.Host = "0.0.0.0" },
 			state.AppState{Name: "a", Port: 8881, StartedFrom: map[string]string{"host": "127.0.0.1"}},
-			[]string{"host"},
+			nil,
 		},
 		{
 			"a key from a newer version is ignored",
@@ -359,6 +439,16 @@ func TestSettingsChanged(t *testing.T) {
 		{"unset and always are the same", manifest.AppSpec{}, manifest.AppSpec{RestartPolicy: manifest.RestartAlways}, nil},
 		{"always to never", manifest.AppSpec{RestartPolicy: manifest.RestartAlways}, manifest.AppSpec{RestartPolicy: manifest.RestartNever}, []string{"restart-policy"}},
 		{"replicas omitted to 1", manifest.AppSpec{}, manifest.AppSpec{Replicas: 1}, nil},
+		{"port", manifest.AppSpec{Port: 8080}, manifest.AppSpec{Port: 8081}, []string{"port"}},
+		{"host", manifest.AppSpec{Host: "127.0.0.1"}, manifest.AppSpec{Host: "0.0.0.0"}, []string{"host"}},
+		{"the same address written another way is no change", manifest.AppSpec{Host: "127.0.0.1"}, manifest.AppSpec{Host: "::ffff:127.0.0.1"}, nil},
+		{"omitted host and 0.0.0.0 are the same", manifest.AppSpec{}, manifest.AppSpec{Host: "0.0.0.0"}, nil},
+		{
+			"port, host and restart-policy together, in manifest order",
+			manifest.AppSpec{Port: 8080, Host: "127.0.0.1"},
+			manifest.AppSpec{Port: 8081, Host: "0.0.0.0", RestartPolicy: manifest.RestartNever},
+			[]string{"port", "host", "restart-policy"},
+		},
 	}
 
 	for _, c := range cases {

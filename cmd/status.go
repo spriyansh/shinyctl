@@ -85,7 +85,19 @@ func writeStatus(out io.Writer, apps []api.AppStatus) error {
 			app.Name, app.Port, app.PID, status, ready, formatMem(app.RSSBytes), crashes, started)
 	}
 
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
+	// A running app can still be unreachable: its port belongs to something
+	// else. The table can't say so, and the reason is otherwise only in the
+	// log.
+	for _, app := range apps {
+		if app.NotServed != "" {
+			fmt.Fprintf(out, "\n%s: its port is not served: %s\n", app.Name, app.NotServed)
+		}
+	}
+	return nil
 }
 
 // formatMem renders a byte count in the shortest readable form: K under a

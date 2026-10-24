@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -197,5 +198,46 @@ func TestLoadStateWithoutEntrypointFile(t *testing.T) {
 	}
 	if app.Name != "a" || app.PID != 42 || app.Port != 8881 || app.CrashCount != 2 || !app.LastExitFailed {
 		t.Errorf("other fields lost: %+v", app)
+	}
+}
+
+func TestCopyRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	want := State{AppGroup: "g", Apps: []AppState{{Name: "a", PID: 42, Copy: 1, Port: 20001}}}
+	if err := Save(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.App().Copy != 1 || got.App().Port != 20001 {
+		t.Errorf("App() = %+v, want copy 1 on port 20001", got.App())
+	}
+}
+
+// TestCopyIsOptional: a state file from before the load balancer has no
+// copy, and reads as copy 0; a record with copy 0 writes no key, so nothing
+// changes for a file that was never upgraded.
+func TestCopyIsOptional(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	old := `{"app-group":"g","apps":[{"name":"a","pid":42,"port":8881,"entrypoint-file":"/srv/app.R"}]}`
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.App().Copy != 0 || got.App().Port != 8881 {
+		t.Errorf("App() = %+v, want copy 0 on port 8881", got.App())
+	}
+
+	if err := Save(path, got); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), `"copy"`) {
+		t.Errorf("a record without a copy was written with one:\n%s", data)
 	}
 }

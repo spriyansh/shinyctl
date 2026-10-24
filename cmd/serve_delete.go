@@ -6,6 +6,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 
@@ -61,6 +62,7 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	forgetSeen(spec.AppStateFile)
 	if err := appRegistry.Forget(spec.AppStateFile); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -69,6 +71,10 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	if err := os.Remove(spec.AppStateFile); err != nil && !os.IsNotExist(err) {
 		http.Error(w, fmt.Sprintf("removing %s: %v", spec.AppStateFile, err), http.StatusInternalServerError)
 		return
+	}
+
+	if err := syncProxy(""); err != nil {
+		log.Printf("delete: %q: %v", spec.AppName, err)
 	}
 
 	resp := api.ApplyResponse{

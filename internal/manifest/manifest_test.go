@@ -255,6 +255,11 @@ func TestValidate(t *testing.T) {
 		{"unknown restart-policy rejected", func(s AppSpec) AppSpec { s.RestartPolicy = "sometimes"; return s }, true},
 		{"port 0 rejected", func(s AppSpec) AppSpec { s.Port = 0; return s }, true},
 		{"port above 65535 rejected", func(s AppSpec) AppSpec { s.Port = 70000; return s }, true},
+		{"port just below the internal range accepted", func(s AppSpec) AppSpec { s.Port = 19999; return s }, false},
+		{"first internal port rejected", func(s AppSpec) AppSpec { s.Port = 20000; return s }, true},
+		{"port inside the internal range rejected", func(s AppSpec) AppSpec { s.Port = 25000; return s }, true},
+		{"last internal port rejected", func(s AppSpec) AppSpec { s.Port = 29999; return s }, true},
+		{"port just above the internal range accepted", func(s AppSpec) AppSpec { s.Port = 30000; return s }, false},
 		{"missing entrypoint-file rejected", func(s AppSpec) AppSpec {
 			s.EntrypointFile = filepath.Join(t.TempDir(), "does-not-exist.R")
 			return s
@@ -269,6 +274,22 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("the messages", func(t *testing.T) {
+		spec := base
+		spec.Port = 25000
+		want := "port must not be between 20000 and 29999, which shinyctl keeps for the apps' own processes"
+		if err := Validate(spec); err == nil || err.Error() != want {
+			t.Errorf("reserved port: %v, want %q", err, want)
+		}
+
+		spec = base
+		spec.Replicas = 2
+		want = "replicas must be 1 or omitted — shinyctl runs one copy of each app for now"
+		if err := Validate(spec); err == nil || err.Error() != want {
+			t.Errorf("replicas: %v, want %q", err, want)
+		}
+	})
 
 	t.Run("Rscript not on PATH rejected", func(t *testing.T) {
 		t.Cleanup(func() { lookPath = exec.LookPath })
@@ -315,25 +336,16 @@ func TestStartFields(t *testing.T) {
 
 	t.Run("exactly the fields the record does not already hold", func(t *testing.T) {
 		got := base.StartFields()
-		for _, key := range []string{"app-group", "host", "working-dir", "env"} {
+		for _, key := range []string{"app-group", "working-dir", "env"} {
 			if _, ok := got[key]; !ok {
 				t.Errorf("StartFields() has no %q", key)
 			}
 		}
-		if len(got) != 4 {
-			t.Errorf("StartFields() = %v, want exactly 4 keys", got)
+		if _, ok := got["host"]; ok {
+			t.Error("StartFields() has host, which only moves the load balancer's listener")
 		}
-	})
-
-	t.Run("an omitted host is the default host", func(t *testing.T) {
-		a, b := base, base
-		a.Host = ""
-		b.Host = DefaultHost
-		if a.StartFields()["host"] != b.StartFields()["host"] {
-			t.Errorf("host %q and %q differ, want the same", a.StartFields()["host"], b.StartFields()["host"])
-		}
-		if base.StartFields()["host"] == b.StartFields()["host"] {
-			t.Error("127.0.0.1 and 0.0.0.0 are recorded as the same host")
+		if len(got) != 3 {
+			t.Errorf("StartFields() = %v, want exactly 3 keys", got)
 		}
 	})
 

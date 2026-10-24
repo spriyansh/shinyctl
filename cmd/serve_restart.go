@@ -21,6 +21,9 @@ import (
 //
 // The order matters; each step is here for a reason:
 //   - Validate first, so a bad manifest fails with nothing touched.
+//   - checkMove next, for the same reason: a restart onto a port the load
+//     balancer can't take is refused (409) before the app is stopped, so
+//     it keeps serving where it was.
 //   - The state lock before Remember: Remember clears the stopped flag, and
 //     a tick running in the gap between the two would start the app, only
 //     for the stop below to kill that fresh copy. Taking the registry's
@@ -37,10 +40,14 @@ import (
 //     (restart is an explicit "run this now"), makes a failed start record
 //     exactly one crash with no stale PID, and means the old process's
 //     exit-watcher, blocked on the lock, finds a PID that isn't its own and
-//     records nothing.
+//     records nothing. It keeps the copy's internal port, which the load
+//     balancer already points at, so the new process takes it over and
+//     requests wait for it with no reload.
 //   - reconcileLocked with that zero record always decides Start, so the
 //     port check, launch, exit-watcher and Save are the ones apply uses,
 //     and failures are recorded as crashes the same way.
+//   - syncProxy last, which follows a port or host change in the request
+//     and picks up a freshly chosen internal port.
 func handleRestart(w http.ResponseWriter, r *http.Request) {
 	var spec manifest.AppSpec
 	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
@@ -55,6 +62,14 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 
 	unlock := state.Lock(spec.AppStateFile)
 	defer unlock()
+
+	if err := checkMove(spec); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	previous, known := appRegistry.Spec(spec.AppStateFile)
+	_, wasServed := servedApp(spec.AppStateFile)
 
 	if err := appRegistry.Remember(spec); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -74,7 +89,11 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup}); err != nil {
+	zero := state.AppState{}
+	if app.Copy >= 1 {
+		zero.Copy, zero.Port = app.Copy, app.Port
+	}
+	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{zero}}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -85,8 +104,13 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if status, err := syncMoved(spec, previous, known, wasServed); err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
+
 	if signaled {
-		resp.Message += previousInstanceNote(app, nil)
+		resp.Message += previousInstanceNote(app, nil, false)
 	} else {
 		resp.Message += note
 	}

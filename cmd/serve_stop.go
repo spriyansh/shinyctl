@@ -63,6 +63,12 @@ func handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The app is unmanaged now, so its port closes. A failure here is the
+	// load balancer's to retry on the next tick; the stop itself is done.
+	if err := syncProxy(""); err != nil {
+		log.Printf("stop: %q: %v", spec.AppName, err)
+	}
+
 	resp := api.ApplyResponse{
 		Action:  reconcile.ActionStop,
 		Message: fmt.Sprintf("Stopped %q%s", spec.AppName, note),

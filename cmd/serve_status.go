@@ -30,9 +30,19 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 		alive := process.IsAlive(spec, app)
 
+		// Ready needs the process answering and, for a process behind the
+		// load balancer, the load balancer serving the app's own port; the
+		// public port is not probed, since the load balancer accepts there
+		// even while the process is down. A record from before the load
+		// balancer still holds the app's port itself.
 		var ready bool
 		if alive {
-			ready = process.IsReady(spec.EffectiveHost(), app.Port)
+			if app.Copy >= 1 {
+				ready = process.IsReady(process.InternalHost, app.Port) &&
+					gateway.Serves(spec.AppStateFile, spec.EffectiveHost(), spec.Port)
+			} else {
+				ready = process.IsReady(spec.EffectiveHost(), app.Port)
+			}
 		}
 
 		if alive {
@@ -53,6 +63,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			Ready:      ready,
 			Stopped:    appRegistry.IsStopped(spec.AppStateFile),
 			CrashCount: app.CrashCount,
+			NotServed:  gateway.NotServed(spec.AppStateFile),
 		})
 	}
 

@@ -16,9 +16,11 @@ type ApplyResponse struct {
 
 // AppStatus is one app's current, observed status — what state.json last
 // recorded, plus live IsAlive/IsReady checks, not just a mirror of the
-// file. Ready is purely informational: it reflects whether the app is
-// actually accepting connections yet, but never drives a restart
-// decision — only Alive does that (see reconcile.Decide).
+// file. Ready is purely informational: it reflects whether the app's R
+// process accepts connections and the load balancer serves the app's port
+// (for a process from before the load balancer, whether its own port
+// accepts), but never drives a restart decision — only Alive does that (see
+// reconcile.Decide).
 type AppStatus struct {
 	Name       string    `json:"name"`
 	Host       string    `json:"host"`
@@ -34,6 +36,11 @@ type AppStatus struct {
 	// it isn't running or couldn't be measured. A daemon from before this
 	// field existed omits it, which reads the same.
 	RSSBytes int64 `json:"rss-bytes,omitempty"`
+
+	// NotServed is why the load balancer leaves the app's port unserved (it
+	// is taken by another program or another app), or empty. The process may
+	// be running fine behind it. A daemon from before this field omits it.
+	NotServed string `json:"not-served,omitempty"`
 }
 
 // StatusResponse is shinyctl-api's response to a GET /status request:

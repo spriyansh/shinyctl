@@ -67,10 +67,14 @@ func (s AppSpec) EffectiveHost() string {
 
 // StartFields returns the manifest settings that shape the process
 // process.Start launches and that the process record does not already
-// hold in typed fields (app-name, port and entrypoint-file are compared
-// through AppState.Name, Port and EntrypointFile). Start records the map,
-// and Decide compares it with the current manifest to see whether a
-// running app was started from something else.
+// hold in typed fields (app-name and entrypoint-file are compared through
+// AppState.Name and EntrypointFile). Start records the map, and Decide
+// compares it with the current manifest to see whether a running app was
+// started from something else.
+//
+// port and host are not here: they say where the load balancer listens,
+// not how the process runs, so changing them moves the listener and leaves
+// the process alone.
 //
 // env is stored as a digest of the whole map rather than the map itself:
 // state.json usually sits in the app's folder, where it may be backed up
@@ -84,7 +88,6 @@ func (s AppSpec) EffectiveHost() string {
 func (s AppSpec) StartFields() map[string]string {
 	return map[string]string{
 		"app-group":   s.AppGroup,
-		"host":        s.EffectiveHost(),
 		"working-dir": s.WorkingDir,
 		"env":         envDigest(s.Env),
 	}

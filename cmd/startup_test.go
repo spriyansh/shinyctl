@@ -305,6 +305,7 @@ func TestStartup_PkillPatternMatchesDaemonCommandLine(t *testing.T) {
 		"/home/me/go/bin/shinyctl serve -d",
 		"/home/me/bin/notshinyctl serve",
 		"vim shinyctl serve.txt",
+		"/home/me/go/bin/shinyctl proxy --config /home/me/.shinyctl/proxy/config.json",
 	} {
 		if pattern.MatchString(cmdline) {
 			t.Errorf("pattern matches %q", cmdline)

@@ -28,6 +28,15 @@ watches every applied app; it is started automatically by the first apply.
   shinyctl startup                     print a systemd unit that starts shinyctl-api at boot`,
 }
 
+func init() {
+	// Once the arguments and flags have parsed, an error is the command's
+	// own (a refused move, a daemon that isn't there), and cobra's usage
+	// text under it only buries the message.
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		cmd.SilenceUsage = true
+	}
+}
+
 func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {

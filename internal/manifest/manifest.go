@@ -120,17 +120,21 @@ func Validate(spec AppSpec) error {
 		return fmt.Errorf("port must be between 1 and 65535")
 	}
 
-	// shinyctl runs exactly one instance per app: every replica would bind
-	// the same spec.Port, which the OS simply refuses as a second
-	// listener on it — this isn't an unimplemented feature, it's a
-	// consequence of there being no proxy/load-balancer in front of the
-	// app, which is deliberate: a proxy would put shinyctl-api in the
-	// request path, so its death would take live apps down with it.
-	// Reject rather than silently ignore, so a manifest never claims more
-	// than what's actually running. Omitting the field (0) is fine — it's
-	// optional precisely because 1 is its only legal value.
+	// The load balancer listens on the app's port; the app's own process
+	// runs on a port picked from this range. A manifest on a port inside it
+	// could be handed to a process of another app.
+	if spec.Port >= InternalPortMin && spec.Port <= InternalPortMax {
+		return fmt.Errorf("port must not be between %d and %d, which shinyctl keeps for the apps' own processes", InternalPortMin, InternalPortMax)
+	}
+
+	// shinyctl runs exactly one copy of each app for now. The load balancer
+	// in front of it could spread requests over more, but nothing starts or
+	// tracks a second copy yet. Reject rather than silently ignore, so a
+	// manifest never claims more than what's actually running. Omitting the
+	// field (0) is fine — it's optional precisely because 1 is its only
+	// legal value.
 	if spec.Replicas < 0 || spec.Replicas > 1 {
-		return fmt.Errorf("replicas must be 1 or omitted — shinyctl runs a single instance per app (no load balancer in front of it)")
+		return fmt.Errorf("replicas must be 1 or omitted — shinyctl runs one copy of each app for now")
 	}
 
 	switch spec.RestartPolicy {
