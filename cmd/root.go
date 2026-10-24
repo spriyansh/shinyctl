@@ -17,6 +17,8 @@ var rootCmd = &cobra.Command{
 Declare an app in a YAML manifest, apply it, and shinyctl starts it and
 restarts it if it dies. A per-user background process (shinyctl-api)
 watches every applied app; it is started automatically by the first apply.
+A built-in load balancer listens on each app's port, so requests wait while
+an app restarts instead of failing.
 
   shinyctl init                        scaffold a manifest to fill in
   shinyctl apply -f shinyctl.yaml      declare an app, start/reconcile it

@@ -29,6 +29,12 @@ docker run --rm --init -v "$PWD":/src:ro -w /src -e GOFLAGS=-buildvcs=false \
   golang:1.26.5 make check-format vet test-race
 ```
 
+The `cmd` tests start the load balancer as a real process, the test binary
+itself run as `proxy --config`, in a short temp directory, because Unix
+socket paths are limited to 103 bytes on macOS. The in-process tests in
+`internal/proxy` share the load balancer library's global state and must
+never call `t.Parallel`.
+
 Every behavior change comes with a test. Its commit message says what
 changed for users and why.
 

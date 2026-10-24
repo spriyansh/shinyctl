@@ -114,9 +114,10 @@ func writeStartup(stdout, stderr io.Writer, env startupEnv) error {
   loginctl enable-linger "$USER"
 
 pkill stops a shinyctl-api started by hand, which would otherwise hold the
-socket and make the service's copy exit. Its apps keep running, and the
-service's shinyctl-api adopts them. enable-linger starts your services at
-boot, before you log in, and keeps them running after you log out.
+socket and make the service's copy exit. Its apps and the load balancer
+keep running, and the service's shinyctl-api adopts them. enable-linger
+starts your services at boot, before you log in, and keeps them running
+after you log out.
 `, shellQuote(env.exe), shellQuote(pattern))
 
 	_, err = io.WriteString(stdout, unit)
@@ -155,8 +156,8 @@ StandardOutput=append:%%h/.shinyctl/api.log
 Restart=always
 RestartSec=2
 # Apps are child processes of shinyctl-api. Stopping or restarting the
-# service stops only shinyctl-api: the apps keep serving, and the next
-# shinyctl-api adopts them from its registry.
+# service stops only shinyctl-api: the apps and the load balancer keep
+# serving, and the next shinyctl-api adopts them from its registry.
 KillMode=process
 
 [Install]

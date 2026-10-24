@@ -31,8 +31,8 @@ port: %d
 app-state-file: %s
 
 # Optional fields — uncomment to use:
-# host: 0.0.0.0            # address to bind (default: every interface); 127.0.0.1 = this machine only
-# replicas: 1              # the only legal value — one instance per app, no proxy
+# host: 0.0.0.0            # address the app's port listens on (default: every interface); 127.0.0.1 = this machine only
+# replicas: 1              # the only legal value for now
 # restart-policy: always   # always (default) / on-failure / never
 # working-dir: .           # defaults to entrypoint-file's own directory
 # env:
