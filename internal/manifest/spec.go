@@ -41,6 +41,27 @@ const (
 	InternalPortMax = 29999
 )
 
+// The limits on how many copies an app may have. Each copy is a full R
+// process, so these catch a typo such as `replicas: 100`; they are easy to
+// raise.
+const (
+	MaxReplicas     = 16
+	MaxWarmReplicas = 16
+
+	// DefaultWarmReplicas is the number of warm spare copies when the
+	// manifest doesn't say: one, so a copy that dies is replaced at once.
+	DefaultWarmReplicas = 1
+)
+
+// The values of lb-policy: how a new visitor picks among the copies that
+// serve visitors.
+const (
+	LBLeastConn  = "least-conn"
+	LBRoundRobin = "round-robin"
+	LBRandom     = "random"
+	LBFirst      = "first"
+)
+
 type AppSpec struct {
 	AppGroup       string            `yaml:"app-group" json:"app-group"`
 	AppName        string            `yaml:"app-name" json:"app-name"`
@@ -48,6 +69,8 @@ type AppSpec struct {
 	Host           string            `yaml:"host" json:"host"`
 	Port           int               `yaml:"port" json:"port"`
 	Replicas       int               `yaml:"replicas" json:"replicas"`
+	WarmReplicas   *int              `yaml:"warm-replicas" json:"warm-replicas,omitempty"`
+	LBPolicy       string            `yaml:"lb-policy" json:"lb-policy,omitempty"`
 	AppStateFile   string            `yaml:"app-state-file" json:"app-state-file"`
 	RestartPolicy  RestartPolicy     `yaml:"restart-policy" json:"restart-policy"`
 	WorkingDir     string            `yaml:"working-dir" json:"working-dir"`
@@ -65,6 +88,41 @@ func (s AppSpec) EffectiveHost() string {
 	return s.Host
 }
 
+// EffectiveReplicas returns the number of copies that serve visitors,
+// defaulting an unset (or zero) Replicas to 1.
+func (s AppSpec) EffectiveReplicas() int {
+	if s.Replicas <= 0 {
+		return 1
+	}
+	return s.Replicas
+}
+
+// EffectiveWarm returns the number of warm spare copies. WarmReplicas is a
+// pointer because 0 means something (no spares) and is not the default: a
+// manifest, registry entry or request without the key reads as
+// DefaultWarmReplicas.
+func (s AppSpec) EffectiveWarm() int {
+	if s.WarmReplicas == nil {
+		return DefaultWarmReplicas
+	}
+	return *s.WarmReplicas
+}
+
+// EffectiveLBPolicy returns the lb-policy, defaulting an unset one to
+// LBLeastConn.
+func (s AppSpec) EffectiveLBPolicy() string {
+	if s.LBPolicy == "" {
+		return LBLeastConn
+	}
+	return s.LBPolicy
+}
+
+// CopyCount is how many processes the app runs: the copies that serve
+// visitors plus the warm spares.
+func (s AppSpec) CopyCount() int {
+	return s.EffectiveReplicas() + s.EffectiveWarm()
+}
+
 // StartFields returns the manifest settings that shape the process
 // process.Start launches and that the process record does not already
 // hold in typed fields (app-name and entrypoint-file are compared through
@@ -72,9 +130,9 @@ func (s AppSpec) EffectiveHost() string {
 // compares it with the current manifest to see whether a running app was
 // started from something else.
 //
-// port and host are not here: they say where the load balancer listens,
-// not how the process runs, so changing them moves the listener and leaves
-// the process alone.
+// port, host, replicas, warm-replicas and lb-policy are not here: they say
+// where the load balancer listens and how many copies there are, not how a
+// process runs, so changing them leaves the running copies alone.
 //
 // env is stored as a digest of the whole map rather than the map itself:
 // state.json usually sits in the app's folder, where it may be backed up

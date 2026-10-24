@@ -241,3 +241,98 @@ func TestCopyIsOptional(t *testing.T) {
 		t.Errorf("a record without a copy was written with one:\n%s", data)
 	}
 }
+
+func TestCopies_MultiCopyRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	want := State{AppGroup: "g", Revision: 2, Apps: []AppState{
+		{Name: "a", PID: 1, Port: 20000, Copy: 1, Revision: 2},
+		{Name: "a", PID: 2, Port: 20001, Copy: 2, Revision: 1},
+	}}
+	if err := Save(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Load() = %+v, want %+v", got, want)
+	}
+}
+
+func TestState_PutKeepsOrderAndReplaces(t *testing.T) {
+	var s State
+	s.Put(AppState{Copy: 3, PID: 3})
+	s.Put(AppState{Copy: 1, PID: 1})
+	s.Put(AppState{Copy: 2, PID: 2})
+	s.Put(AppState{Copy: 2, PID: 22})
+
+	var order []int
+	for _, a := range s.Apps {
+		order = append(order, a.Copy)
+	}
+	if !reflect.DeepEqual(order, []int{1, 2, 3}) {
+		t.Errorf("Apps are in order %v, want 1 2 3", order)
+	}
+	if a, ok := s.Copy(2); !ok || a.PID != 22 {
+		t.Errorf("Copy(2) = %+v, %v; want the replaced record", a, ok)
+	}
+	if _, ok := s.Copy(4); ok {
+		t.Error("Copy(4) found a record")
+	}
+}
+
+func TestState_Remove(t *testing.T) {
+	s := State{Apps: []AppState{{Copy: 1}, {Copy: 2}, {Copy: 3}}}
+	s.Remove(2)
+	s.Remove(9)
+	if _, ok := s.Copy(2); ok || len(s.Apps) != 2 {
+		t.Errorf("Apps = %+v, want copies 1 and 3", s.Apps)
+	}
+}
+
+func TestState_CopiesIsASortedCopy(t *testing.T) {
+	s := State{Apps: []AppState{{Copy: 2}, {Copy: 1}}}
+	got := s.Copies()
+	if got[0].Copy != 1 || got[1].Copy != 2 {
+		t.Errorf("Copies() = %+v", got)
+	}
+	if s.Apps[0].Copy != 2 {
+		t.Error("Copies() sorted the state's own slice")
+	}
+}
+
+// A file written before there were several copies is copy 1 at revision 0.
+func TestLoad_PhaseOneFileIsOneCopy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	old := `{"app-group":"g","apps":[{"name":"a","pid":5,"port":20000,"copy":1,"entrypoint-file":"/srv/app.R","started-at":"2026-10-01T00:00:00Z","crash-count":0,"last-exit-at":"0001-01-01T00:00:00Z","last-exit-failed":false}]}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copies := got.Copies()
+	if len(copies) != 1 || copies[0].Copy != 1 || copies[0].Revision != 0 || got.Revision != 0 {
+		t.Errorf("Copies() = %+v, revision %d", copies, got.Revision)
+	}
+}
+
+func TestSave_OmitsRevisionWhenZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := Save(path, State{AppGroup: "g", Apps: []AppState{{Name: "a", Copy: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "revision") {
+		t.Errorf("a state at revision 0 wrote a revision: %s", data)
+	}
+	if err := Save(path, State{AppGroup: "g", Revision: 1, Apps: []AppState{{Name: "a", Copy: 1, Revision: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if strings.Count(string(data), `"revision"`) != 2 {
+		t.Errorf("revision 1 should be written twice: %s", data)
+	}
+}

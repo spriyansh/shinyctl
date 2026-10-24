@@ -137,7 +137,7 @@ func Decide(spec manifest.AppSpec, current state.State, alive bool, now time.Tim
 
 // fieldOrder is the order manifest fields are listed in replies: the order
 // of the README's manifest example.
-var fieldOrder = []string{"app-group", "app-name", "entrypoint-file", "port", "host", "restart-policy", "working-dir", "env"}
+var fieldOrder = []string{"app-group", "app-name", "entrypoint-file", "port", "host", "replicas", "warm-replicas", "lb-policy", "restart-policy", "working-dir", "env"}
 
 // OrderFields sorts manifest field names into fieldOrder. A name this
 // version doesn't know goes last, alphabetically.
@@ -189,9 +189,10 @@ func changedFields(app state.AppState, spec manifest.AppSpec) []string {
 
 // SettingsChanged lists the manifest fields that changed between the
 // previously applied spec and spec and take effect without restarting the
-// process: port and host, which only move the load balancer's listener,
-// and restart-policy, which Decide reads from the registry on every pass.
-// (replicas has one legal value, so it can't meaningfully change.)
+// running copies: port and host, which only move the load balancer's
+// listener; replicas and warm-replicas, which start or stop copies; lb-policy,
+// which changes how new visitors pick a copy; and restart-policy, which the
+// reconcile loop reads from the registry on every pass.
 func SettingsChanged(previous, spec manifest.AppSpec) []string {
 	var changed []string
 	if previous.Port != spec.Port {
@@ -199,6 +200,15 @@ func SettingsChanged(previous, spec manifest.AppSpec) []string {
 	}
 	if !sameHost(previous.EffectiveHost(), spec.EffectiveHost()) {
 		changed = append(changed, "host")
+	}
+	if previous.EffectiveReplicas() != spec.EffectiveReplicas() {
+		changed = append(changed, "replicas")
+	}
+	if previous.EffectiveWarm() != spec.EffectiveWarm() {
+		changed = append(changed, "warm-replicas")
+	}
+	if previous.EffectiveLBPolicy() != spec.EffectiveLBPolicy() {
+		changed = append(changed, "lb-policy")
 	}
 	if previous.RestartPolicy.Effective() != spec.RestartPolicy.Effective() {
 		changed = append(changed, "restart-policy")
