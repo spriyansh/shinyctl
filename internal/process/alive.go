@@ -66,22 +66,23 @@ func isOurs(app state.AppState, fallbacks ...string) bool {
 	}
 
 	if app.EntrypointFile != "" {
-		return hasCommandLine(app.PID, app.EntrypointFile)
+		return HasCommandLine(app.PID, app.EntrypointFile)
 	}
 	for _, f := range fallbacks {
-		if f != "" && hasCommandLine(app.PID, f) {
+		if f != "" && HasCommandLine(app.PID, f) {
 			return true
 		}
 	}
 	return false
 }
 
-// hasCommandLine reports whether the process at pid's command line
-// contains substr. Treats a failure to even look it up (e.g. the process
+// HasCommandLine reports whether the process at pid's command line
+// contains substr (shinyctl-api also uses it to recognise the load
+// balancer's process). Treats a failure to even look it up (e.g. the process
 // exited in the gap between the liveness check above and this call) as
 // "can't confirm identity" — false, the conservative choice given this
 // exists specifically to avoid false positives.
-func hasCommandLine(pid int, substr string) bool {
+func HasCommandLine(pid int, substr string) bool {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return false
