@@ -29,6 +29,10 @@ docker run --rm --init -v "$PWD":/src:ro -w /src -e GOFLAGS=-buildvcs=false \
   golang:1.26.5 make check-format vet test-race
 ```
 
+On a Raspberry Pi 5, `test-race` stops before any test runs ("unsupported
+VMA range"): the race detector needs a 48-bit address space, and the Pi 5
+kernel has 47 bits. Run `make test` there.
+
 The `cmd` tests start the load balancer as a real process, the test binary
 itself run as `proxy --config`, in a short temp directory, because Unix
 socket paths are limited to 103 bytes on macOS. The in-process tests in

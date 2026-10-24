@@ -122,7 +122,7 @@ replicas: 1                     # optional; 1 is the only accepted value
   `READY` turns from `starting` to `ready` once the app's R process
   accepts connections and the load balancer serves its port. `MEM` is the
   resident memory of the app's main R process; worker processes it started
-  aren't counted. The load balancer's own memory, about 35 MB for all apps
+  aren't counted. The load balancer's own memory, about 40 MB for all apps
   together, isn't counted in any app.
 - While an app restarts, a request to its port waits up to 15 seconds for
   it. After that the visitor gets a page saying the app is restarting,
