@@ -20,6 +20,12 @@ func EnsureAPIRunning() error {
 		return nil
 	}
 
+	// shinyctl-api would exit on a home directory that is too long, and all
+	// this side could say is that it did not come up.
+	if err := CheckSocketPaths(); err != nil {
+		return err
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return err

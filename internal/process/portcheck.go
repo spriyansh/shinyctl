@@ -1,9 +1,11 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strconv"
+	"syscall"
 )
 
 // PortAvailable reports whether host:port is free to bind on this machine
@@ -33,7 +35,29 @@ import (
 func PortAvailable(host string, port int) error {
 	ln, err := net.Listen(tcpNetwork(host), net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
-		return fmt.Errorf("%s:%d is not available (%w) — pick a different port, or check what else is using it", host, port, err)
+		return fmt.Errorf("%s is not available (%w) — pick a different port, or check what else is using it", net.JoinHostPort(host, strconv.Itoa(port)), err)
+	}
+	return ln.Close()
+}
+
+// PortAvailableAlongside is PortAvailable for a port the load balancer's own
+// listener on the same app already holds: it binds with SO_REUSEPORT, as the
+// load balancer's sockets do, so that socket doesn't count against the
+// address while another program's does. It is what a move of an app's host
+// on the same port is checked with.
+func PortAvailableAlongside(host string, port int) error {
+	lc := net.ListenConfig{Control: func(network, address string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
+		}); err != nil {
+			return err
+		}
+		return serr
+	}}
+	ln, err := lc.Listen(context.Background(), tcpNetwork(host), net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return fmt.Errorf("%s is not available (%w) — pick a different port, or check what else is using it", net.JoinHostPort(host, strconv.Itoa(port)), err)
 	}
 	return ln.Close()
 }

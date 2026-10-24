@@ -32,6 +32,15 @@ func (p RestartPolicy) Effective() RestartPolicy {
 // should only be reachable through a reverse proxy or an SSH tunnel.
 const DefaultHost = "0.0.0.0"
 
+// InternalPortMin and InternalPortMax bound the ports shinyctl runs each
+// app's R process on, on 127.0.0.1 behind the load balancer. A manifest
+// may not use a port in this range, so an app's own port is never one that
+// shinyctl picks for a process.
+const (
+	InternalPortMin = 20000
+	InternalPortMax = 29999
+)
+
 type AppSpec struct {
 	AppGroup       string            `yaml:"app-group" json:"app-group"`
 	AppName        string            `yaml:"app-name" json:"app-name"`

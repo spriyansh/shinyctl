@@ -35,6 +35,13 @@ func Stop(app state.AppState, fallbacks ...string) (signaled bool, err error) {
 	return stop(app.PID, func() bool { return isOurs(app, fallbacks...) }, stopGrace)
 }
 
+// StopIf is Stop for a process that isn't an app's, such as the load
+// balancer: SIGTERM, SIGKILL after the same grace period, each signal only
+// while ours reports that pid is still the process the caller means.
+func StopIf(pid int, ours func() bool) (signaled bool, err error) {
+	return stop(pid, ours, stopGrace)
+}
+
 // stop is Stop with the identity check and the SIGTERM grace period as
 // parameters, for tests.
 func stop(pid int, ours func() bool, grace time.Duration) (bool, error) {

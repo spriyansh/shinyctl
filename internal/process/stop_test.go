@@ -1,7 +1,9 @@
 package process
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -137,4 +139,43 @@ func TestStop(t *testing.T) {
 			t.Errorf("ours called %d time(s), want at least 2", calls)
 		}
 	})
+}
+
+func TestStopIf(t *testing.T) {
+	t.Run("refuses when the process is not the one meant", func(t *testing.T) {
+		pid := startSleeper(t, false)
+
+		if signaled, err := StopIf(pid, func() bool { return false }); err != nil || signaled {
+			t.Fatalf("StopIf = (%v, %v), want (false, nil)", signaled, err)
+		}
+		if err := syscall.Kill(pid, 0); err != nil {
+			t.Errorf("process %d was signaled: %v", pid, err)
+		}
+	})
+
+	t.Run("stops the process it is told is its own", func(t *testing.T) {
+		pid := startSleeper(t, false)
+
+		if signaled, err := StopIf(pid, func() bool { return true }); err != nil || !signaled {
+			t.Fatalf("StopIf = (%v, %v), want (true, nil)", signaled, err)
+		}
+		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+			t.Errorf("process %d still exists after StopIf (err=%v)", pid, err)
+		}
+	})
+}
+
+func TestProxyDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	dir, err := ProxyDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(os.Getenv("HOME"), ".shinyctl", "proxy"); dir != want {
+		t.Errorf("ProxyDir = %q, want %q", dir, want)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0700 {
+		t.Errorf("proxy dir = %v, %v, want a 0700 directory", fi, err)
+	}
 }

@@ -10,6 +10,11 @@ import (
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
+// InternalHost is the address an app's R process binds. It is behind the
+// load balancer, which listens on the app's own host and port, so nothing
+// else on the network can reach the process directly.
+const InternalHost = "127.0.0.1"
+
 // Exit reports how and when a started process ended.
 type Exit struct {
 	At     time.Time
