@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"regexp"
 	"time"
+
+	"github.com/spriyansh/shinyctl/internal/proxy/lb"
 )
 
 var (
@@ -141,6 +143,65 @@ func (a Admin) Load(cfg []byte) error {
 
 	log.Printf("proxy: settings rejected: %s", bytes.TrimSpace(data))
 	return errRejected
+}
+
+// PutCopies replaces the load balancer's copies table with t. Nothing is
+// reloaded: the next request sees the new roles.
+func (a Admin) PutCopies(t Table) error {
+	body, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	status, data, err := a.do(http.MethodPut, lb.AdminPath, body, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("the load balancer refused the copies table: %s", bytes.TrimSpace(data))
+	}
+	return nil
+}
+
+// Copies returns the copies table the load balancer is serving from.
+func (a Admin) Copies() (Table, error) {
+	status, data, err := a.do(http.MethodGet, lb.AdminPath, nil, 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("the load balancer answered %d", status)
+	}
+	var t Table
+	if err := json.Unmarshal(data, &t); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// Upstreams returns, for each copy address the load balancer has dialled, the
+// number of requests open to it now. The engine lists an address with
+// requests in flight twice, once from its in-flight counts and once from its
+// host table, so the largest count per address is taken, not the sum.
+func (a Admin) Upstreams() (map[string]int, error) {
+	status, data, err := a.do(http.MethodGet, "/reverse_proxy/upstreams", nil, time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("the load balancer answered %d", status)
+	}
+	var entries []struct {
+		Address     string `json:"address"`
+		NumRequests int    `json:"num_requests"`
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	open := make(map[string]int, len(entries))
+	for _, e := range entries {
+		open[e.Address] = max(open[e.Address], e.NumRequests)
+	}
+	return open, nil
 }
 
 // decodeConfig reads cfg as generic JSON, so two configs can be compared by

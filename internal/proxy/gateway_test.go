@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -273,6 +275,7 @@ type fakeProc struct{ ready bool }
 func (f fakeProc) WaitReady(time.Duration) bool { return f.ready }
 func (f fakeProc) Running() bool                { return f.ready }
 func (f fakeProc) Generation() int              { return 1 }
+func (f fakeProc) PID() int                     { return 4242 }
 
 func TestGateway_RejectedConfigNotWritten(t *testing.T) {
 	s := SettingsFor(shortDir(t))
@@ -469,5 +472,236 @@ func TestGateway_ForgetsAddressesNobodyAsksFor(t *testing.T) {
 	}
 	if len(e.gw.failed) != 0 {
 		t.Errorf("failed = %v, want none left for addresses no app asks for", e.gw.failed)
+	}
+}
+
+func samePool(a, b Pool) bool { return (Table{"k": a}).Equal(Table{"k": b}) }
+
+func twoCopies(a, b int) Pool {
+	return Pool{Active: []string{fmt.Sprintf("127.0.0.1:%d", a)}, Warm: []string{fmt.Sprintf("127.0.0.1:%d", b)}}
+}
+
+func TestGateway_SetPoolPushesOnlyChanges(t *testing.T) {
+	e := newGwEnv(t)
+	p := twoCopies(20000, 20001)
+
+	for i := 0; i < 2; i++ {
+		if err := e.gw.SetPool("x", p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := e.gw.Pushes(); got != 1 {
+		t.Errorf("after two equal SetPools, Pushes = %d, want 1", got)
+	}
+
+	q := twoCopies(20001, 20000)
+	if err := e.gw.SetPool("x", q); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.gw.Pushes(); got != 2 {
+		t.Errorf("after a different pool, Pushes = %d, want 2", got)
+	}
+
+	// A change of the warm list alone is a change.
+	r := Pool{Active: q.Active, Warm: []string{"127.0.0.1:20009"}}
+	if err := e.gw.SetPool("x", r); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.gw.Pushes(); got != 3 {
+		t.Errorf("after a change of the warm list only, Pushes = %d, want 3", got)
+	}
+	if err := e.gw.SetPool("x", q); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Admin{Socket: e.settings.AdminSocket}.Copies()
+	if err != nil || !got.Equal(Table{"x": q}) {
+		t.Errorf("the load balancer has %v, %v; want %v", got, err, Table{"x": q})
+	}
+	data, err := os.ReadFile(e.settings.CopiesPath)
+	var onDisk Table
+	if err != nil || json.Unmarshal(data, &onDisk) != nil || !onDisk.Equal(Table{"x": q}) {
+		t.Errorf("copies.json = %s, %v; want the last push", data, err)
+	}
+	if info, err := os.Stat(e.settings.CopiesPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("copies.json mode = %v, %v; want 0600", info, err)
+	}
+	if e.gw.Reloads() != 0 {
+		t.Errorf("Reloads = %d, want 0: a pool is not a reload", e.gw.Reloads())
+	}
+}
+
+// TestGateway_PushAfterRestart: a load balancer that was started again has
+// forgotten the table, so the same pool is sent once more.
+func TestGateway_PushAfterRestart(t *testing.T) {
+	e := newGwEnv(t)
+	p := twoCopies(20000, 20001)
+	if err := e.gw.SetPool("x", p); err != nil {
+		t.Fatal(err)
+	}
+	before := e.gw.Pushes()
+
+	// What the new process reads at start would hide the push; take it away.
+	os.Remove(e.settings.CopiesPath)
+	old := e.sup.PID()
+	syscall.Kill(old, syscall.SIGKILL)
+	waitFor(t, "a new load balancer", 10*time.Second, func() bool { return e.sup.Running() && e.sup.PID() != old })
+	waitFor(t, "its control socket", 10*time.Second, func() bool { return Admin{Socket: e.settings.AdminSocket}.Ping() == nil })
+
+	if got, _ := (Admin{Socket: e.settings.AdminSocket}).Copies(); len(got) != 0 {
+		t.Fatalf("the new load balancer already has %v", got)
+	}
+	if err := e.gw.SetPool("x", p); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.gw.Pushes(); got != before+1 {
+		t.Errorf("Pushes = %d, want %d: an unchanged pool must be sent to a new process", got, before+1)
+	}
+	if got, err := (Admin{Socket: e.settings.AdminSocket}).Copies(); err != nil || !got.Equal(Table{"x": p}) {
+		t.Errorf("the load balancer has %v, %v", got, err)
+	}
+}
+
+func TestGateway_ReplacePoolsKeepsNewer(t *testing.T) {
+	g := newGateway(SettingsFor(shortDir(t)), fakeProc{ready: false})
+	p1, p2, p3 := twoCopies(20000, 20001), twoCopies(20002, 20003), twoCopies(20004, 20005)
+
+	g.SetPool("x", p1)
+	since := g.PoolSeq()
+	g.SetPool("y", p2) // set after the table below was built
+
+	g.ReplacePools(Table{"x": p3}, since)
+	if got, _ := g.Pool("x"); !samePool(got, p3) {
+		t.Errorf("x = %v, want the rebuilt %v (nothing newer)", got, p3)
+	}
+	if got, ok := g.Pool("y"); !ok || !samePool(got, p2) {
+		t.Errorf("y = %v, %v; want it kept: it is newer than the rebuilt table", got, ok)
+	}
+
+	g.SetPool("x", p1)
+	g.ReplacePools(Table{"x": p3}, since)
+	if got, _ := g.Pool("x"); !samePool(got, p1) {
+		t.Errorf("x = %v, want the newer %v kept", got, p1)
+	}
+
+	g.ReplacePools(nil, g.PoolSeq())
+	if _, ok := g.Pool("x"); ok {
+		t.Error("x survived a rebuilt table that doesn't have it")
+	}
+}
+
+func TestGateway_SyncPrunesPools(t *testing.T) {
+	e := newGwEnv(t)
+	x := upstreamApp("x", freePort(t), okUpstream(t, "x"))
+	if err := e.gw.SetPool("x", twoCopies(20000, 20001)); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.gw.SetPool("y", twoCopies(20002, 20003)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := e.gw.Sync([]App{x}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Admin{Socket: e.settings.AdminSocket}.Copies()
+	if err != nil || len(got) != 1 || len(got["x"].Active) != 1 {
+		t.Errorf("the load balancer has %v, %v; want only x", got, err)
+	}
+	if _, ok := e.gw.Pool("y"); ok {
+		t.Error("y's pool survived a Sync that does not serve y")
+	}
+
+	// Also when nothing needs reloading.
+	if err := e.gw.SetPool("z", twoCopies(20004, 20005)); err != nil {
+		t.Fatal(err)
+	}
+	reloads := e.gw.Reloads()
+	if _, err := e.gw.Sync([]App{x}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := (Admin{Socket: e.settings.AdminSocket}).Copies(); len(got) != 1 || e.gw.Reloads() != reloads {
+		t.Errorf("table %v, reloads %d -> %d; want z pruned without a reload", got, reloads, e.gw.Reloads())
+	}
+}
+
+func TestGateway_SetPoolWhenNotRunning(t *testing.T) {
+	g := newGateway(SettingsFor(shortDir(t)), fakeProc{ready: false})
+	g.readyWait = 5 * time.Second // a push must not use it
+
+	start := time.Now()
+	err := g.SetPool("x", twoCopies(20000, 20001))
+	if err != ErrNotRunning {
+		t.Errorf("SetPool = %v, want ErrNotRunning", err)
+	}
+	if took := time.Since(start); took > 50*time.Millisecond {
+		t.Errorf("SetPool took %v, want it to return at once", took)
+	}
+	if _, ok := g.Pool("x"); !ok {
+		t.Error("the pool was not kept for the next push")
+	}
+	if g.Pushes() != 0 {
+		t.Errorf("Pushes = %d, want 0", g.Pushes())
+	}
+}
+
+func TestGateway_SessionsNeedARunningBalancer(t *testing.T) {
+	g := newGateway(SettingsFor(shortDir(t)), fakeProc{ready: false})
+	if got := g.Sessions(); got != nil {
+		t.Errorf("Sessions = %v, want nil", got)
+	}
+	if g.BalancerPID() != 4242 {
+		t.Errorf("BalancerPID = %d", g.BalancerPID())
+	}
+}
+
+// One copy the load balancer would refuse must not take its app out of the
+// table, nor keep the others from reaching it.
+func TestGateway_InvalidCopyIsLeftOut(t *testing.T) {
+	e := newGwEnv(t)
+	good := twoCopies(20000, 20001)
+	// One address for two copies, and something that is no address.
+	bad := Pool{Active: []string{"127.0.0.1:20002", "nonsense"}, Warm: []string{"127.0.0.1:20002", "127.0.0.1:20003"}}
+	wantBad := Pool{Active: []string{"127.0.0.1:20002"}, Warm: []string{"127.0.0.1:20003"}}
+
+	var logs syncBuffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	if err := e.gw.SetPool("bad", bad); err != nil {
+		t.Fatalf("SetPool(bad) = %v, want the rest to be sent", err)
+	}
+	if err := e.gw.SetPool("good", good); err != nil {
+		t.Fatal(err)
+	}
+	want := Table{"good": good, "bad": wantBad}
+	got, err := Admin{Socket: e.settings.AdminSocket}.Copies()
+	if err != nil || !got.Equal(want) {
+		t.Errorf("the load balancer has %v, %v; want %v (the app keeps its valid copies)", got, err, want)
+	}
+
+	// copies.json holds exactly what was pushed.
+	data, err := os.ReadFile(e.settings.CopiesPath)
+	var onDisk Table
+	if err != nil || json.Unmarshal(data, &onDisk) != nil || !onDisk.Equal(want) {
+		t.Errorf("copies.json = %s, %v; want what was pushed", data, err)
+	}
+
+	for _, line := range []string{"not sending copy 127.0.0.1:20002 of bad: it is listed twice", "not sending copy nonsense of bad: it is not a host:port address"} {
+		if n := strings.Count(logs.String(), line); n != 1 {
+			t.Errorf("the log has %q %d times, want once:\n%s", line, n, logs.String())
+		}
+	}
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Count(l, "of bad") > 1 || strings.Count(l, "bad") > 2 {
+			t.Errorf("the line repeats the key: %q", l)
+		}
+	}
+
+	// Once it is fixed it goes out as it is.
+	if err := e.gw.SetPool("bad", twoCopies(20002, 20003)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := (Admin{Socket: e.settings.AdminSocket}).Copies(); !got.Equal(Table{"good": good, "bad": twoCopies(20002, 20003)}) {
+		t.Errorf("the load balancer has %v after the fix", got)
 	}
 }

@@ -7,6 +7,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/spriyansh/shinyctl/internal/proxy/lb"
+)
+
+// Pool and Table are the copies table's types (see package lb), so the rest
+// of shinyctl names them without importing it.
+type (
+	Pool  = lb.Pool
+	Table = lb.Table
 )
 
 // Settings says where the load balancer keeps its files and how patient it
@@ -15,6 +24,11 @@ type Settings struct {
 	ConfigPath  string // loaded by the proxy at start; written after each successful load
 	AdminSocket string // the proxy's control socket
 	StorageDir  string // the engine's storage root, kept here so nothing lands in its default directories
+	CopiesPath  string // the copies table, written by shinyctl-api after each update and read by the proxy at start
+
+	// Secret is the key of the cookies that keep a visitor on one copy. It
+	// must not be empty when apps are rendered; LoadSecret supplies it.
+	Secret string
 
 	// TryDuration is how long a request waits for an app that isn't
 	// answering before the visitor gets the restarting page. Zero means
@@ -29,7 +43,15 @@ func SettingsFor(dir string) Settings {
 		ConfigPath:  filepath.Join(dir, "config.json"),
 		AdminSocket: filepath.Join(dir, "admin.sock"),
 		StorageDir:  filepath.Join(dir, "data"),
+		CopiesPath:  filepath.Join(dir, "copies.json"),
 	}
+}
+
+// CookieName is the name of the cookie that keeps a visitor on one copy of
+// the app on port. It is unique per port, so apps on one host don't
+// overwrite each other's, and says nothing about what sets it.
+func CookieName(port int) string {
+	return "lb_" + strconv.Itoa(port)
 }
 
 // DefaultTryDuration is long enough to cover an R process starting up, and

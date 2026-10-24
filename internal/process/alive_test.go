@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -139,8 +140,8 @@ func TestIsOurs(t *testing.T) {
 	}
 }
 
-// sleepWithArg starts a process whose command line holds extra, which is how
-// the tests give a stand-in the expression an R process has.
+// sleepWithArg starts a process whose command line holds extra, which is
+// how the tests give a stand-in the `port=<port>,` an R process has.
 func sleepWithArg(t *testing.T, extra string) int {
 	t.Helper()
 	// Two commands, so the shell stays the process instead of becoming sleep.
@@ -150,6 +151,139 @@ func sleepWithArg(t *testing.T, extra string) int {
 	}
 	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
 	return cmd.Process.Pid
+}
+
+func TestIsOurs_PortMustMatch(t *testing.T) {
+	pid := sleepWithArg(t, "port=20001,")
+
+	rec := func(port int) state.AppState {
+		return state.AppState{PID: pid, StartedAt: time.Now(), EntrypointFile: "sleep", Port: port}
+	}
+	cases := []struct {
+		name string
+		app  state.AppState
+		want bool
+	}{
+		{"the port is in the command line", rec(20001), true},
+		{"another copy's port is not ours", rec(20002), false},
+		{"a prefix of the port is not ours", rec(2000), false},
+		{"a record without a port is matched on the entrypoint alone", rec(0), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isOurs(c.app); got != c.want {
+				t.Errorf("isOurs = %v, want %v", got, c.want)
+			}
+			if got := IsAlive(manifest.AppSpec{}, c.app); got != c.want {
+				t.Errorf("IsAlive = %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	// Also for a record that has no entrypoint of its own.
+	noEntry := rec(20002)
+	noEntry.EntrypointFile = ""
+	if isOurs(noEntry, "sleep") {
+		t.Error("a fallback must not get past a port that differs")
+	}
+}
+
+func TestAliveAll(t *testing.T) {
+	one := sleepWithArg(t, "port=20001,")
+	two := sleepWithArg(t, "port=20002,")
+
+	spec := manifest.AppSpec{EntrypointFile: "sleep"}
+	recs := []state.AppState{
+		{PID: one, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20001, Copy: 1},
+		{PID: two, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20002, Copy: 2},
+		{PID: one, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20002, Copy: 3}, // another copy's pid
+		{PID: 999999999, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20004, Copy: 4},
+		{Copy: 5}, // never started
+		{PID: two, StartedAt: time.Now(), Port: 20002, Copy: 6},                            // no recorded entrypoint: the spec's
+		{PID: two, StartedAt: time.Now(), EntrypointFile: "other.R", Port: 20002, Copy: 7}, // not this app
+	}
+	want := []bool{true, true, false, false, false, true, false}
+
+	var calls int
+	orig := psRun
+	t.Cleanup(func() { psRun = orig })
+	psRun = func(args ...string) ([]byte, error) {
+		calls++
+		return orig(args...)
+	}
+
+	got := AliveAll(spec, recs)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("AliveAll = %v, want %v", got, want)
+	}
+	if calls > 1 {
+		t.Errorf("ps was run %d times, want at most once (not at all where /proc is read)", calls)
+	}
+	for i, rec := range recs {
+		if single := IsAlive(spec, rec); single != got[i] {
+			t.Errorf("record %d: IsAlive = %v but AliveAll = %v", i, single, got[i])
+		}
+	}
+
+	calls = 0
+	if got := AliveAll(spec, []state.AppState{{Copy: 1}, {PID: 999999999, StartedAt: time.Now()}}); calls != 0 || got[0] || got[1] {
+		t.Errorf("nothing running: %v after %d ps calls, want none and no ps", got, calls)
+	}
+	if got := AliveAll(spec, nil); len(got) != 0 {
+		t.Errorf("AliveAll(nil) = %v", got)
+	}
+}
+
+func TestCommandLines(t *testing.T) {
+	orig := psRun
+	t.Cleanup(func() { psRun = orig })
+	var args []string
+	psRun = func(a ...string) ([]byte, error) {
+		args = a
+		return []byte("  12 /usr/bin/R --no-echo -e shiny::runApp(\"/a b.R\", port=20000,~+~host=\"127.0.0.1\")\n13 sleep 5\n\nnot a line\n"), nil
+	}
+
+	got := commandLinesPS([]int{12, 13, 14})
+	if len(got) != 2 || !strings.Contains(got[12], "port=20000,") || got[13] != "sleep 5" {
+		t.Errorf("commandLines = %v", got)
+	}
+	if strings.Join(args, " ") != "-o pid=,command= -p 12,13,14" {
+		t.Errorf("ps args = %v", args)
+	}
+}
+
+// R's front-end script turns the spaces of a -e argument into "~+~", so the
+// process of an app in a folder with a space shows the path that way.
+func TestIsOurs_PathWithASpace(t *testing.T) {
+	pid := sleepWithArg(t, `shiny::runApp("/x/sp~+~ace/app.R",~+~port=20003,~+~host="127.0.0.1")`)
+	spec := manifest.AppSpec{EntrypointFile: "/x/sp ace/app.R"}
+	rec := state.AppState{PID: pid, StartedAt: time.Now(), EntrypointFile: "/x/sp ace/app.R", Port: 20003}
+
+	if !isOurs(rec) || !IsAlive(spec, rec) {
+		t.Error("a copy whose path has a space is not recognised")
+	}
+	if got := AliveAll(spec, []state.AppState{rec}); !got[0] {
+		t.Error("AliveAll does not recognise it either")
+	}
+
+	// A record without an entrypoint of its own is matched by the fallback.
+	bare := rec
+	bare.EntrypointFile = ""
+	if !isOurs(bare, "/x/sp ace/app.R") {
+		t.Error("the fallback with a space does not match")
+	}
+
+	// Another folder, or another port, is still not ours.
+	other := rec
+	other.EntrypointFile = "/x/sp ace/other.R"
+	if isOurs(other) {
+		t.Error("another entrypoint matched")
+	}
+	other = rec
+	other.Port = 20004
+	if isOurs(other) {
+		t.Error("another port matched")
+	}
 }
 
 // rCommandLine is the command line of an R process started with Start's
@@ -178,10 +312,14 @@ func TestIsOurs_UnusualPathsWithoutALocale(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			pid := sleepWithArg(t, rCommandLine(path, 20007))
+			spec := manifest.AppSpec{EntrypointFile: path}
 			rec := state.AppState{PID: pid, StartedAt: time.Now(), EntrypointFile: path, Port: 20007}
 
-			if !isOurs(rec) || !IsAlive(manifest.AppSpec{}, rec) {
+			if !isOurs(rec) || !IsAlive(spec, rec) {
 				t.Error("the process is not recognised")
+			}
+			if got := AliveAll(spec, []state.AppState{rec}); !got[0] {
+				t.Error("AliveAll does not recognise it")
 			}
 			bare := rec
 			bare.EntrypointFile = ""
@@ -256,9 +394,17 @@ func TestProcCommandLine(t *testing.T) {
 	if line, ok := procCommandLine(99); !ok || line != "" {
 		t.Errorf("a process that is not there: %q, %v", line, ok)
 	}
+	if got := commandLines([]int{42, 43, 99}); len(got) != 1 || got[42] != line42(t) {
+		t.Errorf("commandLines = %v", got)
+	}
 	if _, ok := commandLine(43); ok {
 		t.Error("an empty command line (a zombie) counts as a command line")
 	}
+}
+
+func line42(t *testing.T) string {
+	l, _ := procCommandLine(42)
+	return l
 }
 
 // fakeProc makes a /proc with one process: its cmdline and stat.
@@ -396,6 +542,37 @@ func TestProcCommandLine_StateAfterTheLastParenthesis(t *testing.T) {
 	}
 }
 
+// The batch waits once for all of them, not once for each.
+func TestCommandLines_OneDeadlineForTheBatch(t *testing.T) {
+	dir := t.TempDir()
+	orig, origWait := procDir, procWait
+	procDir, procWait = dir, 100*time.Millisecond
+	t.Cleanup(func() { procDir, procWait = orig, origWait })
+	os.Mkdir(filepath.Join(dir, "self"), 0o755)
+	for _, pid := range []int{10, 11, 12, 13, 14} {
+		d := filepath.Join(dir, strconv.Itoa(pid))
+		os.Mkdir(d, 0o755)
+		os.WriteFile(filepath.Join(d, "cmdline"), nil, 0o644)
+		os.WriteFile(filepath.Join(d, "stat"), []byte(strconv.Itoa(pid)+" (R) S 1"), 0o644)
+	}
+	// 10 fills after a while; 11 is a zombie; the rest stay empty.
+	os.WriteFile(filepath.Join(dir, "11", "stat"), []byte("11 (R) Z 1"), 0o644)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		os.WriteFile(filepath.Join(dir, "10", "cmdline"), []byte("a\x00b\x00"), 0o644)
+	}()
+
+	start := time.Now()
+	got := commandLines([]int{10, 11, 12, 13, 14, 99})
+	took := time.Since(start)
+	if len(got) != 1 || got[10] != "a b" {
+		t.Errorf("commandLines = %v, want only 10", got)
+	}
+	if took < 90*time.Millisecond || took > 450*time.Millisecond {
+		t.Errorf("took %v for three empty ones: want about one deadline (100 ms), not one each", took)
+	}
+}
+
 // Identity checks made at once after a Start, as the daemon's own functions
 // make them: on Linux the command line is empty for a moment after the exec.
 // 300 starts take about 3 s; without the retry this fails in a container with
@@ -404,7 +581,7 @@ func TestIdentity_RightAfterStart(t *testing.T) {
 	const n = 300
 	spec := manifest.AppSpec{EntrypointFile: "/srv/app.R"}
 	arg := rCommandLine("/srv/app.R", 20001)
-	var notOurs int
+	var notOurs, aliveAllNo, batchMissing int
 	for i := 0; i < n; i++ {
 		cmd := exec.Command("sh", "-c", "sleep 5; :", "x", arg)
 		if err := cmd.Start(); err != nil {
@@ -414,10 +591,16 @@ func TestIdentity_RightAfterStart(t *testing.T) {
 		if !isOurs(rec) || !IsAlive(spec, rec) {
 			notOurs++
 		}
+		if !AliveAll(spec, []state.AppState{rec})[0] {
+			aliveAllNo++
+		}
+		if _, ok := commandLines([]int{rec.PID})[rec.PID]; !ok {
+			batchMissing++
+		}
 		cmd.Process.Kill()
 		cmd.Wait()
 	}
-	if notOurs > 0 {
-		t.Errorf("of %d starts: isOurs/IsAlive wrong %d", n, notOurs)
+	if notOurs+aliveAllNo+batchMissing > 0 {
+		t.Errorf("of %d starts: isOurs/IsAlive wrong %d, AliveAll wrong %d, batch missing %d", n, notOurs, aliveAllNo, batchMissing)
 	}
 }

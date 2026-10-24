@@ -169,3 +169,59 @@ func commandLine(pid int) (string, bool) {
 	}
 	return strings.TrimSpace(string(out)), true
 }
+
+// commandLines returns the command line of each of pids that can be seen:
+// from /proc where there is one, else from one ps call for all of them. A
+// PID that is gone is absent.
+func commandLines(pids []int) map[int]string {
+	if _, err := os.Stat(procDir + "/self"); err == nil {
+		lines := make(map[int]string, len(pids))
+		pending := pids
+		// One deadline for the whole batch, not one per process.
+		deadline := time.Now().Add(procWait)
+		for {
+			var still []int
+			for _, pid := range pending {
+				line, state := procLook(pid)
+				switch state {
+				case procFilled:
+					lines[pid] = line
+				case procPending:
+					still = append(still, pid)
+				}
+			}
+			if len(still) == 0 || !time.Now().Before(deadline) {
+				return lines
+			}
+			pending = still
+			time.Sleep(procEvery)
+		}
+	}
+	return commandLinesPS(pids)
+}
+
+// commandLinesPS is commandLines through ps. Every PID is absent if ps itself
+// fails.
+func commandLinesPS(pids []int) map[int]string {
+	list := make([]string, len(pids))
+	for i, pid := range pids {
+		list[i] = strconv.Itoa(pid)
+	}
+
+	// Output still returns what ps printed when it exits non-zero, which it
+	// does when some of the PIDs no longer exist.
+	out, _ := psRun("-o", "pid=,command=", "-p", strings.Join(list, ","))
+
+	lines := make(map[int]string, len(pids))
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		pidText, command, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if pid, err := strconv.Atoi(pidText); err == nil {
+			lines[pid] = strings.TrimSpace(command)
+		}
+	}
+	return lines
+}

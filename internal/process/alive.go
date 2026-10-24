@@ -1,6 +1,8 @@
 package process
 
 import (
+	"fmt"
+	"strings"
 	"syscall"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
@@ -55,23 +57,65 @@ func pidRunning(app state.AppState) bool {
 // isOurs reports whether app's recorded process is still running and is
 // identifiably the one shinyctl started: its command line contains
 // app.EntrypointFile or, for a record without one, any non-empty
-// fallback. Unlike IsAlive it never skips the command-line check: with
-// nothing to match, the answer is no. It gates every signal, where a false
-// "yes" would kill a stranger and a false "no" only leaves a process alone.
+// fallback, and the port the record names. Unlike IsAlive it never skips
+// the command-line check: with nothing to match, the answer is no. It gates
+// every signal, where a false "yes" would kill a stranger and a false "no"
+// only leaves a process alone.
 func isOurs(app state.AppState, fallbacks ...string) bool {
 	if !pidRunning(app) {
 		return false
 	}
+	line, ok := commandLine(app.PID)
+	return ok && matches(app, line, fallbacks...)
+}
 
+// matches reports whether line, the command line of the process at app's
+// PID, is app's. The entrypoint alone can't tell the copies of one app
+// apart once a PID is reused, so the port the process was started on must
+// be in the line too (Start writes it as `port=<port>,`).
+func matches(app state.AppState, line string, fallbacks ...string) bool {
+	if app.Port > 0 && !strings.Contains(line, fmt.Sprintf("port=%d,", app.Port)) {
+		return false
+	}
 	if app.EntrypointFile != "" {
-		return HasCommandLine(app.PID, app.EntrypointFile)
+		return inCommandLine(line, app.EntrypointFile)
 	}
 	for _, f := range fallbacks {
-		if f != "" && HasCommandLine(app.PID, f) {
+		if f != "" && inCommandLine(line, f) {
 			return true
 		}
 	}
 	return false
+}
+
+// AliveAll is IsAlive for each of apps, with the command lines of all of them
+// read together: from /proc on Linux, with one ps call elsewhere. The result
+// is in the order of apps.
+func AliveAll(spec manifest.AppSpec, apps []state.AppState) []bool {
+	alive := make([]bool, len(apps))
+	var pids []int
+	for _, app := range apps {
+		if pidRunning(app) {
+			pids = append(pids, app.PID)
+		}
+	}
+	if len(pids) == 0 {
+		return alive
+	}
+
+	lines := commandLines(pids)
+	for i, app := range apps {
+		if !pidRunning(app) {
+			continue
+		}
+		if app.EntrypointFile == "" && spec.EntrypointFile == "" {
+			alive[i] = true // no identity to check, as in IsAlive
+			continue
+		}
+		line, ok := lines[app.PID]
+		alive[i] = ok && matches(app, line, spec.EntrypointFile)
+	}
+	return alive
 }
 
 // HasCommandLine reports whether the process at pid's command line

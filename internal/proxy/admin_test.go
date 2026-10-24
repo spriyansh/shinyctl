@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -113,5 +114,74 @@ func TestAdmin_OtherFailuresAreReadable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "shinyctl logs --api") {
 		t.Errorf("error %q does not point to the log", err)
+	}
+}
+
+func TestAdmin_Upstreams_MaxPerAddress(t *testing.T) {
+	// One request open to the first copy: the engine lists it twice, once from
+	// its in-flight counts and once from its host table.
+	a := fakeAdmin(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/reverse_proxy/upstreams" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		io.WriteString(w, `[{"address":"127.0.0.1:20000","num_requests":1,"fails":0},`+
+			`{"address":"127.0.0.1:20001","num_requests":0,"fails":0},`+
+			`{"address":"127.0.0.1:20000","num_requests":1,"fails":0}]`)
+	})
+	got, err := a.Upstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["127.0.0.1:20000"] != 1 || got["127.0.0.1:20001"] != 0 {
+		t.Errorf("Upstreams = %v, want 20000:1 and 20001:0", got)
+	}
+}
+
+func TestAdmin_Upstreams_Failures(t *testing.T) {
+	a := fakeAdmin(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
+	if _, err := a.Upstreams(); err == nil {
+		t.Error("a 500 should be an error")
+	}
+	a = fakeAdmin(t, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "not json") })
+	if _, err := a.Upstreams(); err == nil {
+		t.Error("garbage should be an error")
+	}
+}
+
+func TestAdmin_PutCopies(t *testing.T) {
+	var gotBody []byte
+	a := fakeAdmin(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/shinyctl/copies" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		gotBody, _ = io.ReadAll(r.Body)
+	})
+	want := Table{"x": {Active: []string{"127.0.0.1:20000"}}}
+	if err := a.PutCopies(want); err != nil {
+		t.Fatal(err)
+	}
+	var sent Table
+	if json.Unmarshal(gotBody, &sent) != nil || !sent.Equal(want) {
+		t.Errorf("sent %s, want %v", gotBody, want)
+	}
+
+	a = fakeAdmin(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":"boom"}`)
+	})
+	err := a.PutCopies(want)
+	if err == nil || !strings.Contains(err.Error(), "the load balancer refused the copies table") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("a refusal: %v", err)
+	}
+}
+
+func TestAdmin_Copies(t *testing.T) {
+	a := fakeAdmin(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"x":{"active":["127.0.0.1:20000"],"warm":["127.0.0.1:20001"]}}`)
+	})
+	got, err := a.Copies()
+	want := Table{"x": {Active: []string{"127.0.0.1:20000"}, Warm: []string{"127.0.0.1:20001"}}}
+	if err != nil || !got.Equal(want) {
+		t.Errorf("Copies = %v, %v; want %v", got, err, want)
 	}
 }

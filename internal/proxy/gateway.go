@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"errors"
 	"log"
 	"net"
@@ -20,11 +21,14 @@ type proc interface {
 	WaitReady(timeout time.Duration) bool
 	Running() bool
 	Generation() int
+	PID() int
 }
 
 // Gateway pushes the set of apps to the running load balancer, and knows
 // what it is serving. Changes go through a check and a reload; a rejected
-// reload leaves the previous settings serving.
+// reload leaves the previous settings serving. Which copies of each app
+// serve is a separate matter, the pools: they change much more often, and
+// are sent as a table that replaces the previous one without a reload.
 type Gateway struct {
 	settings Settings
 	proc     proc
@@ -49,6 +53,19 @@ type Gateway struct {
 	lastErr   string
 	loads     int // successful reloads, for tests
 	attempts  int // reloads sent, rejected or not, for tests
+
+	// poolMu guards the pools, and is held across sending them, so tables
+	// reach the load balancer in the order they were made. The lock order is
+	// state lock, then mu, then poolMu.
+	poolMu    sync.Mutex
+	pools     Table             // what the load balancer should serve, by app
+	poolSet   map[string]uint64 // per app, the sequence number of its last SetPool
+	poolSeq   uint64
+	pushed    Table // what the last successful push sent
+	pushedGen int   // the proxy's generation that push went to; 0 if none
+	pushes    int   // successful pushes, for tests
+	lastPush  string
+	badPools  map[string]bool // copies left out of the last table, to log each once
 }
 
 // NewGateway returns a Gateway for the load balancer sup supervises.
@@ -66,6 +83,8 @@ func newGateway(s Settings, p proc) *Gateway {
 		readyWait:          5 * time.Second,
 		failed:             map[string]bool{},
 		lastLeft:           map[string]string{},
+		pools:              Table{},
+		poolSet:            map[string]uint64{},
 	}
 }
 
@@ -173,6 +192,7 @@ func (g *Gateway) Sync(apps []App) (left map[string]error, err error) {
 			return left, err
 		}
 		if g.loadedCfg != nil && reflect.DeepEqual(next, g.loadedCfg) {
+			g.prunePools(keep)
 			return left, nil
 		}
 
@@ -182,10 +202,11 @@ func (g *Gateway) Sync(apps []App) (left map[string]error, err error) {
 		}
 
 		// Known risk: a connection that arrives in the few milliseconds a
-		// reload takes can be dropped (the engine closes the listener it
-		// shares between the old and the new settings while it still
-		// accepts on it). So reloads are kept rare: the settings are
-		// compared before sending, and a restart reuses the internal port.
+		// reload takes can be dropped (the engine binds a new socket for
+		// every server and closes the old ones, which resets what was queued
+		// on them). So reloads are kept rare: the settings are compared
+		// before sending, and which copies serve, a restart and a scale
+		// change go through the pools instead.
 		g.attempts++
 		err = g.admin.Load(cfg)
 		var bind *BindError
@@ -216,8 +237,187 @@ func (g *Gateway) Sync(apps []App) (left map[string]error, err error) {
 		if err := atomicfile.Write(g.settings.ConfigPath, cfg); err != nil {
 			log.Printf("proxy: could not save %s: %v", g.settings.ConfigPath, err)
 		}
+		g.prunePools(keep)
 		return left, nil
 	}
+}
+
+// Reloads is the number of successful reloads so far, for tests.
+func (g *Gateway) Reloads() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.loads
+}
+
+// BalancerPID is the load balancer's process ID, or 0.
+func (g *Gateway) BalancerPID() int {
+	return g.proc.PID()
+}
+
+// SetPool records the copies that serve app key and sends the table to the
+// load balancer at once. The error says the load balancer did not take it
+// (it is not running, or refused it); the pool is kept and sent again with
+// the next change or when the load balancer comes back, so callers log it
+// and carry on.
+func (g *Gateway) SetPool(key string, p Pool) error {
+	g.poolMu.Lock()
+	defer g.poolMu.Unlock()
+	g.pools[key] = p
+	g.poolSeq++
+	g.poolSet[key] = g.poolSeq
+	return g.pushLocked()
+}
+
+// Pool returns the copies recorded for app key.
+func (g *Gateway) Pool(key string) (Pool, bool) {
+	g.poolMu.Lock()
+	defer g.poolMu.Unlock()
+	p, ok := g.pools[key]
+	return p, ok
+}
+
+// PoolSeq numbers the latest SetPool; ReplacePools takes it as the moment
+// its table was made.
+func (g *Gateway) PoolSeq() uint64 {
+	g.poolMu.Lock()
+	defer g.poolMu.Unlock()
+	return g.poolSeq
+}
+
+// ReplacePools makes t the pools, for a table rebuilt from the state files:
+// when the daemon starts, and when a load balancer comes up. Apps whose pool
+// was set after since (a PoolSeq taken before t was built) keep it, because
+// whoever set it saw something newer than t; apps not in t are dropped
+// unless they are newer too.
+func (g *Gateway) ReplacePools(t Table, since uint64) error {
+	g.poolMu.Lock()
+	defer g.poolMu.Unlock()
+	for key, p := range t {
+		if g.poolSet[key] <= since {
+			g.pools[key] = p
+		}
+	}
+	for key := range g.pools {
+		if _, ok := t[key]; !ok && g.poolSet[key] <= since {
+			delete(g.pools, key)
+			delete(g.poolSet, key)
+		}
+	}
+	return g.pushLocked()
+}
+
+// Pushes is the number of tables the load balancer has taken, for tests.
+func (g *Gateway) Pushes() int {
+	g.poolMu.Lock()
+	defer g.poolMu.Unlock()
+	return g.pushes
+}
+
+// Sessions returns the number of requests open to each copy, by its
+// address, or nil when the load balancer can't say. It takes neither of the
+// gateway's locks, so a status query never waits on a reload.
+func (g *Gateway) Sessions() map[string]int {
+	if !g.proc.Running() {
+		return nil
+	}
+	open, err := g.admin.Upstreams()
+	if err != nil {
+		return nil
+	}
+	return open
+}
+
+// prunePools drops the pools of apps the load balancer no longer serves and
+// sends the table, so a stopped or deleted app leaves nothing behind. A push
+// that fails has been logged.
+func (g *Gateway) prunePools(keep []App) {
+	g.poolMu.Lock()
+	defer g.poolMu.Unlock()
+	for key := range g.pools {
+		if !slices.ContainsFunc(keep, func(a App) bool { return a.Key == key }) {
+			delete(g.pools, key)
+			delete(g.poolSet, key)
+		}
+	}
+	g.pushLocked()
+}
+
+// pushLocked sends the pools to the load balancer unless it already has
+// them: the same table, and the same process. It never waits for a load
+// balancer that is not running: a takeover must not block on a restart, and
+// the supervisor's OnReady sends the table when it is back. The caller holds
+// poolMu.
+func (g *Gateway) pushLocked() error {
+	if !g.proc.Running() {
+		return ErrNotRunning
+	}
+	gen := g.proc.Generation()
+	send := g.sendable()
+	if g.pushedGen == gen && send.Equal(g.pushed) {
+		return nil
+	}
+
+	if err := g.admin.PutCopies(send); err != nil {
+		if msg := err.Error(); msg != g.lastPush {
+			log.Printf("proxy: could not update the copies: %v", err)
+			g.lastPush = msg
+		}
+		return err
+	}
+	g.lastPush = ""
+	g.pushed, g.pushedGen = send.Clone(), gen
+	g.pushes++
+
+	// For a load balancer that restarts by itself: it reads this file at
+	// start. The file is not the source of truth; shinyctl-api rebuilds the
+	// table from the state files whenever the load balancer comes up.
+	data, err := json.Marshal(send)
+	if err == nil {
+		err = atomicfile.Write(g.settings.CopiesPath, data)
+	}
+	if err != nil {
+		log.Printf("proxy: could not save %s: %v", g.settings.CopiesPath, err)
+	}
+	return nil
+}
+
+// sendable is the pools the load balancer would accept. A copy it would
+// refuse (hand-edited state naming one port for two copies, or something
+// that isn't an address) is left out, the one listed first being kept, and
+// logged once: one bad copy must not keep its app, or every other app, from
+// reaching the load balancer, which refuses a whole table for one such
+// entry. The caller holds poolMu.
+func (g *Gateway) sendable() Table {
+	send := make(Table, len(g.pools))
+	bad := map[string]bool{}
+	for key, p := range g.pools {
+		seen := map[string]bool{}
+		clean := func(list []string) []string {
+			var out []string
+			for _, dial := range list {
+				var why string
+				if _, _, err := net.SplitHostPort(dial); err != nil {
+					why = "it is not a host:port address"
+				} else if seen[dial] {
+					why = "it is listed twice"
+				}
+				if why != "" {
+					id := key + "\x00" + dial + "\x00" + why
+					bad[id] = true
+					if !g.badPools[id] {
+						log.Printf("proxy: not sending copy %s of %s: %s", dial, key, why)
+					}
+					continue
+				}
+				seen[dial] = true
+				out = append(out, dial)
+			}
+			return out
+		}
+		send[key] = Pool{Active: clean(p.Active), Warm: clean(p.Warm), Draining: clean(p.Draining)}
+	}
+	g.badPools = bad
+	return send
 }
 
 // bindsTo reports whether a bind error for addr is about a's address. The

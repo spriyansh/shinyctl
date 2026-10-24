@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+
+	"github.com/spriyansh/shinyctl/internal/proxy/lb"
 )
 
 // stopTimeout bounds the shutdown. Stopping doesn't wait for open
@@ -22,6 +24,9 @@ const stopTimeout = 5 * time.Second
 // the engine's own autosave is off, its TLS app is told not to keep
 // housekeeping files, and its storage root is inside the proxy directory
 // (all in the rendered config).
+//
+// The copies table is read from copies.json next to the config before
+// anything is loaded.
 //
 // If configPath can't be used (a port taken since it was written, invalid
 // JSON, paths that name another directory after the home directory moved)
@@ -40,6 +45,16 @@ func Run(configPath string) error {
 	defer lock.Close()
 
 	dir := filepath.Dir(configPath)
+
+	// The copies come before the settings, so the first request already
+	// finds them: shinyctl-api sends them again once it is up, but a proxy
+	// that restarts on its own would otherwise answer with the restarting
+	// page until then.
+	copiesPath := SettingsFor(dir).CopiesPath
+	if err := lb.LoadFile(copiesPath); err != nil {
+		log.Printf("proxy: could not read %s: the file is not usable; serving no copies until shinyctl-api sends them", copiesPath)
+	}
+
 	var loadErr error
 	if cfg, err := os.ReadFile(configPath); err != nil {
 		loadErr = err
