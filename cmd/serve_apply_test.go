@@ -6,8 +6,11 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -644,4 +647,88 @@ func TestHandleApply_ReplacementKeepsInternalPort(t *testing.T) {
 		t.Errorf("recorded app = %+v, want a new process on the internal port %d", b, high)
 	}
 	waitServed(t, spec2, b.PID)
+}
+
+// A control character in a path is refused by an apply, with its own message
+// (not the missing-file one), but not by stop, which must still work for an
+// app an earlier version accepted with such a path.
+func TestHandleApply_ControlCharacterInAPath(t *testing.T) {
+	useFakeRscript(t)
+	dir := t.TempDir()
+	spec := newTestSpec(t, dir, "app", "app.R", freePorts(t, 1)[0])
+	odd := filepath.Join(dir, "odd\nname.R")
+	if err := os.WriteFile(odd, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec.EntrypointFile = odd
+
+	rec := postJSON(t, handleApply, spec)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "entrypoint-file must not contain control characters") {
+		t.Errorf("apply: status %d, body %q; want 400 with the control-character message", rec.Code, rec.Body.String())
+	}
+
+	if rec := postJSON(t, handleStop, spec); rec.Code != http.StatusOK {
+		t.Errorf("stop: status %d, body %q; want 200", rec.Code, rec.Body.String())
+	}
+	t.Cleanup(func() { postJSON(t, handleDelete, spec) })
+}
+
+// Restart remembers the spec and may start an app, so it refuses a control
+// character in a path too: nothing is started or remembered.
+func TestHandleRestart_ControlCharacterInAPath(t *testing.T) {
+	useFakeRscript(t)
+	dir := t.TempDir()
+	spec := newTestSpec(t, dir, "app", "app.R", freePorts(t, 1)[0])
+	odd := filepath.Join(dir, "odd\tname.R")
+	if err := os.WriteFile(odd, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec.EntrypointFile = odd
+
+	rec := postJSON(t, handleRestart, spec)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "entrypoint-file must not contain control characters") {
+		t.Errorf("restart: status %d, body %q; want 400 with the control-character message", rec.Code, rec.Body.String())
+	}
+	if _, known := appRegistry.Spec(spec.AppStateFile); known {
+		t.Error("the spec was remembered")
+		appRegistry.Forget(spec.AppStateFile)
+	}
+	if app := loadApp(t, spec); app.PID != 0 {
+		t.Errorf("record = %+v, want nothing started", app)
+	}
+}
+
+// The commands refuse a control character before they ask for shinyctl-api,
+// which they would otherwise start.
+func TestCLI_ControlCharacterIsRefusedBeforeContactingTheDaemon(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	odd := filepath.Join(dir, "odd\nname.R")
+	if err := os.WriteFile(odd, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifestFile := filepath.Join(dir, "shinyctl.yaml")
+	body := "app-group: g\napp-name: n\nport: 18881\napp-state-file: ./state.json\nentrypoint-file: \"" + "odd\\nname.R" + "\"\n"
+	if err := os.WriteFile(manifestFile, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	asked := false
+	orig := ensureAPIRunning
+	ensureAPIRunning = func() error { asked = true; return nil }
+	defer func() { ensureAPIRunning = orig }()
+
+	for _, command := range []string{"apply", "restart"} {
+		asked = false
+		rootCmd.SetArgs([]string{command, "-f", manifestFile})
+		rootCmd.SetOut(io.Discard)
+		rootCmd.SetErr(io.Discard)
+		err := rootCmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "entrypoint-file must not contain control characters") {
+			t.Errorf("%s: err = %v, want the control-character message", command, err)
+		}
+		if asked {
+			t.Errorf("%s asked for shinyctl-api before checking the manifest", command)
+		}
+	}
 }

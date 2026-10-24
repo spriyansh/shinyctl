@@ -14,6 +14,10 @@ import (
 
 var manifestFile string
 
+// ensureAPIRunning starts shinyctl-api if it isn't running; a variable so a
+// test can tell whether a command got as far as asking for it.
+var ensureAPIRunning = process.EnsureAPIRunning
+
 var applyCmd = &cobra.Command{
 	Use:   "apply",
 	Short: "Reconcile a shiny app to the state declared in a YAML manifest",
@@ -24,11 +28,14 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 
+		if err := manifest.CheckPathCharacters(spec); err != nil {
+			return fmt.Errorf("invalid manifest: %w", err)
+		}
 		if err := manifest.Validate(spec); err != nil {
 			return fmt.Errorf("invalid manifest: %w", err)
 		}
 
-		if err := process.EnsureAPIRunning(); err != nil {
+		if err := ensureAPIRunning(); err != nil {
 			return fmt.Errorf("shinyctl-api: %w", err)
 		}
 

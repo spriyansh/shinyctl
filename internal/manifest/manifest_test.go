@@ -245,6 +245,7 @@ func TestValidate(t *testing.T) {
 		{"omitted replicas accepted", func(s AppSpec) AppSpec { s.Replicas = 0; return s }, false},
 		{"replicas of 2 rejected", func(s AppSpec) AppSpec { s.Replicas = 2; return s }, true},
 		{"negative replicas rejected", func(s AppSpec) AppSpec { s.Replicas = -1; return s }, true},
+		{"a space in the working dir accepted", func(s AppSpec) AppSpec { s.WorkingDir = "/srv/my apps"; return s }, false},
 		{"omitted host accepted", func(s AppSpec) AppSpec { s.Host = ""; return s }, false},
 		{"loopback host accepted", func(s AppSpec) AppSpec { s.Host = "127.0.0.1"; return s }, false},
 		{"IPv6 host accepted", func(s AppSpec) AppSpec { s.Host = "::1"; return s }, false},
@@ -379,4 +380,26 @@ func TestStartFields(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestCheckPathCharacters(t *testing.T) {
+	good := AppSpec{EntrypointFile: "/srv/my apps/app.R", WorkingDir: "/srv/my apps"}
+	if err := CheckPathCharacters(good); err != nil {
+		t.Errorf("a path with a space: %v", err)
+	}
+	for name, c := range map[string]struct {
+		mutate func(*AppSpec)
+		want   string
+	}{
+		"newline in the entrypoint": {func(s *AppSpec) { s.EntrypointFile += "\n" }, "entrypoint-file must not contain control characters such as tabs or line breaks"},
+		"tab in the entrypoint":     {func(s *AppSpec) { s.EntrypointFile = "/a\tb.R" }, "entrypoint-file must not contain control characters such as tabs or line breaks"},
+		"tab in the working dir":    {func(s *AppSpec) { s.WorkingDir = "/srv/a\tb" }, "working-dir must not contain control characters such as tabs or line breaks"},
+		"escape in the working dir": {func(s *AppSpec) { s.WorkingDir = "/srv/\x1b" }, "working-dir must not contain control characters such as tabs or line breaks"},
+	} {
+		spec := good
+		c.mutate(&spec)
+		if err := CheckPathCharacters(spec); err == nil || err.Error() != c.want {
+			t.Errorf("%s: %v, want %q", name, err, c.want)
+		}
+	}
 }

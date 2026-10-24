@@ -34,6 +34,12 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only apply and restart refuse these: stop and delete must still work for
+	// an app an earlier version accepted.
+	if err := manifest.CheckPathCharacters(spec); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := manifest.Validate(spec); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

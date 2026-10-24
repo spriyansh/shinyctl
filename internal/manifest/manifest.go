@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -73,6 +75,22 @@ func resolvePath(dir, p string) string {
 	default:
 		return filepath.Join(dir, p)
 	}
+}
+
+// CheckPathCharacters refuses a control character (a tab, a newline) in the
+// entrypoint or the working directory: it would end up in R's command line,
+// where the process can't be told from others any more. It is checked when an
+// app is applied or restarted and not by Validate, which stop and delete run
+// too, so that an app an earlier version accepted with such a path can still
+// be stopped and removed.
+func CheckPathCharacters(spec AppSpec) error {
+	if strings.ContainsFunc(spec.EntrypointFile, unicode.IsControl) {
+		return fmt.Errorf("entrypoint-file must not contain control characters such as tabs or line breaks")
+	}
+	if strings.ContainsFunc(spec.WorkingDir, unicode.IsControl) {
+		return fmt.Errorf("working-dir must not contain control characters such as tabs or line breaks")
+	}
+	return nil
 }
 
 // Validate checks spec for everything that can be caught before a process

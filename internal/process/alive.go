@@ -1,9 +1,6 @@
 package process
 
 import (
-	"os/exec"
-	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
@@ -15,8 +12,9 @@ import (
 // process's PID can be recycled by the OS for an unrelated process;
 // syscall.Kill(pid, 0) alone can't tell the difference. Checking the
 // running command line against the entrypoint closes that gap cheaply and
-// portably (via `ps`, no /proc dependency, so it works on macOS too,
-// unlike reading the OS's own process-start-time).
+// portably (from /proc on Linux and from `ps` elsewhere, in either case read
+// without regard to the locale; see commandLine), unlike reading the OS's own
+// process-start-time.
 //
 // The entrypoint recorded in app wins over spec's: after a re-apply, spec
 // describes the replacement, and the recorded process must still be
@@ -83,9 +81,6 @@ func isOurs(app state.AppState, fallbacks ...string) bool {
 // "can't confirm identity" — false, the conservative choice given this
 // exists specifically to avoid false positives.
 func HasCommandLine(pid int, substr string) bool {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(out), substr)
+	line, ok := commandLine(pid)
+	return ok && inCommandLine(line, substr)
 }

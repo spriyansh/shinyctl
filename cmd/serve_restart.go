@@ -55,6 +55,12 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Restart remembers the spec and may start a never-applied app, so it
+	// refuses what an apply refuses.
+	if err := manifest.CheckPathCharacters(spec); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := manifest.Validate(spec); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

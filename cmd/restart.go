@@ -24,11 +24,14 @@ var restartCmd = &cobra.Command{
 			return err
 		}
 
+		if err := manifest.CheckPathCharacters(spec); err != nil {
+			return fmt.Errorf("invalid manifest: %w", err)
+		}
 		if err := manifest.Validate(spec); err != nil {
 			return fmt.Errorf("invalid manifest: %w", err)
 		}
 
-		if err := process.EnsureAPIRunning(); err != nil {
+		if err := ensureAPIRunning(); err != nil {
 			return fmt.Errorf("shinyctl-api: %w", err)
 		}
 

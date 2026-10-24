@@ -27,12 +27,7 @@ type Exit struct {
 // otherwise. The caller can block on it to react to death immediately
 // instead of waiting for the next periodic liveness check.
 func Start(spec manifest.AppSpec, port int) (state.AppState, <-chan Exit, error) {
-	command := fmt.Sprintf(
-		"shiny::runApp(%q, port=%d, host=%q)",
-		spec.EntrypointFile,
-		port,
-		InternalHost,
-	)
+	command := RunAppExpression(spec.EntrypointFile, port, InternalHost)
 
 	proc := exec.Command(
 		"Rscript",
