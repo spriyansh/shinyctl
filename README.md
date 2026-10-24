@@ -47,7 +47,7 @@ shinyctl apply -f examples/hello/shinyctl.yaml
 
 Open http://127.0.0.1:8765 and click **Crash this app**. `shinyctl status`
 shows `crash-looping` for a couple of seconds, then a new process. The
-page reconnects by itself and shows the new process ID.
+page reloads by itself and shows the new process ID.
 `shinyctl logs -f examples/hello/shinyctl.yaml` shows what the app printed,
 including the crash. Remove the app with
 `shinyctl delete -f examples/hello/shinyctl.yaml`.
@@ -112,10 +112,12 @@ replicas: 1                     # optional; 1 is the only accepted value
   `READY` turns from `starting` to `ready` once the port accepts
   connections. `MEM` is the resident memory of the app's main R process;
   worker processes it started aren't counted.
-- After a restart, an open page reconnects only if the app calls
-  `session$allowReconnect("force")`, as the example does. Inputs come back
-  but server-side state doesn't, and an input that crashed the app is sent
-  again: give its `observeEvent` `ignoreInit = TRUE`.
+- After a restart, an open page greys out until it is reloaded. The
+  example reloads it by itself once the app answers again: copy its
+  `tags$script` into your app's UI. Shiny's own
+  `session$allowReconnect("force")` is no substitute: with shiny 1.14, a
+  page reconnected to a new R process keeps its old outputs, and its
+  downloads stop working.
 
 ## Survive reboots (Linux)
 
