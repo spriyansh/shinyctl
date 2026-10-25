@@ -89,6 +89,7 @@ type engineApp struct {
 	port   int
 	cookie string
 	tryInt string
+	policy string // the fallback policy; least_conn when empty
 }
 
 func engineConfig(sock string, apps []engineApp) []byte {
@@ -98,13 +99,17 @@ func engineConfig(sock string, apps []engineApp) []byte {
 		if tryInt == "" {
 			tryInt = "250ms"
 		}
+		policy := a.policy
+		if policy == "" {
+			policy = "least_conn"
+		}
 		rp := map[string]any{
 			"handler":           "reverse_proxy",
 			"dynamic_upstreams": map[string]any{"source": "shinyctl_copies", "app": a.key},
 			"load_balancing": map[string]any{
 				"selection_policy": map[string]any{
 					"policy": "shinyctl_sticky", "app": a.key, "cookie": a.cookie, "secret": "k",
-					"fallback": map[string]any{"policy": "least_conn"},
+					"fallback": map[string]any{"policy": policy},
 				},
 				"try_duration": "15s",
 				"try_interval": tryInt,
@@ -439,5 +444,104 @@ func TestServe_EmptyListWaitsThenRecovers(t *testing.T) {
 	}
 	if took < 400*time.Millisecond || took > 1500*time.Millisecond {
 		t.Errorf("answered after %v; want a wait of about 500ms for the push", took)
+	}
+}
+
+// Two active copies and a spare; one active copy dies and the table is not
+// changed (the daemon has not noticed, or is down). The visitor of the dead
+// copy lands on the spare, not on the other active copy, on the first try,
+// and keeps it. New visitors (least_conn here) go to the other active copy or
+// the spare, whichever has fewer connections, never to the dead one; which of
+// the two is not asserted, since their counts are not in the test's hands.
+func TestServe_SpareStandsInForADeadActiveCopy(t *testing.T) {
+	a, b, w := newUpstream(t, "A"), newUpstream(t, "B"), newUpstream(t, "W")
+	port := freePort(t)
+	Set(Table{"app": {Active: []string{a.addr, b.addr}, Warm: []string{w.addr}}})
+	startEngine(t, []engineApp{{key: "app", port: port, cookie: "lb_x"}})
+
+	for i := 0; i < 5; i++ {
+		if _, body, _, _ := fetch(t, port, "", ""); body == "W" {
+			t.Fatalf("a new visitor was served by the spare while both active copies were up")
+		}
+	}
+
+	a.kill()
+	for i := 0; i < 10; i++ {
+		// A new connection each time; the first request also finds out that
+		// the copy is down, the later ones see it marked.
+		status, body, cookies, took := fetch(t, port, "lb_x", token("k", a.addr))
+		if status != 200 || body != "W" || len(cookies) != 1 || !strings.Contains(cookies[0], token("k", w.addr)) {
+			t.Fatalf("visit %d, pinned to the dead copy: %d %q cookies %v; want 200 from W with one cookie for W", i, status, body, cookies)
+		}
+		if took > time.Second {
+			t.Errorf("visit %d took %v, want under 1s", i, took)
+		}
+		if i == 0 {
+			// Its cookie from now on is the spare's: it stays there.
+			if _, body, cookies, _ := fetch(t, port, "lb_x", token("k", w.addr)); body != "W" || len(cookies) != 0 {
+				t.Fatalf("a visitor placed on the spare moved: %q cookies %v", body, cookies)
+			}
+		}
+	}
+	for i := 0; i < 10; i++ {
+		if status, body, _, _ := fetch(t, port, "", ""); status != 200 || body == "A" {
+			t.Fatalf("new visitor: %d %q, want B or W", status, body)
+		}
+	}
+}
+
+// holdWS opens an upgraded connection to the copy that serves a visitor
+// pinned with cookie: it counts as an open request there, like a session.
+func holdWS(t *testing.T, port int, cookie string) {
+	t.Helper()
+	c, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(c, "GET /ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: lb_x=%s\r\n\r\n", cookie)
+	line, _ := bufio.NewReader(c).ReadString('\n')
+	if !strings.Contains(line, "101") {
+		t.Fatalf("websocket: %q", line)
+	}
+	t.Cleanup(func() { c.Close() })
+}
+
+// The daemon's update (the dead copy dropped, the spare made active) lands
+// while the visitor's request waits out the retry interval after its dial to
+// the dead copy failed. At the retry the cookie names a copy that is no
+// longer listed; the spare must still be the one that serves the visitor,
+// whatever the fallback policy and the other copy's load are, every time.
+func TestServe_PushDuringTheRetryWaitKeepsTheSpare(t *testing.T) {
+	const rounds = 12
+	for _, policy := range []string{"first", "round_robin", "random", "least_conn"} {
+		for _, session := range []bool{false, true} {
+			onW := 0
+			for i := 0; i < rounds; i++ {
+				func() {
+					a, b, w := newUpstream(t, "A"), newUpstream(t, "B"), newUpstream(t, "W")
+					port := freePort(t)
+					Set(Table{"app": {Active: []string{a.addr, b.addr}, Warm: []string{w.addr}}})
+					sock := startEngine(t, []engineApp{{key: "app", port: port, cookie: "lb_x", policy: policy}})
+					defer caddy.Stop()
+					if session {
+						holdWS(t, port, token("k", b.addr)) // a session on the other active copy
+					}
+					a.kill()
+					got := make(chan string, 1)
+					go func() {
+						_, body, _, _ := fetch(t, port, "lb_x", token("k", a.addr))
+						got <- body
+					}()
+					time.Sleep(30 * time.Millisecond) // inside the 250ms wait of the first retry
+					push(t, sock, Table{"app": {Active: []string{b.addr, w.addr}}})
+					if <-got == "W" {
+						onW++
+					}
+				}()
+			}
+			if onW != rounds {
+				t.Errorf("%s, other copy has a session = %v: the dead copy's visitor landed on the spare %d of %d times", policy, session, onW, rounds)
+			}
+		}
 	}
 }

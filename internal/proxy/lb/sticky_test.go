@@ -377,3 +377,140 @@ func TestTableChangeTakesEffectNextSelect(t *testing.T) {
 		t.Fatalf("a removed: pinned visitor on %s, cookie %v", dialOf(u), c)
 	}
 }
+
+// The spare stands in for an active copy that is down (rule 2).
+
+func fallbacks() map[string]func() reverseproxy.Selector {
+	return map[string]func() reverseproxy.Selector{
+		"first":       func() reverseproxy.Selector { return reverseproxy.FirstSelection{} },
+		"round_robin": func() reverseproxy.Selector { return &reverseproxy.RoundRobinSelection{} },
+		"random":      func() reverseproxy.Selector { return reverseproxy.RandomSelection{} },
+		"least_conn":  func() reverseproxy.Selector { return reverseproxy.LeastConnSelection{} },
+	}
+}
+
+// Replicas 2, one active copy down: the visitor of the dead copy goes to the
+// spare, not to the other active copy, whatever the fallback policy is.
+func TestStandIn_DeadActiveCopysVisitorGetsTheSpare(t *testing.T) {
+	p := pool("a:1", "b:2", "w:3")
+	for name, mk := range fallbacks() {
+		s := newSticky(t, mk(), []string{"a:1", "b:2"}, []string{"w:3"}, nil, "a:1")
+		for i := 0; i < 20; i++ {
+			u, c := selectFor(s, p, token(testSecret, "a:1"), false)
+			if dialOf(u) != "w:3" || c == nil || c.Value != token(testSecret, "w:3") {
+				t.Fatalf("%s: cookie for the dead copy -> %s, cookie %v; want the spare with its cookie", name, dialOf(u), c)
+			}
+		}
+		// The visitor placed on the spare keeps it.
+		if u, c := selectFor(s, p, token(testSecret, "w:3"), false); dialOf(u) != "w:3" || c != nil {
+			t.Fatalf("%s: the visitor left the spare: %s, cookie %v", name, dialOf(u), c)
+		}
+		// A new visitor may get the other active copy or the spare, never the dead one.
+		seen := map[string]bool{}
+		for i := 0; i < 40; i++ {
+			u, c := selectFor(s, p, "", false)
+			if u == nil || c == nil || dialOf(u) == "a:1" {
+				t.Fatalf("%s: new visitor -> %s, cookie %v", name, dialOf(u), c)
+			}
+			seen[u.Dial] = true
+		}
+		if name == "first" && (len(seen) != 1 || !seen["b:2"]) {
+			t.Errorf("first: %v, want the active copy that is up first", seen)
+		}
+		if name == "round_robin" && len(seen) != 2 {
+			t.Errorf("round_robin: %v, want both the active copy and the spare", seen)
+		}
+	}
+}
+
+// Replicas 1 is as before: the spare replaces the only active copy.
+func TestStandIn_OneActiveCopy(t *testing.T) {
+	p := pool("a:1", "w:2")
+	for name, mk := range fallbacks() {
+		s := newSticky(t, mk(), []string{"a:1"}, []string{"w:2"}, nil, "a:1")
+		for _, cookie := range []string{"", token(testSecret, "a:1")} {
+			if u, _ := selectFor(s, p, cookie, false); dialOf(u) != "w:2" {
+				t.Fatalf("%s: cookie %q -> %s, want the spare", name, cookie, dialOf(u))
+			}
+		}
+	}
+}
+
+// Two active copies down and one spare: the spare stands in for the first;
+// the visitor of the second, and new visitors, get the spare too (the only
+// copy that is up).
+func TestStandIn_TwoDownOneSpare(t *testing.T) {
+	p := pool("a:1", "b:2", "w:3")
+	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1", "b:2"}, []string{"w:3"}, nil, "a:1", "b:2")
+	for _, cookie := range []string{"", token(testSecret, "a:1"), token(testSecret, "b:2")} {
+		if u, c := selectFor(s, p, cookie, false); dialOf(u) != "w:3" || c == nil {
+			t.Fatalf("cookie %q -> %s, cookie %v; want the spare", cookie, dialOf(u), c)
+		}
+	}
+}
+
+// Two down and two spares: one spare for each, in table order; the visitors
+// of the first and the second dead copy get different spares.
+func TestStandIn_TwoDownTwoSpares(t *testing.T) {
+	p := pool("a:1", "b:2", "w:3", "x:4")
+	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1", "b:2"}, []string{"w:3", "x:4"}, nil, "a:1", "b:2")
+	if u, _ := selectFor(s, p, token(testSecret, "a:1"), false); dialOf(u) != "w:3" {
+		t.Errorf("first dead copy -> %s, want w:3", dialOf(u))
+	}
+	if u, _ := selectFor(s, p, token(testSecret, "b:2"), false); dialOf(u) != "x:4" {
+		t.Errorf("second dead copy -> %s, want x:4", dialOf(u))
+	}
+}
+
+// Only one of two spares stands in for one dead copy; the other stays out of
+// the new visitors' way. A spare that is itself down is not a stand-in.
+func TestStandIn_OnlyAsManyAsAreDown(t *testing.T) {
+	p := pool("a:1", "b:2", "w:3", "x:4")
+	s := newSticky(t, &reverseproxy.RoundRobinSelection{}, []string{"a:1", "b:2"}, []string{"w:3", "x:4"}, nil, "a:1")
+	seen := map[string]bool{}
+	for i := 0; i < 30; i++ {
+		u, _ := selectFor(s, p, "", false)
+		seen[dialOf(u)] = true
+	}
+	if seen["x:4"] || seen["a:1"] || !seen["b:2"] || !seen["w:3"] {
+		t.Errorf("new visitors went to %v, want b:2 and w:3 only", seen)
+	}
+
+	// w is down too: x is the stand-in.
+	s = newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1", "b:2"}, []string{"w:3", "x:4"}, nil, "a:1", "w:3")
+	if u, _ := selectFor(s, p, token(testSecret, "a:1"), false); dialOf(u) != "x:4" {
+		t.Errorf("first spare down: %s, want x:4", dialOf(u))
+	}
+
+	// Every spare is down: the other active copy, as before.
+	s = newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1", "b:2"}, []string{"w:3", "x:4"}, nil, "a:1", "w:3", "x:4")
+	if u, _ := selectFor(s, p, token(testSecret, "a:1"), false); dialOf(u) != "b:2" {
+		t.Errorf("no spare up: %s, want b:2", dialOf(u))
+	}
+}
+
+// With every active copy up the spares stay out of it, as before, and a
+// draining copy is only the last resort.
+func TestStandIn_NothingDownChangesNothing(t *testing.T) {
+	p := pool("a:1", "b:2", "w:3", "d:4")
+	s := newSticky(t, &reverseproxy.RoundRobinSelection{}, []string{"a:1", "b:2"}, []string{"w:3"}, []string{"d:4"})
+	for i := 0; i < 20; i++ {
+		if u, _ := selectFor(s, p, "", false); dialOf(u) == "w:3" || dialOf(u) == "d:4" {
+			t.Fatalf("new visitor on %s", dialOf(u))
+		}
+	}
+	s = newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1"}, []string{"w:3"}, []string{"d:4"}, "a:1", "w:3")
+	if u, _ := selectFor(s, p, "", false); dialOf(u) != "d:4" {
+		t.Errorf("active and spare down -> %s, want the draining copy", dialOf(u))
+	}
+}
+
+// No active copy is listed at all (an app between plans): the warm copies
+// serve new visitors, as the tiers always said.
+func TestStandIn_NoActiveListedUsesTheWarmTier(t *testing.T) {
+	p := pool("w:1", "x:2")
+	s := newSticky(t, reverseproxy.FirstSelection{}, nil, []string{"w:1", "x:2"}, nil)
+	if u, c := selectFor(s, p, "", false); dialOf(u) != "w:1" || c == nil {
+		t.Fatalf("no active copy listed -> %s, cookie %v; want the first warm copy", dialOf(u), c)
+	}
+}

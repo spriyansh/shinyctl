@@ -306,8 +306,10 @@ type staticResponse struct {
 //     scale change take effect without a reload; a reload binds every
 //     listener again and drops the connections that arrive meanwhile.
 //   - the selection policy keeps each visitor on one copy with a cookie
-//     (see CookieName), and sends new visitors to the active copies, never
-//     to a warm one while an active one is up.
+//     (see CookieName), and sends new visitors to the active copies; a warm
+//     copy takes visitors only as the stand-in for an active copy that is
+//     down, and a visitor of a copy that has just left the table goes to
+//     the copy that took its place.
 //   - try_duration and try_interval make a request wait for an app that is
 //     restarting.
 //   - passive health checks are a backstop for a copy that died before the

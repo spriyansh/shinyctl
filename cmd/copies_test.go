@@ -1136,6 +1136,11 @@ func TestHandleStatus_ReadyNeedsTheCopyListed(t *testing.T) {
 // change a record.
 func TestRefreshPools_HasNoSideEffects(t *testing.T) {
 	useFakeRscript(t)
+	// Without an exit-watcher on the adopted copies, so that only the ticks
+	// and refreshPools look at the dead one.
+	useHooks(t, hooks{WatchExit: func(manifest.AppSpec, state.AppState) (<-chan struct{}, error) {
+		return nil, process.ErrWatchUnsupported
+	}})
 	spec := copiesSpec(t, "app", 1, 1)
 	cleanupApp(t, spec)
 	one, two := adoptCopies(t, spec) // calls refreshPools itself

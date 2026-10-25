@@ -4,6 +4,7 @@ Copyright © 2026 Priyansh Srivastava <priyansh@metapriyansh.com>
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -28,6 +29,78 @@ import (
 // restart-policy never copy would come back). A process adopted from an
 // earlier daemon has no watcher, and the tick records its exit itself.
 var watched sync.Map
+
+// adoptedWatched holds the PIDs of the copies from an earlier run that have a
+// watcher of the kind watchAdopted starts. A PID is in it from the moment the
+// watcher starts until the process has exited, so it has one entry per live
+// process, never more.
+var adoptedWatched sync.Map
+
+// watchAdopted starts, once per process, a watcher that reconciles the app
+// the moment rec's process exits, for a copy that this daemon did not start
+// and so has no exit-watcher of its own (see watched). The watcher only
+// triggers the reconcile: the exit is recorded as the tick records it, so a
+// crash is counted exactly as without the watcher, once. The reconcile finds
+// the copy gone and promotes a warm copy at once instead of at the next tick.
+// Where the system can't watch a process that is not our child, the tick
+// stays the only check, and that is logged, once for the whole run.
+func watchAdopted(spec manifest.AppSpec, rec state.AppState) {
+	pid := rec.PID
+	if isWatched(pid) {
+		return
+	}
+	if _, loaded := adoptedWatched.LoadOrStore(pid, struct{}{}); loaded {
+		return
+	}
+	exited, err := currentHooks().WatchExit(spec, rec)
+	if err != nil {
+		adoptedWatched.Delete(pid)
+		if !errors.Is(err, process.ErrNotOurs) {
+			noWatchOnce.Do(func() {
+				log.Printf("reconcile: this system can't watch processes started by an earlier run (%v); they are checked every %s instead", err, reconcileInterval)
+			})
+		}
+		return
+	}
+	stateFile := spec.AppStateFile
+	go func() {
+		<-exited
+		adoptedWatched.Delete(pid)
+		triggerReconcile(stateFile)
+	}()
+}
+
+var noWatchOnce sync.Once
+
+// watchRestoredCopies gives every copy that is running when the daemon
+// starts its watcher now, so that a copy from the earlier run that dies
+// during the first seconds is noticed at once too, not at the first tick.
+// It also marks them seen, which is what lets the reconcile that follows
+// count their exit as a crash. It is called when the load balancer is ready
+// (started or adopted), the moment the daemon can act on an exit. It does not
+// take the state lock: it only reads the state files, which are replaced whole
+// and never edited in place, as refreshPools does, and watchAdopted checks
+// each process itself. A record that a cycle replaces meanwhile costs, at
+// worst, a watcher on the old process, whose exit is a reconcile that finds
+// nothing to do.
+func watchRestoredCopies() {
+	for _, spec := range appRegistry.All() {
+		if !appRegistry.Managed(spec.AppStateFile) {
+			continue
+		}
+		st, err := state.Load(spec.AppStateFile)
+		if err != nil {
+			continue
+		}
+		recs := st.Copies()
+		for i, up := range process.AliveAll(spec, recs) {
+			if up {
+				markSeen(spec.AppStateFile, recs[i])
+				watchAdopted(spec, recs[i])
+			}
+		}
+	}
+}
 
 func isWatched(pid int) bool {
 	_, ok := watched.Load(pid)
@@ -169,6 +242,7 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 		case alive[i]:
 			if mode != observeReadOnly {
 				markSeen(spec.AppStateFile, rec)
+				watchAdopted(spec, rec)
 			}
 			if rec.Copy >= 1 {
 				v.Ready = currentHooks().ObserveProbe(process.InternalHost, rec.Port)

@@ -6,14 +6,16 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Pool is one app's copies by role, as "127.0.0.1:<port>" dial addresses,
 // each list in the order the daemon ranks them.
 type Pool struct {
 	Active []string `json:"active,omitempty"` // take new visitors
-	Warm   []string `json:"warm,omitempty"`   // ready spares: take visitors only when no active copy is up
+	Warm   []string `json:"warm,omitempty"`   // ready spares: take no new visitors while every active copy is up; one stands in for each active copy that is down
 	// Draining copies keep the visitors already pinned to them and get no
 	// new ones. Nothing sets it yet.
 	Draining []string `json:"draining,omitempty"`
@@ -63,9 +65,24 @@ var tiers = [...]role{roleActive, roleWarm, roleDraining}
 // never changed after it is built.
 type snapshot struct {
 	table Table
-	roles map[string]map[string]role // app → dial → role
-	order map[string][]string        // app → dials: active, then warm, then draining, none twice
+	roles map[string]map[string]role      // app → dial → role
+	order map[string][]string             // app → dials: active, then warm, then draining, none twice
+	succ  map[string]map[string]successor // app → dead dial → the copy that took its place
 }
+
+// successor is the copy that took over from an active copy that has left the
+// table, and until when that is remembered.
+type successor struct {
+	dial  string
+	until time.Time
+}
+
+// successorTTL is how long a visitor whose cookie names a copy that left the
+// table is still sent to the copy that replaced it.
+const successorTTL = 60 * time.Second
+
+// now is the clock, replaceable in tests.
+var now = time.Now
 
 var current atomic.Pointer[snapshot]
 
@@ -98,9 +115,69 @@ func load() *snapshot {
 	return build(nil)
 }
 
+var setMu sync.Mutex
+
 // Set replaces the whole table. Readers see either the old table or the new
 // one, never a mix.
-func Set(t Table) { current.Store(build(t)) }
+//
+// It also remembers who took whose place. A visitor's cookie names a copy;
+// when that copy dies the daemon's update can land while the visitor's
+// request is still waiting to retry, and the table no longer lists the dead
+// copy, so nothing says which copy the visitor belonged to. For each app the
+// active copies that have left the table altogether are paired, in order, with
+// the warm copies that became active in the same update, and a cookie that
+// names a dead copy goes to its partner (see Sticky.Select). A pairing is
+// kept until the dead copy is listed again, its app is gone, or successorTTL
+// has passed. It lives in the snapshot, so it is replaced with the table and
+// read with it; a load balancer that restarts starts with none.
+func Set(t Table) {
+	setMu.Lock()
+	defer setMu.Unlock()
+	next := build(t)
+	next.succ = pairings(load(), next)
+	current.Store(next)
+}
+
+// pairings is the successors of next: the still-valid ones of prev, and the
+// ones that prev and next make.
+func pairings(prev, next *snapshot) map[string]map[string]successor {
+	t := now()
+	out := map[string]map[string]successor{}
+	put := func(key, dead string, s successor) {
+		if out[key] == nil {
+			out[key] = map[string]successor{}
+		}
+		out[key][dead] = s
+	}
+	for key, m := range prev.succ {
+		for dead, s := range m {
+			if _, ok := next.table[key]; ok && s.until.After(t) && next.roles[key][dead] == roleNone {
+				put(key, dead, s)
+			}
+		}
+	}
+	for key, p := range next.table {
+		before, ok := prev.table[key]
+		if !ok {
+			continue
+		}
+		var gone, promoted []string
+		for _, dial := range before.Active {
+			if next.roles[key][dial] == roleNone && !slices.Contains(gone, dial) {
+				gone = append(gone, dial)
+			}
+		}
+		for _, dial := range p.Active {
+			if slices.Contains(before.Warm, dial) && !slices.Contains(promoted, dial) {
+				promoted = append(promoted, dial)
+			}
+		}
+		for i := 0; i < len(gone) && i < len(promoted); i++ {
+			put(key, gone[i], successor{promoted[i], t.Add(successorTTL)})
+		}
+	}
+	return out
+}
 
 // Current returns a copy of the table.
 func Current() Table { return load().table.Clone() }

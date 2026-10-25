@@ -45,6 +45,9 @@ type hooks struct {
 	WatchProbe   func(host string, port int) bool
 	ObserveProbe func(host string, port int) bool
 
+	// WatchExit is process.WatchExit.
+	WatchExit func(spec manifest.AppSpec, app state.AppState) (<-chan struct{}, error)
+
 	// Signal0 is kill(pid, 0), the ready-watcher's "is it still there".
 	Signal0 func(pid int) error
 }
@@ -60,6 +63,7 @@ func currentHooks() hooks {
 		PortEvery:      100 * time.Millisecond,
 		WatchProbe:     process.IsReady,
 		ObserveProbe:   process.IsReady,
+		WatchExit:      process.WatchExit,
 		Signal0:        func(pid int) error { return syscall.Kill(pid, 0) },
 	}
 	if o := activeHooks.Load(); o != nil {
@@ -84,6 +88,9 @@ func currentHooks() hooks {
 		}
 		if o.ObserveProbe != nil {
 			h.ObserveProbe = o.ObserveProbe
+		}
+		if o.WatchExit != nil {
+			h.WatchExit = o.WatchExit
 		}
 		if o.Signal0 != nil {
 			h.Signal0 = o.Signal0
@@ -120,6 +127,7 @@ func newGateway(dir, exe, logPath string) (*proxy.Gateway, *proxy.Supervisor, er
 		// told who serves what, from the state files, and then which apps to
 		// listen for. The gateway reports what it leaves out.
 		OnReady: func() {
+			watchRestoredCopies()
 			refreshPools()
 			syncProxy("")
 		},

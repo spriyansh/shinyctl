@@ -126,16 +126,21 @@ lb-policy: least-conn           # how a new visitor picks a copy: least-conn (de
 
 - **Roles.** Of the copies that are running and ready, the oldest
   `replicas` are *active* and take new visitors. The rest are *warm*:
-  running, ready, and given no new visitors (a visitor whose cookie names a
-  warm copy stays on it). `status` shows each copy's role.
-- **Takeover.** When an active copy dies, a warm copy becomes active
-  within a few milliseconds, and the visitors of the dead copy move to it.
-  A page with the example's script reloads by itself within about a second.
-  The dead copy restarts after its backoff and comes back as the newest
-  copy, so it is the spare: roles don't swap back on their own. While
-  `shinyctl-api` is down nothing notices a dead copy beyond the load
-  balancer's own checks, which move its visitors within a second; once it is
-  back, it notices at its next check (every 5 seconds) rather than at once.
+  running, ready, and given no new visitors while every active copy is up
+  (a visitor whose cookie names a warm copy stays on it). A warm copy stands
+  in for an active copy that is down. `status` shows each copy's role.
+- **Takeover.** When an active copy fails, the load balancer sends its
+  visitors to a warm copy at once, and `shinyctl-api` makes that copy active
+  within milliseconds; the visitors stay on it. This holds for copies that
+  an earlier `shinyctl-api` started too. A page with the example's script reloads by
+  itself within about a second and lands on the warm copy. The dead copy
+  restarts after its backoff and comes back as the newest copy, so it is the
+  spare: roles don't swap back on their own. While `shinyctl-api` is down the
+  load balancer still puts the spare in, but nothing restarts the dead copy
+  until `shinyctl-api` is up again. Where the system can't watch copies from
+  an earlier run (Linux before 5.3, or a sandbox that forbids it),
+  `shinyctl-api` notices them at its next check, every 5 seconds; the
+  load balancer still puts the spare in.
 - **Restarts go one copy at a time.** `restart`, and an `apply` that
   changes `env`, `working-dir`, `app-group`, `app-name` or
   `entrypoint-file`, replace the copies that are not ready first, then the
