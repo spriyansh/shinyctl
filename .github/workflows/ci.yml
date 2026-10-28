@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,3 +29,15 @@ jobs:
         run: make vet
       - name: go test -race -shuffle=on
         run: make test-race
+
+  cross:
+    name: cross-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet for linux and macOS, amd64 and arm64
+        run: make cross

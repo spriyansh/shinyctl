@@ -8,11 +8,16 @@ Everything goes through the Makefile:
 make format        # go mod tidy + go fmt ./...
 make check-format  # fail if any file needs gofmt
 make vet           # go vet ./...
+make cross         # go vet for linux and darwin, amd64 and arm64
 make test          # go test ./...
 make test-race     # go test -race -shuffle=on ./...
 make install       # vet, then go install .
 make run           # format, install, then apply the example app in examples/hello
 ```
+
+Run `make cross` before sending anything that touches syscalls or
+system-specific code: it builds for all four release targets, and a
+system you are not on can fail to build.
 
 Run `make test-race` too before sending anything that touches `cmd/` or
 `internal/state` — the reconcile loop, the exit-watchers and the HTTP

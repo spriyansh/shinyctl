@@ -6,6 +6,8 @@ import (
 	"net"
 	"strconv"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // PortAvailable reports whether host:port is free to bind on this machine
@@ -49,7 +51,7 @@ func PortAvailableAlongside(host string, port int) error {
 	lc := net.ListenConfig{Control: func(network, address string, c syscall.RawConn) error {
 		var serr error
 		if err := c.Control(func(fd uintptr) {
-			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
+			serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
 		}); err != nil {
 			return err
 		}
