@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,15 +35,58 @@ func shortDir(t *testing.T) string {
 	return dir
 }
 
-// freePort returns a loopback port nothing is listening on.
+// portRange is where this package's tests take ports from: below the
+// range the system hands out to outgoing connections (32768 and up on
+// Linux, 49152 and up on macOS), so no other program's connection can
+// take a port between the probe and the test's own bind.
+const (
+	portLo = 30000
+	portHi = 30899
+)
+
+var (
+	testPortMu   sync.Mutex
+	testPortNext = portLo + rand.New(rand.NewSource(time.Now().UnixNano()^int64(os.Getpid()))).Intn(portHi-portLo+1)
+)
+
+// freePort returns a port in the range that nothing listens on, on
+// loopback or on every address.
 func freePort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	return freePortsIn(t, 1)[0]
+}
+
+// freePortsIn returns n distinct free ports of the range. They are probed
+// on 127.0.0.1 and 0.0.0.0, because tests bind either.
+func freePortsIn(t *testing.T, n int) []int {
+	t.Helper()
+	testPortMu.Lock()
+	defer testPortMu.Unlock()
+	var ports []int
+	for tries := 0; len(ports) < n; tries++ {
+		if tries > 2*(portHi-portLo+1) {
+			t.Fatalf("no free port between %d and %d", portLo, portHi)
+		}
+		p := testPortNext
+		if testPortNext++; testPortNext > portHi {
+			testPortNext = portLo
+		}
+		if portFree(p) {
+			ports = append(ports, p)
+		}
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	return ports
+}
+
+func portFree(p int) bool {
+	for _, host := range []string{"127.0.0.1", "0.0.0.0"} {
+		ln, err := net.Listen("tcp4", net.JoinHostPort(host, strconv.Itoa(p)))
+		if err != nil {
+			return false
+		}
+		ln.Close()
+	}
+	return true
 }
 
 // hold listens on 127.0.0.1:port until the test ends.

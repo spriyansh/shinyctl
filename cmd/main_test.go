@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -234,27 +236,52 @@ func useFakeRscript(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 }
 
-// freePorts returns n distinct loopback ports. The listeners are held until
-// all n are chosen so the OS can't hand the same port out twice.
+// The range this package's tests take ports from: below the range the
+// system hands out to outgoing connections (32768 and up on Linux, 49152 and
+// up on macOS), so no other program's connection can take a port between the
+// probe and the test's own bind, and above the ports shinyctl keeps for the
+// apps' own processes (20000 to 29999).
+const (
+	portLo = 31500
+	portHi = 32767
+)
+
+var (
+	testPortMu   sync.Mutex
+	testPortNext = portLo + rand.New(rand.NewSource(time.Now().UnixNano()^int64(os.Getpid()))).Intn(portHi-portLo+1)
+)
+
+// freePorts returns n distinct ports of the range that nothing listens on,
+// on loopback or on every address, because tests bind either.
 func freePorts(t *testing.T, n int) []int {
 	t.Helper()
-	var lns []net.Listener
+	testPortMu.Lock()
+	defer testPortMu.Unlock()
 	var ports []int
-	for len(ports) < n {
-		ln, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
+	for tries := 0; len(ports) < n; tries++ {
+		if tries > 2*(portHi-portLo+1) {
+			t.Fatalf("no free port between %d and %d", portLo, portHi)
 		}
-		lns = append(lns, ln)
-		// Never a port shinyctl keeps for the apps' own processes.
-		if p := ln.Addr().(*net.TCPAddr).Port; p < manifest.InternalPortMin || p > manifest.InternalPortMax {
+		p := testPortNext
+		if testPortNext++; testPortNext > portHi {
+			testPortNext = portLo
+		}
+		if portFree(p) {
 			ports = append(ports, p)
 		}
 	}
-	for _, ln := range lns {
+	return ports
+}
+
+func portFree(p int) bool {
+	for _, host := range []string{"127.0.0.1", "0.0.0.0"} {
+		ln, err := net.Listen("tcp4", net.JoinHostPort(host, strconv.Itoa(p)))
+		if err != nil {
+			return false
+		}
 		ln.Close()
 	}
-	return ports
+	return true
 }
 
 func newTestSpec(t *testing.T, dir, name, entrypoint string, port int) manifest.AppSpec {

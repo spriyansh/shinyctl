@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -96,6 +97,7 @@ func TestRedeploy_ForeignListenerOnTheNewCopysPort(t *testing.T) {
 // The owner is asked once per copy and port, not on every cycle: a socket a
 // live process holds can't be taken over.
 func TestPortIsOurs_IsAskedOncePerCopy(t *testing.T) {
+	forgetPortCaches(t)
 	var asked atomic.Int32
 	useHooks(t, hooks{Owner: func(pid, port int) process.Owner { asked.Add(1); return process.OwnerSelf }})
 	rec := state.AppState{PID: 910001, Port: 29001}
@@ -118,6 +120,7 @@ func TestPortIsOurs_IsAskedOncePerCopy(t *testing.T) {
 // A foreign owner is never remembered (it must be looked at again), and
 // where the owner can't be told the port counts as the copy's.
 func TestPortIsOurs_OtherIsNotRememberedAndUnknownFallsBack(t *testing.T) {
+	forgetPortCaches(t)
 	answer := process.OwnerOther
 	useHooks(t, hooks{Owner: func(int, int) process.Owner { return answer }})
 	rec := state.AppState{PID: 910003, Port: 29003}
@@ -158,6 +161,7 @@ func TestPickPortStart_CopyPortScansFromTheHook(t *testing.T) {
 // "Can't tell" is remembered for a while, so a lookup that fails or hangs is
 // not paid again on every cycle.
 func TestPortIsOurs_UnknownIsRememberedForAWhile(t *testing.T) {
+	forgetPortCaches(t)
 	var asked atomic.Int32
 	useHooks(t, hooks{Owner: func(int, int) process.Owner { asked.Add(1); return process.OwnerUnknown }})
 	rec := state.AppState{PID: 910010, Port: 29010}
@@ -221,6 +225,7 @@ func TestRedeploy_AFalseForeignJudgementIsBrakedAfterThreeMoves(t *testing.T) {
 // says later: it is never stopped and moved for a judgement made about it
 // afterwards.
 func TestPortIsOurs_AServingCopyIsNeverMoved(t *testing.T) {
+	forgetPortCaches(t)
 	useFakeRscript(t)
 	var armed atomic.Bool
 	useHooks(t, hooks{Owner: func(int, int) process.Owner {
@@ -247,6 +252,7 @@ func TestPortIsOurs_AServingCopyIsNeverMoved(t *testing.T) {
 // The count of moves in a row starts again once the owner is seen to be the
 // copy's own.
 func TestPortIsOurs_AnOwnedPortStartsTheCountAgain(t *testing.T) {
+	forgetPortCaches(t)
 	useHooks(t, hooks{Owner: func(int, int) process.Owner { return process.OwnerSelf }})
 	ck := seenKey{"s-count", 3}
 	portMoves.Store(ck, 2)
@@ -364,4 +370,18 @@ func TestAdoption_CopiesTheBalancerListsAreServedFromTheStart(t *testing.T) {
 	if p, _ := gateway.Pool(spec.AppStateFile); len(p.Active) != 1 || p.Active[0] != pool.Active[0] {
 		t.Errorf("pool = %+v, want the adopted copy still serving", p)
 	}
+}
+
+// forgetPortCaches empties what the owner check remembers across calls, now
+// and when the test ends, so a test gives the same answer when it is run
+// again in the same process (go test -count).
+func forgetPortCaches(t *testing.T) {
+	t.Helper()
+	clear := func() {
+		for _, m := range []*sync.Map{&ownedPorts, &unknownPorts, &brakes, &portMoves} {
+			m.Range(func(k, _ any) bool { m.Delete(k); return true })
+		}
+	}
+	clear()
+	t.Cleanup(clear)
 }
