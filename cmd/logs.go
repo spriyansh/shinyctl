@@ -39,7 +39,8 @@ var logsCmd = &cobra.Command{
 	Long: `Print the end of an app's log. An app with several copies has a log for each:
 without --copy every copy's log is printed under a header, and with --follow the
 lines of all of them are shown, each starting with the copy it came from. Logs
-of copies started after --follow began are not picked up.`,
+of copies started after --follow began, as after a redeploy, are not picked up:
+run it again.`,
 
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if logsLines < 0 {

@@ -35,6 +35,7 @@ app-state-file: %s
 # replicas: 1              # copies that serve visitors (1-16)
 # warm-replicas: 1         # ready spares that take over when a copy dies (0-16); each copy is an R process
 # lb-policy: least-conn    # how new visitors pick a copy: least-conn, round-robin, random, first
+# drain-timeout: 15m       # how long replaced copies keep their visitors (0 to 24h; 0 stops them at once)
 # restart-policy: always   # always (default) / on-failure / never
 # working-dir: .           # defaults to entrypoint-file's own directory
 # env:

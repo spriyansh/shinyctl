@@ -7,7 +7,8 @@ background process, `shinyctl-api`, starts the app and restarts it whenever
 it dies. Each app runs as one or more R processes, called copies, behind a
 built-in load balancer that listens on the port you chose. A warm spare
 copy is kept ready, so when a copy dies another takes its place at once.
-Each visitor stays on one copy. When no copy is ready, requests to that
+Each visitor stays on one copy. A new version takes over without cutting
+off the visitors of the old one. When no copy is ready, requests to that
 port wait instead of failing.
 
 ## Requirements
@@ -65,21 +66,22 @@ printed, including the crash. Remove the app with
 | Command | What it does |
 |---|---|
 | `init` | Writes a starter manifest. `-o` sets the path, `--force` overwrites. |
-| `apply -f <file>` | Starts the app, or updates it if the manifest changed (see below). Starts `shinyctl-api` on first use. Also resumes a stopped app. |
+| `apply -f <file>` | Starts the app, or updates it if the manifest changed (see below). Starts `shinyctl-api` on first use. Also resumes a stopped app. `--now` stops copies that are replaced or no longer wanted without waiting for their visitors. |
 | `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. |
 | `stop -f <file>` | Sends SIGTERM to each of the app's processes, waits 10 seconds, then SIGKILL, and closes the app's port. The app stays down until the next `apply` or `restart`. |
-| `restart -f <file>` | Stops the app's processes and starts them again from the manifest as it is now, so new code in `app.R` and other app files takes effect. With several copies it restarts them one at a time, so the app keeps serving. Also starts a stopped or crash-looping app right away. |
+| `restart -f <file>` | Starts new copies from the manifest as it is now, so new code in `app.R` and other app files takes effect, and returns at once. Once they are ready they take new visitors; the old copies keep theirs until those leave or `drain-timeout` passes (see Redeploys). `--now` stops the old copies as soon as the new ones are ready. Also starts a stopped or crash-looping app right away. |
 | `logs -f <file>` | Prints the last 100 lines of the app's log. `--copy N` shows one copy; without it every copy is shown. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
 | `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
 | `startup` | Prints a systemd user unit that starts `shinyctl-api` at boot (Linux), and on stderr how to install it. |
 | `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
 | `version` | Prints the version. Source builds print `dev`. |
 
-`apply` restarts a running app when a manifest field that shapes its
-process changed: `app-group`, `app-name`, `entrypoint-file`, `working-dir`
-or `env`. A changed `port`, `host`, `replicas`, `warm-replicas`, `lb-policy`
-or `restart-policy` takes effect without restarting the app's processes
-(copies are started or stopped as needed). `apply` never looks at `app.R`
+`apply` replaces the copies of a running app, as `restart` does, when a
+manifest field that shapes its process changed: `app-group`, `app-name`,
+`entrypoint-file`, `working-dir` or `env`. A changed `port`, `host`,
+`replicas`, `warm-replicas`, `lb-policy`, `drain-timeout` or
+`restart-policy` takes effect without restarting the app's processes
+(copies are started, or drained, as needed). `apply` never looks at `app.R`
 or other app files: run `restart` for code changes.
 
 `stop`, `restart`, `delete` and a re-apply signal a process only if its
@@ -103,6 +105,7 @@ env:                            # added on top of shinyctl-api's own environment
 replicas: 2                     # copies that serve visitors; default 1; 1-16
 warm-replicas: 1                # ready spares that take over at once; default 1; 0-16; 0 turns them off
 lb-policy: least-conn           # how a new visitor picks a copy: least-conn (default), round-robin, random, first
+drain-timeout: 15m              # how long replaced copies keep their visitors; default 15m; 0 to 24h; 0 stops them at once
 ```
 
 - **Relative paths resolve from the manifest's folder**, so commands work
@@ -119,6 +122,8 @@ lb-policy: least-conn           # how a new visitor picks a copy: least-conn (de
   TLS, say) sends its own `X-Forwarded-For`, `X-Forwarded-Proto` and
   `X-Forwarded-Host`, they reach the app, with 127.0.0.1 added to the end of
   `X-Forwarded-For`. Those headers from anywhere else are replaced.
+- **`drain-timeout` is a duration** such as `90s`, `15m` or `1h`; a number
+  alone is refused.
 - **`shinyctl-api` inherits the environment of the shell that started
   it.** Apps get that environment plus `env`.
 
@@ -128,7 +133,8 @@ lb-policy: least-conn           # how a new visitor picks a copy: least-conn (de
   `replicas` are *active* and take new visitors. The rest are *warm*:
   running, ready, and given no new visitors while every active copy is up
   (a visitor whose cookie names a warm copy stays on it). A warm copy stands
-  in for an active copy that is down. `status` shows each copy's role.
+  in for an active copy that is down. A copy that is being replaced is
+  *draining* (see Redeploys). `status` shows each copy's role.
 - **Takeover.** When an active copy fails, the load balancer sends its
   visitors to a warm copy at once, and `shinyctl-api` makes that copy active
   within milliseconds; the visitors stay on it. This holds for copies that
@@ -141,17 +147,42 @@ lb-policy: least-conn           # how a new visitor picks a copy: least-conn (de
   an earlier run (Linux before 5.3, or a sandbox that forbids it),
   `shinyctl-api` notices them at its next check, every 5 seconds; the
   load balancer still puts the spare in.
-- **Restarts go one copy at a time.** `restart`, and an `apply` that
-  changes `env`, `working-dir`, `app-group`, `app-name` or
-  `entrypoint-file`, replace the copies that are not ready first, then the
-  ready ones with the fewest open sessions (a warm copy before an active
-  one when they tie), and start the next only when every copy that already
-  runs the new version is ready. With a warm spare the port never
-  has no ready copy. A new version that fails at start stalls the restart
-  at the first copy and leaves the others serving the old one: `status`
-  shows which copies still run the previous version. The visitors of a
-  replaced copy lose their session, and old and new code serve side by
-  side while it goes on.
+- **Redeploys.** `restart`, and an `apply` that changes `env`,
+  `working-dir`, `app-group`, `app-name` or `entrypoint-file`, start new
+  copies next to the running ones and return at once: `replicas` of them
+  first, the spares once those have taken over.
+  - Once the new copies that serve are ready, new visitors go to them and
+    the old copies *drain*: they get no new visitors and keep the ones they
+    have until those sessions end or `drain-timeout` (15 minutes by default)
+    passes. An old spare with no visitors stops right away.
+  - A page left open on an old copy keeps working on the old version, and
+    reloading it brings the new one.
+  - When an old copy stops at the timeout, a page with the example's script
+    reloads by itself onto the new version; other pages grey out until
+    reloaded.
+  - An old copy with no sessions stops within about 15 seconds.
+  - For the few seconds the new spare takes to start the app has no spare.
+  - A new version that fails at start never takes over: the old copies
+    keep serving, and `status` says which copy doesn't start and where to
+    look.
+  - `--now` stops the old copies as soon as the new ones are ready.
+  - A redeploy during another goes straight to the newest version. At most
+    `replicas + warm-replicas` copies with visitors drain at once; beyond
+    that, the ones that have drained longest stop.
+
+  While it goes on, `status` shows the draining copies and how long they
+  have left:
+
+  ```
+  NAME   COPY  ROLE      PORT  PID    STATUS  READY  MEM   SESSIONS  CRASHES  STARTED
+  hello  1     draining  8765  61429  alive   ready  142M  2         -        2026-10-27T10:00:01+02:00
+  hello  3     active    8765  61501  alive   ready  140M  1         -        2026-10-27T11:30:05+02:00
+  hello  4     warm      8765  61502  alive   ready  138M  0         -        2026-10-27T11:30:05+02:00
+
+  Memory: 420M in 3 R processes (1 warm, 1 draining), plus 41M for the load balancer.
+
+  hello: copy 1 is draining with 2 sessions; it stops when they end, or in 15m at the latest.
+  ```
 - **Sticky sessions.** A visitor stays on one copy, for as long as it is
   running, through a cookie named `lb_<port>` (for example `lb_8080`) that
   the load balancer sets. Copies don't share memory, so a Shiny session
@@ -161,20 +192,21 @@ lb-policy: least-conn           # how a new visitor picks a copy: least-conn (de
 - **`lb-policy`** picks the copy for a visitor who has none, among the
   active copies: `least-conn` (the fewest open connections, the default),
   `round-robin`, `random`, or `first` (always the oldest active copy).
-- **Scaling down** with `replicas` or `warm-replicas` stops copies with no
-  process first, then copies that are still starting, then ready copies with
-  the fewest open sessions (a warm copy before an active one when they tie).
-  In the middle of a restart, copies that still run the previous version go
-  first, but a ready one keeps serving until a copy of the new version is
-  ready, and `status` says why it is still there; a new version that keeps
-  failing at start leaves the old copy serving, as in "Restarts go one copy
-  at a time". Visitors are cut off only when
-  there are fewer ready copies than copies holding visitors; their pages
-  reload onto an active copy. A copy that stops being active keeps the
-  visitors already on it.
+- **Scaling down** with `replicas` or `warm-replicas` drains the copies it
+  removes the same way: they get no new visitors, and stop when their
+  sessions end or at `drain-timeout`. Copies that are starting or dead stop
+  at once, and `--now` stops them all at once. Copies are retired in this
+  order: with no process, still starting, then ready ones with the fewest
+  open sessions (a warm copy before an active one when they tie).
 - **Memory.** Each copy is a full R process: with the defaults every app
   runs two. A small app takes about 110-140 MB per copy on a Raspberry Pi 5.
-  On a small machine, set `warm-replicas: 0`. `status` shows the total.
+  During a redeploy both versions run side by side: the peak is the old
+  copies plus `replicas` new ones (3 processes with the defaults, for the
+  few seconds R takes to start), and old copies that still have visitors run
+  until `drain-timeout`. The peak can be one higher, for up to about 15 seconds, if the
+  load balancer is restarting at the moment of the switch, or if a second
+  restart comes within about 15 seconds of the previous one's switch. On a small machine, set `warm-replicas: 0`, a
+  shorter `drain-timeout`, or use `--now`. `status` shows the total.
 
 ## Restarts
 
@@ -189,9 +221,11 @@ lb-policy: least-conn           # how a new visitor picks a copy: least-conn (de
   so no copy was started; the reason is printed under the table, nothing
   is counted as a crash, and the next check tries again.
   `READY` turns from `starting` to `ready` once the copy's R process
-  accepts connections and the load balancer lists it. `ROLE` is `active`
-  or `warm`. `SESSIONS` is the number of requests open to the copy, a
-  Shiny session being one open WebSocket. `MEM` is the resident memory of
+  accepts connections and the load balancer lists it. `ROLE` is `active`,
+  `warm` or `draining`. `SESSIONS` is the number of requests open to the
+  copy, a Shiny session being one open WebSocket. A draining copy stops when
+  its `SESSIONS` reach 0; a line under the table says how many are left and
+  when `drain-timeout` ends it. `MEM` is the resident memory of
   the copy's main R process; worker processes it started aren't counted.
   The load balancer's own memory, about 40 MB for all apps together, is
   shown on the `Memory:` line and isn't counted in any copy.
@@ -277,9 +311,22 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
   `shinyctl-api` writes a warning to `api.log` when lingering is off.
 - **`stop` signals only the main R process.** Worker processes the app
   started, for example through callr or future, can outlive it.
-- **A restart drops the sessions of each copy it replaces**, one copy at
-  a time; pages with the example's script reload onto another copy. With
-  `warm-replicas: 0` and one copy, requests wait for R to start.
+- **A drain ends at `drain-timeout`.** Sessions still open then are cut;
+  pages with the example's script reload onto the new version.
+- **A tab left open is a session**, and so is a visitor whose connection
+  vanished without closing (a laptop lid closed): the load balancer notices
+  that within about 2.5 minutes, or, for an app that keeps sending to the
+  page, only at `drain-timeout`.
+- **Two tabs of one app in one browser during a redeploy:** reloading one
+  moves that browser to the new version; the other tab keeps its session,
+  but its downloads and uploads fail until it is reloaded too.
+- **Going back to the page during a redeploy** shows the old copy's page from
+  the browser's cache first; the example's script then reloads it onto the new
+  version. Without that script the page reconnects to the old copy.
+- **Both versions run side by side** for up to `drain-timeout`, so a change
+  to shared data (a database schema, files) must suit both.
+- **A new version that starts but fails on its page still takes over:** a
+  copy counts as ready once R accepts connections.
 - **Copies don't share memory.** Anything a session keeps in R lives in
   its copy.
 - **Upgrading from a version without warm spares starts one for every

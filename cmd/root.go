@@ -18,14 +18,15 @@ Declare an app in a YAML manifest, apply it, and shinyctl starts it and
 restarts it if it dies. A per-user background process (shinyctl-api)
 watches every applied app; it is started automatically by the first apply.
 A built-in load balancer listens on each app's port, keeps a warm spare copy
-of each app ready, and keeps each visitor on one copy.
+of each app ready, keeps each visitor on one copy, and lets a new version take
+over without cutting off the visitors of the old one.
 
   shinyctl init                        scaffold a manifest to fill in
   shinyctl apply -f shinyctl.yaml      declare an app, start/reconcile it
   shinyctl status                      see what's running right now
   shinyctl stop -f shinyctl.yaml       take it down and keep it down
   shinyctl delete -f shinyctl.yaml     stop it and forget it entirely
-  shinyctl restart -f shinyctl.yaml    pick up code changes
+  shinyctl restart -f shinyctl.yaml    pick up code changes (--now skips the drain)
   shinyctl logs -f shinyctl.yaml       print the app's log (--follow to keep watching, --copy N for one copy)
   shinyctl startup                     print a systemd unit that starts shinyctl-api at boot`,
 }

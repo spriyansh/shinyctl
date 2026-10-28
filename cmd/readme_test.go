@@ -29,12 +29,12 @@ func TestREADMEDescribesCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"warm-replicas", "lb-policy", "lb_<port>", "--copy N", "port-in-use"} {
+	for _, want := range []string{"warm-replicas", "lb-policy", "lb_<port>", "--copy N", "port-in-use", "drain-timeout", "--now", "draining"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("README.md does not mention %q", want)
 		}
 	}
-	for _, gone := range []string{"1 is the only accepted value", "One process per app"} {
+	for _, gone := range []string{"1 is the only accepted value", "One process per app", "one copy at a time", "Restarts go one copy at a time"} {
 		if strings.Contains(string(data), gone) {
 			t.Errorf("README.md still says %q", gone)
 		}
