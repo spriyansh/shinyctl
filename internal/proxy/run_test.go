@@ -114,6 +114,11 @@ func TestRun_FallsBackWhenConfigFails(t *testing.T) {
 
 	p := startSubproxyAt(t, s.ConfigPath, home)
 	p.waitAnswering(t, admin)
+	// The control socket of the load that failed answers for a moment before
+	// it is torn down; the fallback is up once the log says so.
+	waitFor(t, "the fallback to be up", 10*time.Second, func() bool {
+		return strings.Contains(p.stderr.String(), "serving no apps")
+	})
 
 	cfg, err := admin.Config()
 	if err != nil {
