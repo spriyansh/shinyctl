@@ -121,7 +121,10 @@ drain-timeout: 15m              # how long replaced copies keep their visitors; 
   a web server on the same machine in front of the port (nginx terminating
   TLS, say) sends its own `X-Forwarded-For`, `X-Forwarded-Proto` and
   `X-Forwarded-Host`, they reach the app, with 127.0.0.1 added to the end of
-  `X-Forwarded-For`. Those headers from anywhere else are replaced.
+  `X-Forwarded-For`. Those headers from anywhere else are replaced. Each copy gets a port
+  of its own in that range, and `shinyctl-api` checks that the socket on it belongs
+  to the copy before it sends visitors there: if another program holds the
+  port, the copy is moved to another one.
 - **`drain-timeout` is a duration** such as `90s`, `15m` or `1h`; a number
   alone is refused.
 - **`shinyctl-api` inherits the environment of the shell that started

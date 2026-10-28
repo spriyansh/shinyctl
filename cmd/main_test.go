@@ -78,6 +78,9 @@ func TestMain(m *testing.M) {
 }
 
 func runTests(m *testing.M) int {
+	// The machine may run other daemons, and other test runs, that pick
+	// internal ports too: these tests scan in an area of their own, by pid.
+	defaultPortStart = func() int { return 20000 + (os.Getpid()*131)%9000 }
 	// The load balancer started below leaves with this process, whatever
 	// ends it (a panic, a timeout): a test-only guard, see TestMain.
 	os.Setenv(testParentEnv, strconv.Itoa(os.Getpid()))
@@ -388,7 +391,7 @@ func startRaw(t *testing.T, spec manifest.AppSpec, n int) (state.AppState, <-cha
 	t.Helper()
 	port, err := process.PickPort(takenPorts(spec.AppStateFile, n), func(p int) bool {
 		return process.PortAvailable(process.InternalHost, p) == nil
-	})
+	}, currentHooks().PortStart())
 	if err != nil {
 		t.Fatal(err)
 	}

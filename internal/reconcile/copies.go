@@ -23,6 +23,11 @@ type CopyView struct {
 	// no copy is taken to have no visitors left.
 	Sessions      int
 	SessionsKnown bool
+
+	// PortTaken says the socket that listens on the copy's port belongs to
+	// another program: the copy is not ready and never will be on that port.
+	// The caller moves it before deciding; DecideCopies doesn't look at it.
+	PortTaken bool
 }
 
 // StopReason says why a Stop step stops a copy.

@@ -605,7 +605,7 @@ func TestRedeploy_UpgradeFromAPhase2RolloutHalfDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	startAt := func(n, revision int) state.AppState {
-		port, err := process.PickPort(takenPorts(spec.AppStateFile, n), func(p int) bool { return process.PortAvailable(process.InternalHost, p) == nil })
+		port, err := process.PickPort(takenPorts(spec.AppStateFile, n), func(p int) bool { return process.PortAvailable(process.InternalHost, p) == nil }, currentHooks().PortStart())
 		if err != nil {
 			t.Fatal(err)
 		}

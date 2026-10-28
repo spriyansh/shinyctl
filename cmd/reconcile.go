@@ -83,6 +83,10 @@ var noWatchOnce sync.Once
 // worst, a watcher on the old process, whose exit is a reconcile that finds
 // nothing to do.
 func watchRestoredCopies() {
+	// What an earlier shinyctl-api left the load balancer serving: those
+	// copies are the copies of this machine, whatever a lookup says, so a
+	// misjudged owner can't stop and move one that has visitors.
+	listed := gateway.Listed()
 	for _, spec := range appRegistry.All() {
 		if !appRegistry.Managed(spec.AppStateFile) {
 			continue
@@ -96,6 +100,9 @@ func watchRestoredCopies() {
 			if up {
 				markSeen(spec.AppStateFile, recs[i])
 				watchAdopted(spec, recs[i])
+				if recs[i].Copy >= 1 && slices.Contains(allDials(listed[spec.AppStateFile]), dialOf(recs[i])) {
+					ownedPorts.Store(pidPort{recs[i].PID, recs[i].Port}, struct{}{})
+				}
 			}
 		}
 	}
@@ -249,6 +256,9 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 			}
 			if rec.Copy >= 1 {
 				v.Ready = currentHooks().ObserveProbe(process.InternalHost, rec.Port)
+				if v.Ready && !servedNow(spec.AppStateFile, rec) && !portIsOurs(spec.AppStateFile, rec) {
+					v.Ready, v.PortTaken = false, true
+				}
 				v.Sessions = sessions[dialOf(rec)]
 				v.SessionsKnown = sessions != nil
 			} else {
@@ -283,6 +293,118 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 		views = append(views, v)
 	}
 	return views, changed
+}
+
+// ownedPorts remembers the (pid, port) pairs whose listening socket has been
+// seen to belong to the process: a socket that a live process holds can't be
+// taken over, so the lookup is made once per copy, not on every cycle.
+var ownedPorts sync.Map
+
+type pidPort struct{ pid, port int }
+
+// unknownPorts remembers, for a while, that the owner of a (pid, port) could
+// not be told (the lookup failed, timed out or isn't there), so a failing or
+// hanging lookup isn't paid again on every cycle, under the state lock.
+var unknownPorts sync.Map
+
+// unknownFor is how long "can't tell" is remembered.
+const unknownFor = 30 * time.Second
+
+// portMoves counts, per copy, the moves made in a row because its port was
+// judged to be another program's, and brakes remembers the processes (pid and
+// port) that were given up on after maxMoves: from then on that process's port
+// is taken for its own when it accepts connections, as it was before the owner
+// could be asked. It covers that process only: a copy that crashes and starts
+// again is a new process, judged afresh, and its count starts again.
+var (
+	portMoves sync.Map // seenKey -> int
+	brakes    sync.Map // pidPort -> struct{}
+)
+
+const maxMoves = 3
+
+// portIsOurs reports whether the socket listening on rec's port is not
+// another program's. A copy counts as ready, and so gets a role and visitors,
+// only when it is: another user's shinyctl-api can pick the same internal
+// port, and its R, or any program, can win the bind. Where the owner can't be
+// told (another system, a failed lookup), or the copy has been moved
+// maxMoves times in a row, a port that accepts connections is taken to be the
+// copy's, as it always was.
+func portIsOurs(stateFile string, rec state.AppState) bool {
+	key := pidPort{rec.PID, rec.Port}
+	if _, ok := ownedPorts.Load(key); ok {
+		return true
+	}
+	if until, ok := unknownPorts.Load(key); ok && time.Now().Before(until.(time.Time)) {
+		return true
+	}
+	ck := seenKey{stateFile, rec.Copy}
+	if _, ok := brakes.Load(key); ok {
+		return true
+	}
+	switch currentHooks().Owner(rec.PID, rec.Port) {
+	case process.OwnerOther:
+		return false
+	case process.OwnerSelf:
+		ownedPorts.Store(key, struct{}{})
+		portMoves.Delete(ck)
+	case process.OwnerUnknown:
+		unknownPorts.Store(key, time.Now().Add(unknownFor))
+	}
+	return true
+}
+
+// allDials lists every copy of a pool.
+func allDials(p proxy.Pool) []string { return slices.Concat(p.Active, p.Warm, p.Draining) }
+
+// servedNow says the load balancer already sends visitors to the copy: its
+// port has been the copy's all along, whatever a lookup says now.
+func servedNow(stateFile string, rec state.AppState) bool {
+	pool, _ := gateway.Pool(stateFile)
+	dial := dialOf(rec)
+	return slices.Contains(pool.Active, dial) || slices.Contains(pool.Warm, dial) || slices.Contains(pool.Draining, dial)
+}
+
+// moveTakenPorts gives each copy whose port another program holds a new one,
+// at once, instead of waiting for it to crash on the bind: the process is
+// stopped, its record keeps the crash history but not the process, and the
+// decision that follows starts it again, which finds the recorded port busy
+// and moves it to a free one. Nothing is counted as a crash: the copy did
+// nothing wrong. It never goes into the table meanwhile. A copy that is
+// judged foreign maxMoves times in a row is not moved again (the judgement is
+// wrong for it: a process that hides its descriptors, say): it is left to
+// the TCP check, once, with a line in the log.
+func moveTakenPorts(spec manifest.AppSpec, st *state.State, views []reconcile.CopyView) (changed bool) {
+	for i, v := range views {
+		if !v.PortTaken || !v.Alive || !v.App.DrainingSince.IsZero() {
+			continue
+		}
+		rec := v.App
+		ck := seenKey{spec.AppStateFile, rec.Copy}
+		n := 0
+		if c, ok := portMoves.Load(ck); ok {
+			n = c.(int)
+		}
+		if n >= maxMoves {
+			brakes.Store(pidPort{rec.PID, rec.Port}, struct{}{})
+			portMoves.Delete(ck)
+			log.Printf("reconcile: %q: copy %d has been moved %d times because its port looked like another program's; this process is trusted on port %d", spec.AppName, rec.Copy, maxMoves, rec.Port)
+			views[i].Ready, views[i].PortTaken = true, false
+			continue
+		}
+		log.Printf("reconcile: %q: copy %d: port %d is held by another program; stopping the copy to start it again on another port", spec.AppName, rec.Copy, rec.Port)
+		if _, err := process.Stop(rec, identityFallbacks(spec)...); err != nil {
+			log.Printf("reconcile: %q: copy %d: stopping it: %v", spec.AppName, rec.Copy, err)
+			continue
+		}
+		portMoves.Store(ck, n+1)
+		forgetSeen(spec.AppStateFile, rec.Copy)
+		moved := state.AppState{Copy: rec.Copy, Port: rec.Port, CrashCount: rec.CrashCount, LastExitAt: rec.LastExitAt, LastExitFailed: rec.LastExitFailed}
+		st.Put(moved)
+		views[i] = reconcile.CopyView{App: moved, SessionsKnown: v.SessionsKnown}
+		changed = true
+	}
+	return changed
 }
 
 // poolOf is the copies plan says should serve, as the load balancer dials
@@ -344,6 +466,10 @@ func reconcileLocked(spec manifest.AppSpec, o reconcileOpts) (api.ApplyResponse,
 	}
 	views, changed := observe(spec, &st, mode)
 	dirty = dirty || changed
+
+	if moveTakenPorts(spec, &st, views) {
+		dirty = true
+	}
 
 	// A copy that is current again (the manifest was put back before the new
 	// version took over) has no use for an earlier --now: its mark would make

@@ -52,6 +52,11 @@ type hooks struct {
 	// WatchExit is process.WatchExit.
 	WatchExit func(spec manifest.AppSpec, app state.AppState) (<-chan struct{}, error)
 
+	// Owner says whose the socket listening on a copy's port is (the real one
+	// reads the system's tables); PortStart is where a port scan begins.
+	Owner     func(pid, port int) process.Owner
+	PortStart func() int
+
 	// Sessions is what the load balancer says about its open requests per
 	// copy: nil when it can't say (gateway.Sessions).
 	Sessions func() map[string]int
@@ -73,6 +78,8 @@ func currentHooks() hooks {
 		ObserveProbe:   process.IsReady,
 		WatchExit:      process.WatchExit,
 		Sessions:       func() map[string]int { return gateway.Sessions() },
+		Owner:          process.PortOwner,
+		PortStart:      defaultPortStart,
 		Signal0:        func(pid int) error { return syscall.Kill(pid, 0) },
 		DrainSettle:    reconcile.DrainSettle,
 	}
@@ -102,6 +109,12 @@ func currentHooks() hooks {
 		if o.ObserveProbe != nil {
 			h.ObserveProbe = o.ObserveProbe
 		}
+		if o.Owner != nil {
+			h.Owner = o.Owner
+		}
+		if o.PortStart != nil {
+			h.PortStart = o.PortStart
+		}
 		if o.Sessions != nil {
 			h.Sessions = o.Sessions
 		}
@@ -114,6 +127,10 @@ func currentHooks() hooks {
 	}
 	return h
 }
+
+// defaultPortStart is where a port scan begins; a variable so that the tests,
+// which share the machine with other daemons, scan in an area of their own.
+var defaultPortStart = process.PortStart
 
 // portMu serializes choosing an internal port, so two apps starting at once
 // can't pick the same one: each choice is saved to its state file before
@@ -374,7 +391,7 @@ func copyPort(spec manifest.AppSpec, st *state.State, n int) (int, error) {
 	portMu.Lock()
 	defer portMu.Unlock()
 
-	port, err := process.PickPort(takenPorts(spec.AppStateFile, n), func(p int) bool { return probe(p) == nil })
+	port, err := process.PickPort(takenPorts(spec.AppStateFile, n), func(p int) bool { return probe(p) == nil }, h.PortStart())
 	if err != nil {
 		return 0, err
 	}

@@ -316,6 +316,20 @@ func (g *Gateway) Pushes() int {
 	return g.pushes
 }
 
+// Listed returns the copies table the load balancer itself holds, which for
+// a load balancer adopted from an earlier shinyctl-api is what that one last
+// sent; nil when it can't be asked.
+func (g *Gateway) Listed() Table {
+	if !g.proc.Running() {
+		return nil
+	}
+	t, err := g.admin.Copies()
+	if err != nil {
+		return nil
+	}
+	return t
+}
+
 // Sessions returns the number of requests open to each copy, by its
 // address, or nil when the load balancer can't say. It takes neither of the
 // gateway's locks, so a status query never waits on a reload.
