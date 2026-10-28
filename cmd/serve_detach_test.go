@@ -261,3 +261,39 @@ func TestHandleHealthz_NamesItsProcess(t *testing.T) {
 		t.Errorf("status %d, %s = %q; want 200 and this process's pid", rec.Code, api.PIDHeader, rec.Header().Get(api.PIDHeader))
 	}
 }
+
+// Two started at once, and the child loses the socket and exits before the
+// winner answers /healthz: serve -d says it is already running, as it does for
+// one that was running before, and exits the same way. It is not "exited right
+// after starting".
+func TestDetacher_TheChildLosesTheRaceBeforeTheWinnerAnswers(t *testing.T) {
+	var started atomic.Bool
+	var polls atomic.Int32
+	exited := make(chan struct{})
+	var out bytes.Buffer
+	d := detacher{
+		socketPath: "/x/api.sock",
+		logPath:    filepath.Join(t.TempDir(), "api.log"),
+		// Nothing listens before the start; the winner's socket is live after.
+		alreadyRunning: func() bool { return started.Load() },
+		healthy: func() (int, bool) {
+			n := polls.Add(1)
+			if n == 1 {
+				close(exited) // the loser has gone, and the winner is not answering yet
+			}
+			return 777, n > 6
+		},
+		start: func() (int, <-chan struct{}, error) {
+			started.Store(true)
+			return 4321, exited, nil
+		},
+		wait: 3 * time.Second,
+		out:  &out,
+	}
+	if err := d.run(); err != nil {
+		t.Fatalf("losing the race is not an error: %v", err)
+	}
+	if want := "shinyctl-api is already running (pid 777, socket /x/api.sock)\n"; out.String() != want {
+		t.Errorf("output %q, want %q", out.String(), want)
+	}
+}

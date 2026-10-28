@@ -97,12 +97,23 @@ func (d detacher) run() error {
 			}
 			break
 		}
+		// A child that has gone is an error, unless a socket is live: two
+		// started at once, the loser exits at once, and the winner answers a
+		// moment later. So with a live socket, look on until the deadline.
 		select {
 		case <-exited:
-			return fmt.Errorf("shinyctl-api exited right after starting; see %s%s", d.logPath, lastLogLine(d.logPath))
+			if !d.alreadyRunning() {
+				return fmt.Errorf("shinyctl-api exited right after starting; see %s%s", d.logPath, lastLogLine(d.logPath))
+			}
+			time.Sleep(detachPoll)
 		case <-time.After(detachPoll):
 		}
 		if time.Now().After(deadline) {
+			select {
+			case <-exited:
+				return fmt.Errorf("shinyctl-api exited right after starting, and the one already running did not answer within %s; see %s%s", d.wait, d.logPath, lastLogLine(d.logPath))
+			default:
+			}
 			return fmt.Errorf("shinyctl-api (pid %d) did not answer within %s; see %s%s", pid, d.wait, d.logPath, lastLogLine(d.logPath))
 		}
 	}
