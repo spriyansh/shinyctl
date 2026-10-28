@@ -57,10 +57,25 @@ func postSpec(socketPath, path string, spec manifest.AppSpec) (ApplyResponse, er
 	return out, nil
 }
 
+// Options are what a request asks for beyond the spec. They travel as query
+// parameters, so a shinyctl-api that doesn't know one ignores it and does the
+// ordinary thing.
+type Options struct {
+	Now bool // stop what is replaced or no longer wanted at once instead of draining it
+}
+
+// path is endpoint with the options as its query.
+func (o Options) path(endpoint string) string {
+	if o.Now {
+		return endpoint + "?now=1"
+	}
+	return endpoint
+}
+
 // Apply sends spec to shinyctl-api's /apply endpoint over the Unix socket
 // at socketPath and returns its response.
-func Apply(socketPath string, spec manifest.AppSpec) (ApplyResponse, error) {
-	return postSpec(socketPath, "/apply", spec)
+func Apply(socketPath string, spec manifest.AppSpec, opts Options) (ApplyResponse, error) {
+	return postSpec(socketPath, opts.path("/apply"), spec)
 }
 
 // Stop sends spec to shinyctl-api's /stop endpoint over the Unix socket at
@@ -77,10 +92,10 @@ func Delete(socketPath string, spec manifest.AppSpec) (ApplyResponse, error) {
 }
 
 // Restart sends spec to shinyctl-api's /restart endpoint over the Unix
-// socket at socketPath, asking it to stop the app's process if it is
-// running and start it again from spec.
-func Restart(socketPath string, spec manifest.AppSpec) (ApplyResponse, error) {
-	return postSpec(socketPath, "/restart", spec)
+// socket at socketPath, asking it to start the app's copies again from spec
+// next to the running ones, which then drain (or stop, with opts.Now).
+func Restart(socketPath string, spec manifest.AppSpec, opts Options) (ApplyResponse, error) {
+	return postSpec(socketPath, opts.path("/restart"), spec)
 }
 
 // Status fetches shinyctl-api's /status endpoint over the Unix socket at

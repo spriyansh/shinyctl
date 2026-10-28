@@ -101,7 +101,7 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := reconcileLocked(spec, reconcileOpts{explicit: true})
+	resp, err := reconcileLocked(spec, reconcileOpts{explicit: true, skipDrain: r.URL.Query().Get("now") == "1"})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

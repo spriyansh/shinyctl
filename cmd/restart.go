@@ -14,6 +14,9 @@ import (
 
 var restartManifestFile string
 
+// restartNow is --now: the old copies stop as soon as the new ones are ready.
+var restartNow bool
+
 var restartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Start an app's copies again from the manifest as it is now, without cutting off visitors",
@@ -40,7 +43,7 @@ var restartCmd = &cobra.Command{
 			return err
 		}
 
-		resp, err := api.Restart(socketPath, spec)
+		resp, err := api.Restart(socketPath, spec, api.Options{Now: restartNow})
 		if err != nil {
 			return err
 		}
@@ -57,6 +60,13 @@ func init() {
 		"f",
 		"",
 		"path to the app manifest YAML file",
+	)
+
+	restartCmd.Flags().BoolVar(
+		&restartNow,
+		"now",
+		false,
+		"stop the old copies as soon as the new ones are ready, without waiting for their visitors (also ends any drain in progress)",
 	)
 
 	if err := restartCmd.MarkFlagRequired("file"); err != nil {

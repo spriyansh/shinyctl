@@ -205,6 +205,10 @@ type reconcileOpts struct {
 	// settings names manifest fields that changed and take effect without a
 	// restart (see reconcile.SettingsChanged); they only appear in the reply.
 	settings []string
+
+	// skipDrain is --now: what is replaced or no longer wanted stops instead
+	// of draining, and drains in progress end.
+	skipDrain bool
 }
 
 // observeMode says how much of a cycle's side effects an observation has.
@@ -341,8 +345,44 @@ func reconcileLocked(spec manifest.AppSpec, o reconcileOpts) (api.ApplyResponse,
 	views, changed := observe(spec, &st, mode)
 	dirty = dirty || changed
 
+	// A copy that is current again (the manifest was put back before the new
+	// version took over) has no use for an earlier --now: its mark would make
+	// a later, ordinary redeploy cut its visitors.
+	for i, v := range views {
+		if !v.Alive || !v.App.SkipDrain || !v.App.DrainingSince.IsZero() {
+			continue
+		}
+		if changed, restart := reconcile.Outdated(spec, st.Revision, v.App); len(changed) == 0 && !restart {
+			v.App.SkipDrain = false
+			views[i] = v
+			st.Put(v.App)
+			dirty = true
+		}
+	}
+
+	// --now marks the copies that run a previous version, or already drain,
+	// so that they stop instead of draining: at once if they drain, and at the
+	// switch, which comes in a later cycle and may follow a restart of the
+	// daemon, if they serve. The mark is in the state for that. The new copies
+	// are not marked: a later redeploy drains them.
+	if o.skipDrain {
+		for i, v := range views {
+			if !v.Alive || v.App.SkipDrain {
+				continue
+			}
+			changed, restart := reconcile.Outdated(spec, st.Revision, v.App)
+			if v.App.DrainingSince.IsZero() && len(changed) == 0 && !restart {
+				continue
+			}
+			v.App.SkipDrain = true
+			views[i] = v
+			st.Put(v.App)
+			dirty = true
+		}
+	}
+
 	now := time.Now()
-	plan := reconcile.DecideCopies(spec, reconcile.Input{Revision: st.Revision, Copies: views, Now: now, Settle: currentHooks().DrainSettle})
+	plan := reconcile.DecideCopies(spec, reconcile.Input{Revision: st.Revision, Copies: views, Now: now, SkipDrain: o.skipDrain, Settle: currentHooks().DrainSettle})
 
 	// The copies that start draining are marked in the state before anything
 	// is pushed or stopped, so a daemon that restarts from here on knows them.

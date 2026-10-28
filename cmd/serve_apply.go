@@ -76,7 +76,7 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 		settings = reconcile.SettingsChanged(previous, spec)
 	}
 
-	resp, err := reconcileLocked(spec, reconcileOpts{explicit: true, settings: settings})
+	resp, err := reconcileLocked(spec, reconcileOpts{explicit: true, settings: settings, skipDrain: r.URL.Query().Get("now") == "1"})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -14,6 +14,9 @@ import (
 
 var manifestFile string
 
+// applyNow is --now: copies a change replaces or removes stop at once.
+var applyNow bool
+
 // ensureAPIRunning starts shinyctl-api if it isn't running; a variable so a
 // test can tell whether a command got as far as asking for it.
 var ensureAPIRunning = process.EnsureAPIRunning
@@ -44,7 +47,7 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 
-		resp, err := api.Apply(socketPath, spec)
+		resp, err := api.Apply(socketPath, spec, api.Options{Now: applyNow})
 		if err != nil {
 			return err
 		}
@@ -61,6 +64,13 @@ func init() {
 		"f",
 		"",
 		"path to the app manifest YAML file",
+	)
+
+	applyCmd.Flags().BoolVar(
+		&applyNow,
+		"now",
+		false,
+		"stop copies that are replaced or no longer wanted without waiting for their visitors (also ends any drain in progress)",
 	)
 
 	if err := applyCmd.MarkFlagRequired("file"); err != nil {
