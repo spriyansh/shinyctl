@@ -72,7 +72,9 @@ func token(secret, dial string) string {
 // the app. A copy is listed when it has a role, and up when the passive
 // health checks have not marked it down.
 //
-//  1. The visitor's own copy, while it is listed and up: no new cookie.
+//  1. The visitor's own copy, while it is listed and up: no new cookie. Unless
+//     it is draining and req is a page load (see pageLoad): a visitor who
+//     reloads during a redeploy gets the new version, by the rules below.
 //  2. Otherwise, if the cookie names a copy that has left the table, the copy
 //     that took its place, while that is listed and up (see Set).
 //  3. Otherwise the candidates are the active copies that are up, then, for
@@ -104,7 +106,7 @@ func (s *Sticky) Select(pool reverseproxy.UpstreamPool, req *http.Request, w htt
 			}
 		}
 	}
-	if pinned != nil && s.avail(pinned) {
+	if pinned != nil && s.avail(pinned) && !(roles[pinned.Dial] == roleDraining && pageLoad(req)) {
 		return pinned
 	}
 
@@ -178,6 +180,18 @@ func (s *Sticky) Select(pool reverseproxy.UpstreamPool, req *http.Request, w htt
 		}
 	}
 	return nil
+}
+
+// pageLoad reports whether req loads the app's page itself, as a browser does
+// for a visit or a reload: a GET of "/" that accepts HTML and is not a
+// WebSocket. The page's own requests are not page loads: scripts, styles,
+// images and fonts don't ask for HTML, frames and downloads have other paths,
+// and the session is a WebSocket. Over plain HTTP to a host other than
+// localhost browsers send no Sec-Fetch headers, so the Accept header is what
+// tells.
+func pageLoad(req *http.Request) bool {
+	return req.Method == http.MethodGet && req.URL.Path == "/" && req.Header.Get("Upgrade") == "" &&
+		strings.Contains(req.Header.Get("Accept"), "text/html")
 }
 
 // successorOf is the copy in pool that took the place of the copy whose

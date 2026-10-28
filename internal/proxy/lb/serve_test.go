@@ -327,14 +327,18 @@ func TestServe_TablePushDropsNothing(t *testing.T) {
 
 // upgrade opens a WebSocket-style stream through the proxy and returns the
 // connection once the 101 has been read.
-func upgrade(t *testing.T, port int) (net.Conn, *bufio.Reader) {
+func upgrade(t *testing.T, port int, cookie string) (net.Conn, *bufio.Reader) {
 	t.Helper()
 	conn, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	fmt.Fprintf(conn, "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	cookieLine := ""
+	if cookie != "" {
+		cookieLine = "Cookie: lb_x=" + cookie + "\r\n"
+	}
+	fmt.Fprintf(conn, "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n%sSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", cookieLine)
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil || resp.StatusCode != 101 {
@@ -360,7 +364,7 @@ func TestServe_WebSocketSurvivesPush(t *testing.T) {
 	Set(Table{"app": {Active: []string{a.addr}, Warm: []string{w.addr}}})
 	sock := startEngine(t, []engineApp{{key: "app", port: port, cookie: "lb_x"}})
 
-	conn, br := upgrade(t, port)
+	conn, br := upgrade(t, port, "")
 	if got := echo(t, conn, br, "one"); got != "A:one" {
 		t.Fatalf("echo = %q", got)
 	}
@@ -543,5 +547,41 @@ func TestServe_PushDuringTheRetryWaitKeepsTheSpare(t *testing.T) {
 				t.Errorf("%s, other copy has a session = %v: the dead copy's visitor landed on the spare %d of %d times", policy, session, onW, rounds)
 			}
 		}
+	}
+}
+
+// A visitor pinned to a draining copy who loads the page again (the browser's
+// Accept) is placed anew and gets the new version; the old page's own
+// requests, its session included, stay on the draining copy.
+func TestServe_DrainingPageLoadGoesToTheNewVersion(t *testing.T) {
+	a, b := newUpstream(t, "A"), newUpstream(t, "B")
+	port := freePort(t)
+	Set(Table{"app": {Active: []string{b.addr}, Draining: []string{a.addr}}})
+	startEngine(t, []engineApp{{key: "app", port: port, cookie: "lb_x"}})
+	const browser = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+
+	get := func(accept string) (string, []string) {
+		req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", port), nil)
+		req.AddCookie(&http.Cookie{Name: "lb_x", Value: token("k", a.addr)})
+		req.Header.Set("Accept", accept)
+		resp, err := (&http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body), resp.Header.Values("Set-Cookie")
+	}
+
+	body, cookies := get(browser)
+	if body != "B" || len(cookies) != 1 || !strings.Contains(cookies[0], token("k", b.addr)) {
+		t.Fatalf("a page load: %q, cookies %v; want B with a cookie for B", body, cookies)
+	}
+	if body, cookies := get("*/*"); body != "A" || len(cookies) != 0 {
+		t.Fatalf("a fetch: %q, cookies %v; want A, no cookie", body, cookies)
+	}
+	conn, br := upgrade(t, port, token("k", a.addr))
+	if got := echo(t, conn, br, "hello"); got != "A:hello" {
+		t.Fatalf("the session = %q, want it on A", got)
 	}
 }

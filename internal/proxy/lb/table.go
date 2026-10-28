@@ -16,8 +16,9 @@ import (
 type Pool struct {
 	Active []string `json:"active,omitempty"` // take new visitors
 	Warm   []string `json:"warm,omitempty"`   // ready spares: take no new visitors while every active copy is up; one stands in for each active copy that is down
-	// Draining copies keep the visitors already pinned to them and get no
-	// new ones. Nothing sets it yet.
+	// Draining copies keep the visitors pinned to them and get no new ones; a
+	// visitor who loads the page again is placed anew (see pageLoad).
+	// shinyctl-api lists here the copies a redeploy or a scale-down retires.
 	Draining []string `json:"draining,omitempty"`
 }
 

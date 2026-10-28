@@ -514,3 +514,75 @@ func TestStandIn_NoActiveListedUsesTheWarmTier(t *testing.T) {
 		t.Fatalf("no active copy listed -> %s, cookie %v; want the first warm copy", dialOf(u), c)
 	}
 }
+
+// selectReq runs one Select for r and returns the choice and the cookie it set.
+func selectReq(s *Sticky, p reverseproxy.UpstreamPool, r *http.Request, cookie string) (*reverseproxy.Upstream, *http.Cookie) {
+	if cookie != "" {
+		r.AddCookie(&http.Cookie{Name: "c", Value: cookie})
+	}
+	w := httptest.NewRecorder()
+	u := s.Select(p, r, w)
+	for _, c := range w.Result().Cookies() {
+		return u, c
+	}
+	return u, nil
+}
+
+const browserAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+
+func TestPageLoad_DrainingVisitorGetsTheNewVersion(t *testing.T) {
+	p := pool("old:1", "new:2")
+	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"new:2"}, nil, []string{"old:1"})
+	r := httptest.NewRequest("GET", "/?tab=2", nil)
+	r.Header.Set("Accept", browserAccept)
+	if u, c := selectReq(s, p, r, token(testSecret, "old:1")); dialOf(u) != "new:2" || c == nil || c.Value != token(testSecret, "new:2") {
+		t.Fatalf("a page load of a draining copy's visitor went to %s, cookie %v", dialOf(u), c)
+	}
+}
+
+func TestPageLoad_TheOldPagesOwnRequestsStay(t *testing.T) {
+	p := pool("old:1", "new:2")
+	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"new:2"}, nil, []string{"old:1"})
+	for _, tc := range []struct{ method, path, accept, upgrade string }{
+		{"GET", "/", "*/*", ""},                                // the example's fetch before it reloads
+		{"GET", "/websocket/", "", "websocket"},                // the session
+		{"GET", "/", browserAccept, "websocket"},               // anything that upgrades
+		{"GET", "/inner.html", browserAccept, ""},              // a frame in the page
+		{"GET", "/session/abc/download/dl", browserAccept, ""}, // a download
+		{"POST", "/", browserAccept, ""},
+		{"GET", "/shiny-javascript-1.14.0/shiny.min.js", "*/*", ""},
+	} {
+		r := httptest.NewRequest(tc.method, tc.path, nil)
+		if tc.accept != "" {
+			r.Header.Set("Accept", tc.accept)
+		}
+		if tc.upgrade != "" {
+			r.Header.Set("Upgrade", tc.upgrade)
+		}
+		if u, c := selectReq(s, p, r, token(testSecret, "old:1")); dialOf(u) != "old:1" || c != nil {
+			t.Errorf("%s %s (Accept %q, Upgrade %q) went to %s with cookie %v; want the draining copy, no cookie", tc.method, tc.path, tc.accept, tc.upgrade, dialOf(u), c)
+		}
+	}
+}
+
+func TestPageLoad_OnlyDrainingCopiesLetGo(t *testing.T) {
+	p := pool("a:1", "b:2", "w:3")
+	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1", "b:2"}, []string{"w:3"}, nil)
+	for _, dial := range []string{"b:2", "w:3"} {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("Accept", browserAccept)
+		if u, c := selectReq(s, p, r, token(testSecret, dial)); dialOf(u) != dial || c != nil {
+			t.Errorf("a page load pinned to %s went to %s, cookie %v", dial, dialOf(u), c)
+		}
+	}
+}
+
+func TestPageLoad_NothingElseUpKeepsTheDrainingCopy(t *testing.T) {
+	p := pool("old:1", "new:2")
+	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"new:2"}, nil, []string{"old:1"}, "new:2")
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Accept", browserAccept)
+	if u, _ := selectReq(s, p, r, token(testSecret, "old:1")); dialOf(u) != "old:1" {
+		t.Fatalf("with the new copy down, the page load went to %s", dialOf(u))
+	}
+}
