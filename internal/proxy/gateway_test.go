@@ -525,6 +525,14 @@ func TestGateway_SetPoolPushesOnlyChanges(t *testing.T) {
 	if got := e.gw.Pushes(); got != 3 {
 		t.Errorf("after a change of the warm list only, Pushes = %d, want 3", got)
 	}
+	// So is a change of the draining list alone.
+	d := Pool{Active: q.Active, Warm: r.Warm, Draining: []string{"127.0.0.1:20008"}}
+	if err := e.gw.SetPool("x", d); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.gw.Pushes(); got != 4 {
+		t.Errorf("after a change of the draining list only, Pushes = %d, want 4", got)
+	}
 	if err := e.gw.SetPool("x", q); err != nil {
 		t.Fatal(err)
 	}

@@ -1,9 +1,10 @@
 package reconcile
 
 // ActionType names what shinyctl-api did, or decided to do, for an app.
-// DecideCopies' steps are only ever Start, Stop and Backoff, and a plan comes
-// to None, Start or Backoff (see Plan.Action); Stop, Delete and Restart are
-// also reported by their handlers.
+// DecideCopies' steps are only ever Start, Stop and Backoff (a Stop carries
+// the reason it stops, see StopReason), and a plan comes to None, Start or
+// Backoff (see Plan.Action); Stop, Delete and Restart are also reported by
+// their handlers.
 type ActionType string
 
 const (

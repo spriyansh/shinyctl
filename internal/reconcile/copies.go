@@ -12,35 +12,70 @@ import (
 
 // CopyView is what the daemon observed about one recorded copy.
 type CopyView struct {
-	App      state.AppState
-	Alive    bool // running, and identifiably this copy (entrypoint and port)
-	Ready    bool // alive and accepting connections on its internal port
-	Pending  bool // not alive, and its exit-watcher has yet to record the exit
-	Sessions int  // open connections to it through the load balancer
+	App     state.AppState
+	Alive   bool // running, and identifiably this copy (entrypoint and port)
+	Ready   bool // alive and accepting connections on its internal port
+	Pending bool // not alive, and its exit-watcher has yet to record the exit
+
+	// Sessions is the number of requests open to the copy through the load
+	// balancer (a Shiny session is one open WebSocket). SessionsKnown says the
+	// load balancer answered: without it, Sessions is 0 but means nothing, and
+	// no copy is taken to have no visitors left.
+	Sessions      int
+	SessionsKnown bool
 }
+
+// StopReason says why a Stop step stops a copy.
+type StopReason string
+
+const (
+	StopSurplus  StopReason = "surplus"  // fewer copies wanted, and this one isn't ready, or must not drain
+	StopUpgrade  StopReason = "upgrade"  // the process from before the load balancer, which holds the app's port
+	StopOutdated StopReason = "outdated" // runs a previous version and isn't ready: it never served anyone
+	StopDrained  StopReason = "drained"  // draining, and no sessions are left
+	StopIdle     StopReason = "idle"     // an old spare with no sessions at the switch: it has no visitors to wait for
+	StopTimeout  StopReason = "timeout"  // draining for drain-timeout
+	StopNoDrain  StopReason = "no-drain" // would drain, but --now or drain-timeout 0 says stop
+	StopTooMany  StopReason = "too-many" // more copies with visitors draining than the app runs
+	StopGone     StopReason = "gone"     // no process: only the record goes
+)
 
 // Step is one thing DecideCopies wants done.
 type Step struct {
-	Type    ActionType // ActionStart, ActionStop or ActionBackoff
-	Copy    int        // the copy number; 0 only for a Stop of a record from before the load balancer
-	PID     int        // the live process this step stops (Stop, or a Start with Replace); 0 if none
-	Replace bool       // Start: stop the copy's live process first
-	Changed []string   // Start with Replace: the manifest fields behind it
-	Restart bool       // Start with Replace: a restart asked for it (the revision)
-	Upgrade bool       // Start of copy 1 replacing a process from before the load balancer
+	Type     ActionType // ActionStart, ActionStop or ActionBackoff
+	Copy     int        // the copy number; 0 only for a Stop of a record from before the load balancer
+	PID      int        // Stop: the live process to stop; 0 when there is none
+	Why      StopReason // Stop: why
+	Sessions int        // Stop: the sessions open when it was decided, for the log
+	Upgrade  bool       // Start of copy 1 replacing a process from before the load balancer
 }
 
 // Plan is DecideCopies' answer.
 type Plan struct {
-	Steps   []Step // Stops (fewer copies, or the old process of an upgrade), then the replacement, then Starts and Backoffs, each in copy order
-	Active  []int  // copies new visitors go to, in role order
-	Warm    []int  // ready spares, in role order
-	Rolling bool   // an outdated copy is waiting for the current copies to be ready
+	Steps []Step // Stops, then Starts and Backoffs, each in copy order
 
-	// Waiting names the copies Rolling waits for, and Outdated the copies
-	// that run a previous version, for the reply.
+	// Drain lists the copies that start draining now: the caller records
+	// draining-since on them.
+	Drain []int
+
+	Active   []int // copies new visitors go to, in role order
+	Warm     []int // ready spares, in role order
+	Draining []int // copies that keep their visitors and get no new ones, longest draining first
+
+	// Rolling says copies of a previous version serve while the copies of the
+	// new version are not ready (Waiting); Outdated names those old copies.
+	// Switched says this plan hands new visitors over to the new version.
+	Rolling  bool
+	Switched bool
 	Waiting  []int
 	Outdated []int
+
+	// Changed and Restart say why the old copies are outdated (manifest
+	// fields, a restart); OldStop says they stop instead of draining once
+	// the new ones are ready (--now, or drain-timeout 0).
+	Changed []string
+	Restart bool
+	OldStop bool
 }
 
 // Action is what the plan comes to for the caller's reply: a start if any
@@ -55,10 +90,25 @@ func (p Plan) Action() ActionType {
 			backoff = true
 		}
 	}
-	if backoff && !slices.ContainsFunc(p.Steps, func(s Step) bool { return s.Type == ActionStop }) {
+	if backoff && len(p.Drain) == 0 && !slices.ContainsFunc(p.Steps, func(s Step) bool { return s.Type == ActionStop }) {
 		return ActionBackoff
 	}
 	return ActionNone
+}
+
+// DrainSettle is how long a draining copy is kept at least, even with no
+// sessions: a page whose HTML came from the copy just before it started
+// draining opens its WebSocket a moment later, and that session belongs on the
+// same copy.
+const DrainSettle = 10 * time.Second
+
+// Input is what DecideCopies decides from.
+type Input struct {
+	Revision  int        // State.Revision
+	Copies    []CopyView // every recorded copy
+	Now       time.Time  // the caller's clock, passed in so this stays deterministic
+	SkipDrain bool       // the request asked for --now: what would drain stops instead
+	Settle    time.Duration
 }
 
 // item is a copy with what DecideCopies works out about it.
@@ -69,48 +119,64 @@ type item struct {
 	restart  bool
 	gaveUp   bool
 	class    int  // 0 no process, 1 starting, 2 ready; see stopCompare
-	active   bool // ready, and among the first R by started-at
+	active   bool // ready, and among the first R by started-at of its group
 }
 
 // DecideCopies is the reconcile loop's pure decision function: given what
-// spec wants, the state's revision and what was observed of each recorded
-// copy, it says what to do, never does it itself. now is the caller's
-// time.Now(), passed in so this stays deterministic.
+// spec wants and what was observed of each recorded copy, it says what to do,
+// never does it itself.
 //
 // The rules, in order:
 //  1. A live record without a copy number is a process from before the load
 //     balancer, holding the app's port itself. It is stopped and the app
 //     starts again behind the load balancer, with every copy.
-//  2. Each copy is outdated (alive, but started from an older revision or
-//     another manifest) or given up (dead, and the restart policy brings
-//     nothing back).
-//  3. Roles are worked out for every ready copy, to rank the copies for
-//     removal.
-//  4. With more copies than wanted, the surplus is stopped, in this order:
-//     copies that run the previous version, while no copy of the new version
-//     is ready yet (so a crashed new copy is the one kept and retried); copies
-//     with no process; copies that run the previous version; starting copies;
-//     ready copies with the fewest sessions (a warm one before an active one
-//     when they tie). If that would leave none of the kept copies ready, up
-//     to one old ready copy for each kept copy stays over the number, the
-//     active one before the warm one, until a copy of the new version is
-//     ready.
-//  5. With fewer, the lowest free copy numbers are started.
-//  6. A dead copy is started again in place, after its backoff.
-//  7. Of the copies that are alive, ready and not being replaced, the oldest
-//     R are active and the rest warm. A restarted copy is the newest, so it
-//     comes back as a spare and roles never swap back on their own.
-//  8. Outdated copies are replaced one at a time, and only when every
-//     current copy is alive and ready, so a broken new version stalls with
-//     the old copies still serving.
-func DecideCopies(spec manifest.AppSpec, revision int, copies []CopyView, now time.Time) Plan {
+//  2. Each copy is draining (it has draining-since), old (alive, not draining,
+//     and started from an older revision or another manifest), or current
+//     (anything else: up to date, starting, dead or pending).
+//  3. A draining copy is never started again and never gets a role but
+//     draining. It stops when it has no process, when it must not drain
+//     (--now, drain-timeout 0), when drain-timeout has passed since it began,
+//     or when the load balancer says it has no sessions and it has drained
+//     for at least the settle time.
+//  4. An old copy that is not ready, and has no sessions by the load
+//     balancer's count, is stopped: it never served and never will.
+//  5. Current copies are kept at replicas + warm-replicas: the surplus goes in
+//     stopCompare's order, a ready one by draining (or stopping, when it must
+//     not drain), the others stopped; missing ones start under the lowest copy
+//     numbers no record has; a dead one starts again in place after its
+//     backoff, unless the restart policy has given up on it. While old copies
+//     still serve (before the switch) only replicas current copies are
+//     wanted: the new version starts with the copies that serve, its spares
+//     start once it has taken over, so a restart runs few processes at once.
+//  6. Old copies beyond replicas + warm-replicas drain too (a scale-down in
+//     the middle of a rollout, or a restart that overtakes a rollout whose new
+//     copy is ready but has not switched yet); one that is an idle spare stops
+//     at once instead, as at the switch.
+//  7. The switch: once replicas current copies are ready, every old copy
+//     drains (or stops, when it must not drain). An old spare that has no
+//     sessions by the load balancer's count stops at once instead: it takes no
+//     visitors unless it stands in for a dead active copy, and then it has
+//     sessions, so only the active copies wait out the settle time. Until the
+//     switch the old copies keep serving and the rollout waits; a new version
+//     that never gets ready leaves them serving.
+//  8. Roles. Before the switch the old ready copies come first, then the
+//     current ready ones, each by started-at: the first replicas are active,
+//     the rest warm. Otherwise the current ready copies by started-at. A
+//     restarted copy is the newest, so it comes back as a spare and roles
+//     never swap back on their own.
+//  9. At most replicas + warm-replicas copies with visitors drain at once:
+//     beyond that, the ones draining longest stop.
+func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 	total := spec.CopyCount()
+	replicas := spec.EffectiveReplicas()
+	timeout := spec.EffectiveDrainTimeout()
+	now := in.Now
 
 	// Rule 1.
-	for _, c := range copies {
+	for _, c := range in.Copies {
 		if c.App.Copy == 0 && c.Alive {
 			steps := []Step{
-				{Type: ActionStop, Copy: 0, PID: c.App.PID},
+				{Type: ActionStop, Copy: 0, PID: c.App.PID, Why: StopUpgrade},
 				{Type: ActionStart, Copy: 1, Upgrade: true},
 			}
 			for n := 2; n <= total; n++ {
@@ -122,7 +188,7 @@ func DecideCopies(spec manifest.AppSpec, revision int, copies []CopyView, now ti
 
 	// A dead record from before the load balancer is copy 1 again, with its
 	// crash history; its port was the app's own, so it has none to keep.
-	views := slices.Clone(copies)
+	views := slices.Clone(in.Copies)
 	for i := range views {
 		if views[i].App.Copy == 0 {
 			views[i].App.Copy, views[i].App.Port = 1, 0
@@ -130,103 +196,177 @@ func DecideCopies(spec manifest.AppSpec, revision int, copies []CopyView, now ti
 	}
 	slices.SortStableFunc(views, func(a, b CopyView) int { return a.App.Copy - b.App.Copy })
 
-	// Rules 2 and 3.
-	items := make([]item, len(views))
-	for i, v := range views {
-		it := item{CopyView: v}
-		if v.Alive {
-			it.changed, it.restart = Outdated(spec, revision, v.App)
-			it.outdated = len(it.changed) > 0 || it.restart
-		} else if !v.Pending {
-			it.gaveUp = GaveUp(spec, v.App)
-		}
-		items[i] = it
-	}
-	active, _ := rankRoles(views, spec.EffectiveReplicas())
-	for i := range items {
-		switch {
-		case !items[i].Alive:
-			items[i].class = 0
-		case !items[i].Ready:
-			items[i].class = 1
-		default:
-			items[i].class = 2
-			items[i].active = slices.Contains(active, items[i].App.Copy)
-		}
+	used := map[int]bool{}
+	for _, v := range views {
+		used[v.App.Copy] = true
 	}
 
 	var plan Plan
+	var stops, starts []Step
+	stop := func(it item, why StopReason) {
+		pid := 0
+		if it.Alive {
+			pid = it.App.PID
+		}
+		stops = append(stops, Step{Type: ActionStop, Copy: it.App.Copy, PID: pid, Why: why, Sessions: it.Sessions})
+	}
+	mustNotDrain := func(it item) bool { return in.SkipDrain || it.App.SkipDrain || timeout == 0 }
+	// drainOrStop retires a ready copy: it drains, unless it must not.
+	var drained []item
+	drainOrStop := func(it item, why StopReason) {
+		if mustNotDrain(it) {
+			stop(it, why)
+			return
+		}
+		drained = append(drained, it)
+	}
+
+	// Rule 2.
+	var draining, old, current []item
+	for _, v := range views {
+		it := item{CopyView: v}
+		switch {
+		case !v.Alive:
+			it.class = 0
+		case !v.Ready:
+			it.class = 1
+		default:
+			it.class = 2
+		}
+		switch {
+		case !v.App.DrainingSince.IsZero():
+			draining = append(draining, it)
+		case v.Alive:
+			it.changed, it.restart = Outdated(spec, in.Revision, v.App)
+			it.outdated = len(it.changed) > 0 || it.restart
+			if it.outdated {
+				old = append(old, it)
+			} else {
+				current = append(current, it)
+			}
+		default:
+			if !v.Pending {
+				it.gaveUp = GaveUp(spec, v.App)
+			}
+			current = append(current, it)
+		}
+	}
+
+	// Rule 3.
+	var stillDraining []item
+	for _, d := range draining {
+		age := now.Sub(d.App.DrainingSince)
+		switch {
+		case !d.Alive:
+			stop(d, StopGone)
+		case mustNotDrain(d):
+			stop(d, StopNoDrain)
+		case age >= timeout:
+			stop(d, StopTimeout)
+		case d.SessionsKnown && d.Sessions == 0 && age >= in.Settle:
+			stop(d, StopDrained)
+		default:
+			stillDraining = append(stillDraining, d)
+		}
+	}
 
 	// Rule 4.
-	kept := items
-	if len(items) > total {
-		order := slices.Clone(items)
-		newReady := slices.ContainsFunc(items, func(it item) bool { return it.Alive && it.Ready && !it.outdated })
-		slices.SortStableFunc(order, surplusCompare(newReady))
-		removed := map[int]bool{}
-		for _, it := range order[:len(items)-total] {
-			removed[it.App.Copy] = true
+	var oldLive []item
+	for _, o := range old {
+		if !o.Ready && o.SessionsKnown && o.Sessions == 0 {
+			stop(o, StopOutdated)
+			continue
 		}
-
-		// Old-version copies go first, which can leave no ready copy among the
-		// ones kept (the new ones are still starting, or crashed). The old
-		// ready ones then stay for now, over the number wanted: at most one
-		// for each wanted copy that is not ready, the active one before the
-		// warm one. They go once the new ones are ready; if the new version
-		// never gets ready, they keep serving and the rollout stays stalled.
-		if !slices.ContainsFunc(items, func(it item) bool { return !removed[it.App.Copy] && it.Alive && it.Ready }) {
-			var spare []item
-			for _, it := range items {
-				if removed[it.App.Copy] && it.Alive && it.Ready {
-					spare = append(spare, it)
-				}
-			}
-			slices.SortStableFunc(spare, func(a, b item) int {
-				if a.active != b.active {
-					if a.active {
-						return -1
-					}
-					return 1
-				}
-				if c := a.App.StartedAt.Compare(b.App.StartedAt); c != 0 {
-					return c
-				}
-				return a.App.Copy - b.App.Copy
-			})
-			for _, it := range spare[:min(len(spare), total)] {
-				delete(removed, it.App.Copy)
-			}
-		}
-
-		kept = nil
-		for _, it := range items {
-			if !removed[it.App.Copy] {
-				kept = append(kept, it)
-				continue
-			}
-			pid := 0
-			if it.Alive {
-				pid = it.App.PID
-			}
-			plan.Steps = append(plan.Steps, Step{Type: ActionStop, Copy: it.App.Copy, PID: pid})
-		}
+		oldLive = append(oldLive, o)
 	}
+	for _, o := range oldLive {
+		plan.Changed = append(plan.Changed, o.changed...)
+		plan.Restart = plan.Restart || o.restart
+	}
+	plan.Changed = OrderFields(dedupe(plan.Changed))
 
 	// Rule 5.
-	var fresh []int
-	used := map[int]bool{}
-	for _, it := range kept {
-		used[it.App.Copy] = true
+	markActive(current, replicas)
+	kept := current
+	if len(current) > total {
+		order := slices.Clone(current)
+		slices.SortStableFunc(order, stopCompare)
+		removed := map[int]bool{}
+		for _, it := range order[:len(current)-total] {
+			removed[it.App.Copy] = true
+			if it.class == 2 {
+				drainOrStop(it, StopSurplus)
+			} else {
+				stop(it, StopSurplus)
+			}
+		}
+		kept = nil
+		for _, it := range current {
+			if !removed[it.App.Copy] {
+				kept = append(kept, it)
+			}
+		}
 	}
-	for n := 1; len(kept)+len(fresh) < total; n++ {
+
+	// Rule 6.
+	var oldServing, oldWaiting []item
+	for _, o := range oldLive {
+		if o.class == 2 {
+			oldServing = append(oldServing, o)
+		} else {
+			oldWaiting = append(oldWaiting, o)
+		}
+	}
+	markActive(oldServing, replicas)
+	if len(oldServing) > total {
+		order := slices.Clone(oldServing)
+		slices.SortStableFunc(order, stopCompare)
+		extra := map[int]bool{}
+		for _, it := range order[:len(oldServing)-total] {
+			extra[it.App.Copy] = true
+			if idleSpare(it) {
+				stop(it, StopIdle)
+				continue
+			}
+			drainOrStop(it, StopSurplus)
+		}
+		oldServing = slices.DeleteFunc(oldServing, func(it item) bool { return extra[it.App.Copy] })
+	}
+
+	// Rule 7.
+	var currentReady []CopyView
+	for _, it := range kept {
+		if it.Alive && it.Ready {
+			currentReady = append(currentReady, it.CopyView)
+		}
+	}
+	plan.OldStop = in.SkipDrain || timeout == 0
+	if len(oldServing)+len(oldWaiting) > 0 && len(currentReady) >= replicas {
+		plan.Switched = true
+		for _, o := range slices.Concat(oldServing, oldWaiting) {
+			if idleSpare(o) {
+				stop(o, StopIdle)
+				continue
+			}
+			drainOrStop(o, StopNoDrain)
+		}
+		oldServing, oldWaiting = nil, nil
+	}
+	rolling := len(oldServing)+len(oldWaiting) > 0
+
+	// Rule 5, the starts. While old copies still serve, only replicas copies
+	// of the new version are wanted; its spares start once it has taken over.
+	want := total
+	if rolling {
+		want = replicas
+	}
+	var fresh []int
+	for n := 1; len(kept)+len(fresh) < want; n++ {
 		if !used[n] {
 			fresh = append(fresh, n)
 			used[n] = true
 		}
 	}
-
-	// Rule 6.
-	var starts []Step
 	for _, n := range fresh {
 		starts = append(starts, Step{Type: ActionStart, Copy: n})
 	}
@@ -241,58 +381,157 @@ func DecideCopies(spec manifest.AppSpec, revision int, copies []CopyView, now ti
 	}
 
 	// Rule 8.
-	var replace *Step
-	var outdated []item
-	for _, it := range kept {
-		if it.outdated {
-			outdated = append(outdated, it)
-			plan.Outdated = append(plan.Outdated, it.App.Copy)
+	if rolling {
+		plan.Rolling = true
+		ranked := slices.Concat(byStart(views0(oldServing)), byStart(currentReady))
+		for i, v := range ranked {
+			if i < replicas {
+				plan.Active = append(plan.Active, v.App.Copy)
+			} else {
+				plan.Warm = append(plan.Warm, v.App.Copy)
+			}
 		}
-	}
-	if len(outdated) > 0 {
 		plan.Waiting = slices.Clone(fresh)
 		for _, it := range kept {
-			if !it.outdated && !(it.Alive && it.Ready) {
+			if !(it.Alive && it.Ready) {
 				plan.Waiting = append(plan.Waiting, it.App.Copy)
 			}
 		}
 		slices.Sort(plan.Waiting)
-
-		if len(plan.Waiting) == 0 {
-			slices.SortStableFunc(outdated, stopCompare)
-			first := outdated[0]
-			replace = &Step{Type: ActionStart, Copy: first.App.Copy, PID: first.App.PID, Replace: true, Changed: first.changed, Restart: first.restart}
-		} else {
-			plan.Rolling = true
+		allSkip := true
+		for _, o := range slices.Concat(oldServing, oldWaiting) {
+			plan.Outdated = append(plan.Outdated, o.App.Copy)
+			allSkip = allSkip && o.App.SkipDrain
 		}
+		slices.Sort(plan.Outdated)
+		plan.OldStop = plan.OldStop || allSkip
+	} else {
+		plan.Active, plan.Warm = rankRoles(currentReady, replicas)
 	}
 
-	// Rule 7.
-	var ranked []CopyView
-	for _, it := range kept {
-		if replace != nil && replace.Copy == it.App.Copy {
+	// Rule 9, and the draining list: the copies still draining, then the ones
+	// that start now, longest draining first.
+	type drainer struct {
+		item
+		since time.Time
+		fresh bool
+	}
+	var all []drainer
+	for _, d := range stillDraining {
+		all = append(all, drainer{d, d.App.DrainingSince, false})
+	}
+	for _, d := range drained {
+		all = append(all, drainer{d, now, true})
+	}
+	slices.SortStableFunc(all, func(a, b drainer) int {
+		if c := a.since.Compare(b.since); c != 0 {
+			return c
+		}
+		return a.App.Copy - b.App.Copy
+	})
+	busy := 0
+	for _, d := range all {
+		if !(d.SessionsKnown && d.Sessions == 0) {
+			busy++
+		}
+	}
+	// The copies that stop for the cap: the longest draining first and, among
+	// drains that began together, a spare before an active copy, which is the
+	// one most likely to hold the visitors.
+	byCut := slices.Clone(all)
+	slices.SortStableFunc(byCut, func(a, b drainer) int {
+		if c := a.since.Compare(b.since); c != 0 {
+			return c
+		}
+		if a.active != b.active {
+			if !a.active {
+				return -1
+			}
+			return 1
+		}
+		return a.App.Copy - b.App.Copy
+	})
+	cut := map[int]bool{}
+	for _, d := range byCut {
+		if busy <= total {
+			break
+		}
+		if d.SessionsKnown && d.Sessions == 0 {
 			continue
 		}
-		ranked = append(ranked, it.CopyView)
+		cut[d.App.Copy] = true
+		stop(d.item, StopTooMany)
+		busy--
 	}
-	plan.Active, plan.Warm = rankRoles(ranked, spec.EffectiveReplicas())
+	for _, d := range all {
+		if cut[d.App.Copy] {
+			continue
+		}
+		plan.Draining = append(plan.Draining, d.App.Copy)
+		if d.fresh {
+			plan.Drain = append(plan.Drain, d.App.Copy)
+		}
+	}
+	slices.Sort(plan.Drain)
 
-	// Steps: stops (already in), the replacement, then starts by copy.
-	slices.SortStableFunc(plan.Steps, func(a, b Step) int { return a.Copy - b.Copy })
-	if replace != nil {
-		plan.Steps = append(plan.Steps, *replace)
-	}
+	slices.SortStableFunc(stops, func(a, b Step) int { return a.Copy - b.Copy })
 	slices.SortStableFunc(starts, func(a, b Step) int { return a.Copy - b.Copy })
-	plan.Steps = append(plan.Steps, starts...)
-
+	plan.Steps = append(stops, starts...)
 	return plan
 }
 
-// Roles is rule 7 on its own, for rebuilding the load balancer's table
-// without deciding anything: of the copies that are alive and ready, the
-// oldest R are active and the rest warm.
-func Roles(spec manifest.AppSpec, copies []CopyView) (active, warm []int) {
-	return rankRoles(copies, spec.EffectiveReplicas())
+// idleSpare says a retired old copy has no visitors to wait for: it is ready,
+// it is not an active copy (a spare takes none unless it stood in, and then it
+// has sessions) and the load balancer says it has none. It stops at once, with
+// no settle, so a redeploy keeps few processes alive.
+func idleSpare(it item) bool {
+	return it.class == 2 && !it.active && it.SessionsKnown && it.Sessions == 0
+}
+
+func dedupe(s []string) []string {
+	var out []string
+	for _, x := range s {
+		if !slices.Contains(out, x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func views0(items []item) []CopyView {
+	out := make([]CopyView, len(items))
+	for i, it := range items {
+		out[i] = it.CopyView
+	}
+	return out
+}
+
+// byStart sorts copies by started-at, then copy number.
+func byStart(vs []CopyView) []CopyView {
+	out := slices.Clone(vs)
+	slices.SortStableFunc(out, func(a, b CopyView) int {
+		if c := a.App.StartedAt.Compare(b.App.StartedAt); c != 0 {
+			return c
+		}
+		return a.App.Copy - b.App.Copy
+	})
+	return out
+}
+
+// markActive flags the ready items that would be active among them.
+func markActive(items []item, replicas int) {
+	vs := views0(items)
+	active, _ := rankRoles(vs, replicas)
+	for i := range items {
+		items[i].active = items[i].class == 2 && slices.Contains(active, items[i].App.Copy)
+	}
+}
+
+// Roles is DecideCopies' roles alone, for rebuilding the load balancer's table
+// without doing anything.
+func Roles(spec manifest.AppSpec, in Input) (active, warm, draining []int) {
+	p := DecideCopies(spec, in)
+	return p.Active, p.Warm, p.Draining
 }
 
 // rankRoles gives the copies that are alive and ready their roles: ordered
@@ -302,19 +541,11 @@ func Roles(spec manifest.AppSpec, copies []CopyView) (active, warm []int) {
 func rankRoles(copies []CopyView, replicas int) (active, warm []int) {
 	var ready []CopyView
 	for _, c := range copies {
-		// A process from before the load balancer holds the app's port
-		// itself, and is not a copy to send visitors to.
 		if c.Alive && c.Ready && c.App.Copy >= 1 {
 			ready = append(ready, c)
 		}
 	}
-	slices.SortStableFunc(ready, func(a, b CopyView) int {
-		if c := a.App.StartedAt.Compare(b.App.StartedAt); c != 0 {
-			return c
-		}
-		return a.App.Copy - b.App.Copy
-	})
-	for i, c := range ready {
+	for i, c := range byStart(ready) {
 		if i < replicas {
 			active = append(active, c.App.Copy)
 		} else {
@@ -324,14 +555,10 @@ func rankRoles(copies []CopyView, replicas int) (active, warm []int) {
 	return active, warm
 }
 
-// stopCompare orders copies by how little it costs to stop them, cheapest
+// stopCompare orders copies by how little it costs to retire them, cheapest
 // first: copies with no process, then starting ones, then ready ones. Among
-// the ready, the one with the fewest open sessions goes first, so visitors
-// are cut off only when there are fewer ready copies than copies holding
-// them (the roles are those of the new settings, so a copy about to be
-// demoted still counts for what it holds); a warm copy goes before an
-// active one, then the newest, then the highest copy number. It is also the
-// order in which an outdated copy is chosen for replacement.
+// the ready, the one with the fewest open sessions goes first; a warm copy
+// goes before an active one, then the newest, then the highest copy number.
 func stopCompare(a, b item) int {
 	if a.class != b.class {
 		return a.class - b.class
@@ -353,27 +580,6 @@ func stopCompare(a, b item) int {
 	return b.App.Copy - a.App.Copy
 }
 
-// surplusCompare orders copies for scale-down: the same as stopCompare, except
-// that the copies that run the previous version go before the ones that run
-// the new version. Among the copies with a process that is always so, ready or
-// starting. A copy that is dead (crashed, in backoff or given up) counts as
-// one of the new version, and goes after the old ones only while no copy of
-// the new version is ready: then the old ready copy must be kept to serve and
-// the dead new one is the one retried; once a new copy is ready, the new
-// version has proved itself and a dead copy goes first, as in any scale-down,
-// rather than a ready old one that still adds capacity.
-func surplusCompare(newReady bool) func(a, b item) int {
-	return func(a, b item) int {
-		if a.outdated != b.outdated && (!newReady || (a.class != 0 && b.class != 0)) {
-			if a.outdated {
-				return -1
-			}
-			return 1
-		}
-		return stopCompare(a, b)
-	}
-}
-
 // Outdated says whether the copy recorded in app runs something other than
 // what is wanted now: the manifest fields it was not started from, and
 // whether a restart has been asked for since it started.
@@ -381,143 +587,17 @@ func Outdated(spec manifest.AppSpec, revision int, app state.AppState) (changed 
 	return changedFields(app, spec), app.Revision < revision
 }
 
-// Describe is the reply to apply and restart, and the line the daemon logs
-// when it starts something. before is what was observed, p the plan, and
-// settings the manifest fields that changed and take effect without a
-// restart (see SettingsChanged).
-func Describe(spec manifest.AppSpec, before []CopyView, p Plan, settings []string) string {
-	var upgrade, replace *Step
-	var fresh, again, stops, backoffs []int
-	var oldPID int
-	known := map[int]CopyView{}
-	for _, v := range before {
-		known[v.App.Copy] = v
+// FormatDuration writes d the way a manifest would: "15m", "90s" as "1m30s",
+// "1h", "1h30m".
+func FormatDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
 	}
-	for i, s := range p.Steps {
-		switch {
-		case s.Type == ActionStop && s.Copy == 0:
-			oldPID = s.PID
-		case s.Type == ActionStop:
-			stops = append(stops, s.Copy)
-		case s.Type == ActionBackoff:
-			backoffs = append(backoffs, s.Copy)
-		case s.Upgrade:
-			upgrade = &p.Steps[i]
-		case s.Replace:
-			replace = &p.Steps[i]
-		default:
-			if _, ok := known[s.Copy]; ok {
-				again = append(again, s.Copy)
-			} else {
-				fresh = append(fresh, s.Copy)
-			}
-		}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
 	}
-
-	name, port := spec.AppName, spec.Port
-	multi := spec.CopyCount() > 1
-	summary := copiesSummary(spec.EffectiveReplicas(), spec.EffectiveWarm())
-	changedList := func(fields []string) string {
-		return strings.Join(OrderFields(slices.Concat(fields, settings)), ", ")
-	}
-
-	switch {
-	case upgrade != nil:
-		var parts []string
-		if multi {
-			parts = append(parts, summary)
-		}
-		if len(settings) > 0 {
-			parts = append(parts, "manifest changed: "+changedList(nil))
-		}
-		parts = append(parts, "moved behind the load balancer", fmt.Sprintf("stopped the previous instance: pid %d", oldPID))
-		return fmt.Sprintf("Starting app %q on port %d (%s)", name, port, strings.Join(parts, "; "))
-
-	case replace != nil:
-		otherAlive := slices.ContainsFunc(before, func(v CopyView) bool {
-			return v.Alive && v.App.Copy != replace.Copy && !slices.Contains(stops, v.App.Copy)
-		})
-		if !otherAlive {
-			var parts []string
-			if fields := changedList(replace.Changed); fields != "" {
-				parts = append(parts, "manifest changed: "+fields)
-			}
-			if len(stops) > 0 {
-				parts = append(parts, "stopping "+ListCopies(stops))
-			}
-			parts = append(parts, fmt.Sprintf("stopped the previous instance: pid %d", replace.PID))
-			return fmt.Sprintf("Starting app %q on port %d (%s)", name, port, strings.Join(parts, "; "))
-		}
-		msg := fmt.Sprintf("Restarting app %q one copy at a time", name)
-		if fields := changedList(replace.Changed); fields != "" {
-			msg += " (manifest changed: " + fields + ")"
-		}
-		order := "first"
-		if len(p.Outdated) < countAlive(before) {
-			order = "next"
-		}
-		msg += fmt.Sprintf(": copy %d %s (stopped pid %d)", replace.Copy, order, replace.PID)
-		if len(stops) > 0 {
-			msg += "; stopping " + ListCopies(stops)
-		}
-		return msg
-
-	case len(fresh)+len(again) > 0 && countAlive(before) == 0 && len(stops) == 0:
-		var parts []string
-		if multi {
-			parts = append(parts, summary)
-		}
-		if len(settings) > 0 {
-			parts = append(parts, "manifest changed: "+changedList(nil))
-		}
-		msg := fmt.Sprintf("Starting app %q on port %d", name, port)
-		if len(parts) > 0 {
-			msg += " (" + strings.Join(parts, "; ") + ")"
-		}
-		return msg
-
-	case len(fresh)+len(again)+len(stops) > 0:
-		var parts []string
-		if len(settings) > 0 {
-			parts = append(parts, "manifest changed: "+changedList(nil))
-		}
-		if len(fresh) > 0 {
-			parts = append(parts, "starting "+ListCopies(fresh))
-		}
-		if len(again) > 0 {
-			parts = append(parts, "starting "+ListCopies(again)+" again")
-		}
-		if len(stops) > 0 {
-			parts = append(parts, "stopping "+ListCopies(stops))
-		}
-		if len(settings) > 0 {
-			return fmt.Sprintf("Updated %q without a restart (%s)", name, strings.Join(parts, "; "))
-		}
-		return fmt.Sprintf("Updated %q (%s)", name, strings.Join(parts, "; "))
-
-	case len(backoffs) > 0:
-		var lines []string
-		for _, n := range backoffs {
-			crashes := known[n].App.CrashCount
-			if multi {
-				lines = append(lines, fmt.Sprintf("Backing off restart of %q copy %d after %d crash(es)", name, n, crashes))
-			} else {
-				lines = append(lines, fmt.Sprintf("Backing off restart of %q after %d crash(es)", name, crashes))
-			}
-		}
-		return strings.Join(lines, "; ")
-
-	case p.Rolling:
-		msg := fmt.Sprintf("Restarting app %q one copy at a time", name)
-		if len(settings) > 0 {
-			msg += " (manifest changed: " + changedList(nil) + ")"
-		}
-		return msg + fmt.Sprintf(": waiting for %s to be ready", ListCopies(p.Waiting))
-
-	case len(settings) > 0:
-		return fmt.Sprintf("Updated %q without a restart (manifest changed: %s)", name, strings.Join(settings, ", "))
-	}
-	return "Nothing to change"
+	return s
 }
 
 func countAlive(views []CopyView) int {
@@ -548,27 +628,32 @@ func copiesSummary(replicas, warm int) string {
 
 // DescribeRoles says who serves visitors, for the log line written when the
 // roles change: "copy 1 serves visitors", "copies 2 and 3 serve visitors;
-// copy 1 is warm", or "no copy serves visitors yet".
-func DescribeRoles(active, warm []int) string {
-	if len(active) == 0 {
-		return "no copy serves visitors yet"
+// copy 1 is warm; copy 4 is draining", or "no copy serves visitors yet".
+func DescribeRoles(active, warm, draining []int) string {
+	msg := "no copy serves visitors yet"
+	if len(active) > 0 {
+		msg = ListCopies(active) + " serve"
+		if len(active) == 1 {
+			msg += "s"
+		}
+		msg += " visitors"
 	}
-	msg := ListCopies(active) + " serve"
-	if len(active) == 1 {
-		msg += "s"
+	is := func(l []int) string {
+		if len(l) == 1 {
+			return " is "
+		}
+		return " are "
 	}
-	msg += " visitors"
-	switch len(warm) {
-	case 0:
-	case 1:
-		msg += "; " + ListCopies(warm) + " is warm"
-	default:
-		msg += "; " + ListCopies(warm) + " are warm"
+	if len(warm) > 0 {
+		msg += "; " + ListCopies(warm) + is(warm) + "warm"
+	}
+	if len(draining) > 0 {
+		msg += "; " + ListCopies(draining) + is(draining) + "draining"
 	}
 	return msg
 }
 
-// listCopies reads "copy 3", "copies 3 and 4" or "copies 2, 4 and 5".
+// ListCopies reads "copy 3", "copies 3 and 4" or "copies 2, 4 and 5".
 func ListCopies(copies []int) string {
 	nums := make([]string, len(copies))
 	for i, n := range copies {

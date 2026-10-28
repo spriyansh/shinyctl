@@ -48,8 +48,23 @@ const fakeRscriptEnv = "SHINYCTL_TEST_FAKE_RSCRIPT"
 // during a test inherits the fake-Rscript variable). It lives in a short
 // temp dir, since Unix socket paths are limited to 103 bytes on macOS, and
 // HOME points there too, so nothing here can reach the real ~/.shinyctl.
+// testParentEnv names the test binary that started a test load balancer.
+const testParentEnv = "SHINYCTL_TEST_PARENT"
+
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "proxy" {
+		if v := os.Getenv(testParentEnv); v != "" {
+			// A load balancer of the tests exits when the test binary that
+			// started it is gone. The real one must outlive shinyctl-api and
+			// does not look at this.
+			want, _ := strconv.Atoi(v)
+			go func() {
+				for os.Getppid() == want {
+					time.Sleep(200 * time.Millisecond)
+				}
+				os.Exit(0)
+			}()
+		}
 		rootCmd.SetArgs(os.Args[1:])
 		if err := rootCmd.Execute(); err != nil {
 			os.Exit(1)
@@ -63,6 +78,9 @@ func TestMain(m *testing.M) {
 }
 
 func runTests(m *testing.M) int {
+	// The load balancer started below leaves with this process, whatever
+	// ends it (a panic, a timeout): a test-only guard, see TestMain.
+	os.Setenv(testParentEnv, strconv.Itoa(os.Getpid()))
 	dir, err := os.MkdirTemp("", "sp")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -141,6 +159,18 @@ var fakeRscriptArgs = regexp.MustCompile(`port=(\d+), host="([^"]+)"`)
 // runFakeRscript binds exactly the address process.Start asks for and
 // serves until killed. It never returns.
 func runFakeRscript(args string) {
+	// Leak guard: a test binary that dies before cleanup runs must not leave
+	// copies behind. The parent is read first of all, before the start-up
+	// delay: a copy orphaned during the delay would otherwise take its new
+	// parent (init) for the one to watch, and never leave.
+	ppid := os.Getppid()
+	go func() {
+		for os.Getppid() == ppid {
+			time.Sleep(200 * time.Millisecond)
+		}
+		os.Exit(0)
+	}()
+
 	m := fakeRscriptArgs.FindStringSubmatch(args)
 	if m == nil {
 		os.Stderr.WriteString("fake Rscript: cannot parse port/host from: " + args + "\n")
@@ -167,16 +197,6 @@ func runFakeRscript(args string) {
 		os.Stderr.WriteString("fake Rscript: " + err.Error() + "\n")
 		os.Exit(1)
 	}
-
-	// Leak guard: a test binary that dies before cleanup runs must not
-	// leave listeners behind.
-	ppid := os.Getppid()
-	go func() {
-		for os.Getppid() == ppid {
-			time.Sleep(200 * time.Millisecond)
-		}
-		os.Exit(0)
-	}()
 
 	// Answers with its own pid, so a test can tell which process a request
 	// reached through the load balancer. /hold keeps the request open until
@@ -306,12 +326,30 @@ func assertNoExitRecorded(t *testing.T, spec manifest.AppSpec, wantPID int) {
 	t.Helper()
 	deadline := time.Now().Add(250 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		app := loadApp(t, spec)
+		var app state.AppState
+		for _, rec := range loadCopies(t, spec) {
+			if rec.PID == wantPID {
+				app = rec
+			}
+		}
 		if app.PID != wantPID || app.CrashCount != 0 || !app.LastExitAt.IsZero() {
 			t.Fatalf("recorded app = %+v, want pid %d with no exit recorded", app, wantPID)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// newestApp returns the record of the newest copy: after a redeploy, the one
+// that runs the new version.
+func newestApp(t *testing.T, spec manifest.AppSpec) state.AppState {
+	t.Helper()
+	var newest state.AppState
+	for _, rec := range loadCopies(t, spec) {
+		if rec.StartedAt.After(newest.StartedAt) {
+			newest = rec
+		}
+	}
+	return newest
 }
 
 // killIfAlive is test cleanup: it only signals a PID that still passes the

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -232,7 +231,7 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 
 	var sessions map[string]int
 	if slices.Contains(alive, true) {
-		sessions = gateway.Sessions()
+		sessions = currentHooks().Sessions()
 	}
 
 	for i, rec := range recs {
@@ -247,6 +246,7 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 			if rec.Copy >= 1 {
 				v.Ready = currentHooks().ObserveProbe(process.InternalHost, rec.Port)
 				v.Sessions = sessions[dialOf(rec)]
+				v.SessionsKnown = sessions != nil
 			} else {
 				v.Ready = process.IsReady(spec.EffectiveHost(), rec.Port)
 			}
@@ -293,7 +293,7 @@ func poolOf(plan reconcile.Plan, st state.State) proxy.Pool {
 		}
 		return out
 	}
-	return proxy.Pool{Active: dials(plan.Active), Warm: dials(plan.Warm)}
+	return proxy.Pool{Active: dials(plan.Active), Warm: dials(plan.Warm), Draining: dials(plan.Draining)}
 }
 
 // reconcileLocked runs one decide-and-act cycle for spec: load state, look at
@@ -341,11 +341,29 @@ func reconcileLocked(spec manifest.AppSpec, o reconcileOpts) (api.ApplyResponse,
 	views, changed := observe(spec, &st, mode)
 	dirty = dirty || changed
 
-	plan := reconcile.DecideCopies(spec, st.Revision, views, time.Now())
+	now := time.Now()
+	plan := reconcile.DecideCopies(spec, reconcile.Input{Revision: st.Revision, Copies: views, Now: now, Settle: currentHooks().DrainSettle})
+
+	// The copies that start draining are marked in the state before anything
+	// is pushed or stopped, so a daemon that restarts from here on knows them.
+	for _, n := range plan.Drain {
+		if rec, ok := st.Copy(n); ok {
+			rec.DrainingSince = now
+			st.Put(rec)
+			dirty = true
+		}
+	}
 	if dirty {
 		if err := state.Save(spec.AppStateFile, st); err != nil {
 			return api.ApplyResponse{}, err
 		}
+	}
+	if len(plan.Drain) > 0 {
+		why := "fewer copies wanted"
+		if plan.Switched {
+			why = "the new version is ready"
+		}
+		log.Printf("reconcile: %q: %s; draining %s for up to %s", spec.AppName, why, reconcile.ListCopies(plan.Drain), reconcile.FormatDuration(spec.EffectiveDrainTimeout()))
 	}
 
 	resp := api.ApplyResponse{Action: plan.Action(), Message: reconcile.Describe(spec, views, plan, o.settings)}
@@ -353,7 +371,7 @@ func reconcileLocked(spec manifest.AppSpec, o reconcileOpts) (api.ApplyResponse,
 	// Who serves, before anything is stopped or started.
 	pool := poolOf(plan, st)
 	if cur, ok := gateway.Pool(spec.AppStateFile); !ok || !samePool(cur, pool) {
-		log.Printf("reconcile: %q: %s", spec.AppName, reconcile.DescribeRoles(plan.Active, plan.Warm))
+		log.Printf("reconcile: %q: %s", spec.AppName, reconcile.DescribeRoles(plan.Active, plan.Warm, plan.Draining))
 	}
 	// A failure is logged by the gateway, once; the table is sent again with
 	// the next change, and whenever the load balancer comes up.
@@ -377,8 +395,8 @@ func samePool(a, b proxy.Pool) bool {
 	return proxy.Table{"": a}.Equal(proxy.Table{"": b})
 }
 
-// execute carries out plan's steps, in order: stop what is surplus (and the
-// process an upgrade replaces), check the port, replace an outdated copy,
+// execute carries out plan's steps, in order: stop what is to stop (surplus
+// copies, drained ones, the process an upgrade replaces), check the port,
 // start the rest. st is the state the plan was made from; it is saved as it
 // changes.
 func execute(spec manifest.AppSpec, st *state.State, plan reconcile.Plan) error {
@@ -392,7 +410,7 @@ func execute(spec manifest.AppSpec, st *state.State, plan reconcile.Plan) error 
 		}
 	}
 
-	if err := stopSurplus(spec, st, stops); err != nil {
+	if err := stopCopies(spec, st, stops); err != nil {
 		return err
 	}
 	if len(starts) == 0 {
@@ -407,8 +425,7 @@ func execute(spec manifest.AppSpec, st *state.State, plan reconcile.Plan) error 
 	// that's correctly, already running on its own port. claimPort also knows
 	// which ports the load balancer itself holds, which a bind check would
 	// trip over. It comes before any internal port is chosen so that a
-	// refused port leaves the app out of the load balancer's settings, and
-	// before an outdated copy is stopped so that the app keeps serving. Not
+	// refused port leaves the app out of the load balancer's settings. Not
 	// being able to start is not a crash: nothing new ran, so none is
 	// recorded.
 	if err := claimPort(spec); err != nil {
@@ -417,11 +434,6 @@ func execute(spec manifest.AppSpec, st *state.State, plan reconcile.Plan) error 
 	}
 
 	for _, step := range starts {
-		if step.Replace {
-			if err := replaceCopy(spec, st, step); err != nil {
-				return err
-			}
-		}
 		if err := launchCopy(spec, st, step.Copy); err != nil {
 			return err
 		}
@@ -430,13 +442,14 @@ func execute(spec manifest.AppSpec, st *state.State, plan reconcile.Plan) error 
 	return nil
 }
 
-// stopSurplus stops the processes of the stop steps in parallel and drops
-// their records: the copies a smaller manifest no longer wants, and the
-// process of an app from before the load balancer, which holds the app's own
-// port. Stop re-checks identity before each signal, so a PID that changed
-// hands since the observation is left alone. A copy that fails to stop keeps
-// its record; the others are removed.
-func stopSurplus(spec manifest.AppSpec, st *state.State, stops []reconcile.Step) error {
+// stopCopies stops the processes of the stop steps in parallel and drops
+// their records: copies that are surplus, drained, timed out or that must not
+// drain, and the process of an app from before the load balancer, which holds
+// the app's own port. A step without a process only drops the record. Stop
+// re-checks identity before each signal, so a PID that changed hands since the
+// observation is left alone. A copy that fails to stop keeps its record; the
+// others are removed.
+func stopCopies(spec manifest.AppSpec, st *state.State, stops []reconcile.Step) error {
 	if len(stops) == 0 {
 		return nil
 	}
@@ -448,11 +461,7 @@ func stopSurplus(spec manifest.AppSpec, st *state.State, stops []reconcile.Step)
 		if step.PID == 0 {
 			continue // no process: only the record goes
 		}
-		if step.Copy == 0 {
-			log.Printf("reconcile: %q: moving behind the load balancer: stopping the previous instance (pid %d), which holds port %d itself", spec.AppName, rec.PID, rec.Port)
-		} else {
-			log.Printf("reconcile: %q: stopping copy %d (pid %d): fewer copies wanted", spec.AppName, step.Copy, rec.PID)
-		}
+		logStop(spec, step, rec)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -478,30 +487,30 @@ func stopSurplus(spec manifest.AppSpec, st *state.State, stops []reconcile.Step)
 	return first
 }
 
-// replaceCopy stops the running process of an outdated copy and clears its
-// record down to the crash history and the internal port, so the replacement
-// takes the port over: the load balancer already points there and the restart
-// needs no reload. Any failure to start is recorded on this cleared record,
-// and the stopped process's exit-watcher sees a PID that isn't its own and
-// stays quiet. A failed Stop records no crash: nothing new ran.
-func replaceCopy(spec manifest.AppSpec, st *state.State, step reconcile.Step) error {
-	rec, ok := st.Copy(step.Copy)
-	if !ok {
-		return nil
-	}
-	switch {
-	case len(step.Changed) > 0:
-		log.Printf("reconcile: %q: restarting copy %d (pid %d) (manifest changed: %s)", spec.AppName, step.Copy, rec.PID, strings.Join(step.Changed, ", "))
+// logStop writes the line for one stop of a process, by the reason.
+func logStop(spec manifest.AppSpec, step reconcile.Step, rec state.AppState) {
+	switch step.Why {
+	case reconcile.StopUpgrade:
+		log.Printf("reconcile: %q: moving behind the load balancer: stopping the previous instance (pid %d), which holds port %d itself", spec.AppName, rec.PID, rec.Port)
+	case reconcile.StopOutdated:
+		log.Printf("reconcile: %q: stopping copy %d (pid %d): it runs a previous version and is not ready", spec.AppName, step.Copy, rec.PID)
+	case reconcile.StopIdle:
+		log.Printf("reconcile: %q: stopping copy %d (pid %d): the new version has taken over and it has no visitors", spec.AppName, step.Copy, rec.PID)
+	case reconcile.StopDrained:
+		log.Printf("reconcile: %q: stopping copy %d (pid %d): it has drained", spec.AppName, step.Copy, rec.PID)
+	case reconcile.StopTimeout:
+		msg := fmt.Sprintf("reconcile: %q: stopping copy %d (pid %d): drain-timeout passed", spec.AppName, step.Copy, rec.PID)
+		if step.Sessions > 0 {
+			msg += fmt.Sprintf(" with %d session(s) open", step.Sessions)
+		}
+		log.Print(msg)
+	case reconcile.StopNoDrain:
+		log.Printf("reconcile: %q: stopping copy %d (pid %d) without draining", spec.AppName, step.Copy, rec.PID)
+	case reconcile.StopTooMany:
+		log.Printf("reconcile: %q: stopping copy %d (pid %d): more copies with visitors are draining than the app runs", spec.AppName, step.Copy, rec.PID)
 	default:
-		log.Printf("reconcile: %q: restarting copy %d (pid %d) for a restart", spec.AppName, step.Copy, rec.PID)
+		log.Printf("reconcile: %q: stopping copy %d (pid %d): fewer copies wanted", spec.AppName, step.Copy, rec.PID)
 	}
-	if _, err := process.Stop(rec, identityFallbacks(spec)...); err != nil {
-		return fmt.Errorf("stopping the previous instance of %q (copy %d, pid %d): %w", spec.AppName, step.Copy, rec.PID, err)
-	}
-	forgetSeen(spec.AppStateFile, step.Copy)
-
-	st.Put(state.AppState{Copy: rec.Copy, Port: rec.Port, CrashCount: rec.CrashCount, LastExitAt: rec.LastExitAt, LastExitFailed: rec.LastExitFailed})
-	return state.Save(spec.AppStateFile, *st)
 }
 
 // launchCopy launches copy n of spec's app at the state's revision and

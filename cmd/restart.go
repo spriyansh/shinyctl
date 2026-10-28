@@ -16,7 +16,7 @@ var restartManifestFile string
 
 var restartCmd = &cobra.Command{
 	Use:   "restart",
-	Short: "Stop an app's processes and start them again from the manifest as it is now",
+	Short: "Start an app's copies again from the manifest as it is now, without cutting off visitors",
 
 	RunE: func(cmd *cobra.Command, args []string) error {
 		spec, err := manifest.Load(restartManifestFile)

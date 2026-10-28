@@ -192,15 +192,16 @@ func TestAliveAll(t *testing.T) {
 	one := sleepWithArg(t, "port=20001,")
 	two := sleepWithArg(t, "port=20002,")
 
+	started := time.Now().Add(-time.Minute) // not fresh: see freshWindow
 	spec := manifest.AppSpec{EntrypointFile: "sleep"}
 	recs := []state.AppState{
-		{PID: one, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20001, Copy: 1},
-		{PID: two, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20002, Copy: 2},
-		{PID: one, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20002, Copy: 3}, // another copy's pid
-		{PID: 999999999, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20004, Copy: 4},
+		{PID: one, StartedAt: started, EntrypointFile: "sleep", Port: 20001, Copy: 1},
+		{PID: two, StartedAt: started, EntrypointFile: "sleep", Port: 20002, Copy: 2},
+		{PID: one, StartedAt: started, EntrypointFile: "sleep", Port: 20002, Copy: 3}, // another copy's pid
+		{PID: 999999999, StartedAt: started, EntrypointFile: "sleep", Port: 20004, Copy: 4},
 		{Copy: 5}, // never started
-		{PID: two, StartedAt: time.Now(), Port: 20002, Copy: 6},                            // no recorded entrypoint: the spec's
-		{PID: two, StartedAt: time.Now(), EntrypointFile: "other.R", Port: 20002, Copy: 7}, // not this app
+		{PID: two, StartedAt: started, Port: 20002, Copy: 6},                            // no recorded entrypoint: the spec's
+		{PID: two, StartedAt: started, EntrypointFile: "other.R", Port: 20002, Copy: 7}, // not this app
 	}
 	want := []bool{true, true, false, false, false, true, false}
 
@@ -602,5 +603,49 @@ func TestIdentity_RightAfterStart(t *testing.T) {
 	}
 	if notOurs+aliveAllNo+batchMissing > 0 {
 		t.Errorf("of %d starts: isOurs/IsAlive wrong %d, AliveAll wrong %d, batch missing %d", n, notOurs, aliveAllNo, batchMissing)
+	}
+}
+
+// A process that has only just started can be read by ps in the middle of
+// replacing its image: what it prints is not yet its command line. A fresh
+// record is read again a few times before it is called someone else's; an old
+// one is not.
+func TestIdentity_AFreshRecordIsReadAgainWhenPsCatchesItMidExec(t *testing.T) {
+	origProc, origPs := procDir, psRun
+	t.Cleanup(func() { procDir, psRun = origProc, origPs })
+	procDir = t.TempDir() + "/none" // command lines come from ps here, as on macOS
+
+	pid := sleepWithArg(t, "port=20001,")
+	rec := state.AppState{PID: pid, StartedAt: time.Now(), EntrypointFile: "sleep", Port: 20001, Copy: 1}
+	spec := manifest.AppSpec{EntrypointFile: "sleep"}
+
+	calls := 0
+	psRun = func(args ...string) ([]byte, error) {
+		calls++
+		if calls <= 2 {
+			return []byte("/some/other/image --still-starting\n"), nil // caught mid-exec
+		}
+		return origPs(args...)
+	}
+	if !isOurs(rec, "sleep") {
+		t.Error("isOurs: a fresh record caught mid-exec was called someone else's")
+	}
+	calls = 0
+	if got := AliveAll(spec, []state.AppState{rec}); !got[0] {
+		t.Errorf("AliveAll: a fresh record caught mid-exec was called dead (%d ps calls)", calls)
+	}
+
+	// The same misreading of an old record, or of a PID that is a stranger's,
+	// is answered at once, with one look.
+	old := rec
+	old.StartedAt = time.Now().Add(-time.Minute)
+	calls = 0
+	psRun = func(args ...string) ([]byte, error) { calls++; return []byte("/some/other/image\n"), nil }
+	if isOurs(old, "sleep") || calls != 1 {
+		t.Errorf("an old record: isOurs answered with %d ps calls, want false after one", calls)
+	}
+	calls = 0
+	if isOurs(rec, "sleep") || calls != freshTries+1 {
+		t.Errorf("a fresh record that never matches: %d ps calls, want %d and false", calls, freshTries+1)
 	}
 }

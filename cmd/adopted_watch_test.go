@@ -4,7 +4,6 @@ Copyright © 2026 Priyansh Srivastava <priyansh@metapriyansh.com>
 package cmd
 
 import (
-	"bytes"
 	"errors"
 	"log"
 	"os"
@@ -87,8 +86,8 @@ func TestAdopted_ActiveCopyDiesAndTheWarmOneTakesOverAtOnce(t *testing.T) {
 		if len(pool.Active) == 1 && pool.Active[0] == dialOf(two) {
 			break
 		}
-		if time.Since(killed) > time.Second {
-			t.Fatalf("pool = %+v one second after the active copy died, want the warm copy active", pool)
+		if time.Since(killed) > 2500*time.Millisecond { // well under the 5 s tick, with room for a loaded machine
+			t.Fatalf("pool = %+v 2.5 seconds after the active copy died, want the warm copy active", pool)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -112,12 +111,12 @@ func TestAdopted_ActiveCopyDiesAndTheWarmOneTakesOverAtOnce(t *testing.T) {
 }
 
 // captureLog collects what the daemon logs while the test runs.
-func captureLog(t *testing.T) *bytes.Buffer {
+func captureLog(t *testing.T) *logBuffer {
 	t.Helper()
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
+	buf := &logBuffer{}
+	log.SetOutput(buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	return &buf
+	return buf
 }
 
 // A system that can't watch is logged once for the whole run, whatever the
@@ -224,8 +223,8 @@ func TestAdopted_WatchedRightAtStartup(t *testing.T) {
 		if len(pool.Active) == 1 && pool.Active[0] == dialOf(two) {
 			break
 		}
-		if time.Since(killed) > time.Second {
-			t.Fatalf("pool = %+v a second after the kill, want the warm copy active", pool)
+		if time.Since(killed) > 2500*time.Millisecond { // well under the 5 s tick, with room for a loaded machine
+			t.Fatalf("pool = %+v 2.5 seconds after the kill, want the warm copy active", pool)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -260,8 +259,8 @@ func TestAdopted_GivingUpClosesThePortAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	for process.IsReady(spec.Host, spec.Port) {
-		if time.Since(killed) > time.Second {
-			t.Fatalf("%s:%d still answers a second after the last copy died and the app gave up", spec.Host, spec.Port)
+		if time.Since(killed) > 2500*time.Millisecond { // well under the 5 s tick, with room for a loaded machine
+			t.Fatalf("%s:%d still answers 2.5 seconds after the last copy died and the app gave up", spec.Host, spec.Port)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

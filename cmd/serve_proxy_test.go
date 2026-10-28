@@ -177,6 +177,12 @@ func (l *logBuffer) String() string {
 	return l.b.String()
 }
 
+func (l *logBuffer) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Len()
+}
+
 func TestCopyPort_WaitsForTheRecordedPort(t *testing.T) {
 	spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
 	recorded := freeInternalPort(t)

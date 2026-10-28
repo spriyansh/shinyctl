@@ -15,7 +15,11 @@ import (
 // handleApply is the server side of `shinyctl apply`: the CLI only loads,
 // validates and POSTs the manifest, then prints the response — the
 // decide-and-act work happens here, in the one process that owns
-// state.json.
+// state.json. A manifest change that shapes the process (env, working-dir,
+// app-group, app-name, entrypoint-file) is a redeploy, as restart is: new
+// copies start next to the running ones, which drain once the new ones are
+// ready; a change to replicas or warm-replicas starts copies, or drains the
+// ones it removes; the other fields take effect without touching a process.
 //
 // It also records spec in appRegistry, so the background reconcile loop
 // has something to check on its own even when no client is asking. The

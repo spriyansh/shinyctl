@@ -52,7 +52,7 @@ func decide(spec manifest.AppSpec, current state.State, alive bool, now time.Tim
 	for _, app := range current.Apps {
 		views = append(views, CopyView{App: app, Alive: alive, Ready: alive})
 	}
-	return DecideCopies(spec, current.Revision, views, now)
+	return DecideCopies(spec, Input{Revision: current.Revision, Copies: views, Now: now, Settle: DrainSettle})
 }
 
 func TestDecideOneCopy(t *testing.T) {
@@ -215,13 +215,13 @@ func TestDecideOneCopy_UpgradeFlag(t *testing.T) {
 	spec := manifest.AppSpec{AppName: "a", Port: 8881}
 	old := state.State{Apps: []state.AppState{{Name: "a", Port: 8881, PID: 7}}}
 	got := decide(spec, old, true, time.Now())
-	if want := []string{"stop 0 pid=7", "start 1 upgrade"}; !reflect.DeepEqual(show(got.Steps), want) {
+	if want := []string{"stop 0 pid=7 upgrade", "start 1 upgrade"}; !reflect.DeepEqual(show(got.Steps), want) {
 		t.Errorf("alive record without a copy: steps %q, want %q", show(got.Steps), want)
 	}
 
 	current := state.State{Apps: []state.AppState{{Name: "b", Copy: 1, Port: 20000, PID: 8}}}
 	got = decide(spec, current, true, time.Now())
-	if want := []string{"start 1 pid=8 replace changed=[app-name]"}; !reflect.DeepEqual(show(got.Steps), want) {
+	if want := []string{"start 2"}; !reflect.DeepEqual(show(got.Steps), want) {
 		t.Errorf("alive copy with a changed name: steps %q, want %q", show(got.Steps), want)
 	}
 
@@ -238,8 +238,8 @@ func TestDecideOneCopy_ReportsChangedFields(t *testing.T) {
 	current := state.State{Apps: []state.AppState{rec}}
 
 	got := decide(spec, current, true, time.Now())
-	if want := []string{"start 1 pid=9 replace changed=[env]"}; !reflect.DeepEqual(show(got.Steps), want) {
-		t.Errorf("steps %q, want %q", show(got.Steps), want)
+	if want := []string{"start 2"}; !reflect.DeepEqual(show(got.Steps), want) || !reflect.DeepEqual(got.Changed, []string{"env"}) || !reflect.DeepEqual(got.Outdated, []int{1}) {
+		t.Errorf("steps %q changed %v outdated %v, want %q, [env], [1]", show(got.Steps), got.Changed, got.Outdated, want)
 	}
 }
 

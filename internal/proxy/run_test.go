@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -246,12 +249,14 @@ func TestWithOwnSettings(t *testing.T) {
 }
 
 // TestRun_ReadsCopiesFile: a proxy that starts on its own serves from
-// copies.json at once, with no push from shinyctl-api.
+// copies.json at once, with no push from shinyctl-api, and knows which copies
+// are draining: a visitor pinned to one keeps it, a new one never gets it.
 func TestRun_ReadsCopiesFile(t *testing.T) {
 	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "up") }))
+	draining := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "draining") }))
 	app := plainApp("a", freePort(t))
 	home, _, s := proxyHome(t, app)
-	copies, _ := json.Marshal(Table{"a": {Active: []string{up}}})
+	copies, _ := json.Marshal(Table{"a": {Active: []string{up}, Draining: []string{draining}}})
 	if err := os.WriteFile(s.CopiesPath, copies, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -262,8 +267,23 @@ func TestRun_ReadsCopiesFile(t *testing.T) {
 	if status, body, _ := get(t, appURL(app)); status != 200 || body != "up" {
 		t.Errorf("response = %d %q, want 200 up", status, body)
 	}
-	if got, err := (Admin{Socket: s.AdminSocket}).Copies(); err != nil || len(got["a"].Active) != 1 {
+	if got, err := (Admin{Socket: s.AdminSocket}).Copies(); err != nil || len(got["a"].Active) != 1 || len(got["a"].Draining) != 1 {
 		t.Errorf("the table = %v, %v", got, err)
+	}
+
+	// The cookie of the draining copy keeps its visitor on it.
+	mac := hmac.New(sha256.New, []byte(s.Secret))
+	io.WriteString(mac, draining)
+	req, _ := http.NewRequest("GET", appURL(app), nil)
+	req.AddCookie(&http.Cookie{Name: CookieName(app.Port), Value: hex.EncodeToString(mac.Sum(nil))})
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "draining" {
+		t.Errorf("a visitor pinned to the draining copy got %q, want it kept there", body)
 	}
 }
 

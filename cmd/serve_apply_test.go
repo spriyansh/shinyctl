@@ -24,9 +24,9 @@ import (
 )
 
 // TestHandleApply_ReplacesPreviousInstance: a re-apply that changes the app
-// name or the entrypoint starts a new process, and the recorded one must be
-// stopped first. Otherwise it keeps serving while state.json forgets it, so
-// status can't see it and delete can't stop it.
+// name or the entrypoint starts a new copy next to the recorded one, which
+// drains and stops. It stays in state.json until it does, so status sees it
+// and delete stops it.
 func TestHandleApply_ReplacesPreviousInstance(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -62,6 +62,7 @@ func TestHandleApply_ReplacesPreviousInstance(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			useFakeRscript(t)
+			settleNow(t)
 			dir := t.TempDir()
 			ports := freePorts(t, 2)
 			spec1 := newTestSpec(t, dir, "app", "app.R", ports[0])
@@ -89,22 +90,19 @@ func TestHandleApply_ReplacesPreviousInstance(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("apply: status = %d, body = %s", rec.Code, rec.Body.String())
 			}
-			if process.IsAlive(spec1, a) {
-				t.Fatalf("previous instance (pid %d) is still running after re-apply", a.PID)
-			}
 
-			b := loadApp(t, spec2)
-			if b.PID <= 0 || b.PID == a.PID {
-				t.Fatalf("recorded pid = %d, want a new process (old %d)", b.PID, a.PID)
+			// The old copy is not stopped by the apply: it drains once the
+			// new one is ready and stops when it has no visitors.
+			waitStopped(t, spec1, a)
+			b := newestApp(t, spec2)
+			if b.PID <= 0 || b.PID == a.PID || b.Copy == a.Copy {
+				t.Fatalf("recorded app = %+v, want a new copy (old %d)", b, a.PID)
 			}
-			if b.Name != spec2.AppName || b.Copy != 1 {
-				t.Errorf("recorded %q as copy %d, want %q as copy 1", b.Name, b.Copy, spec2.AppName)
+			if b.Name != spec2.AppName {
+				t.Errorf("recorded %q, want %q", b.Name, spec2.AppName)
 			}
 			if b.Port < manifest.InternalPortMin || b.Port > manifest.InternalPortMax {
 				t.Errorf("recorded port = %d, want an internal one", b.Port)
-			}
-			if b.Port != a.Port {
-				t.Errorf("internal port = %d, want the previous %d reused: a new one would reload the load balancer", b.Port, a.Port)
 			}
 			if !process.IsAlive(spec2, b) {
 				t.Errorf("new instance (pid %d) is not alive", b.PID)
@@ -212,8 +210,8 @@ func TestHandleApply_StoppedAppOntoTakenPort(t *testing.T) {
 }
 
 // TestHandleApply_RestartsOnManifestChange: a re-apply that changes a field
-// shaping the process replaces the running one, even when the port and name
-// stay the same.
+// shaping the process starts a new copy, even when the port and name stay the
+// same; the running one drains.
 func TestHandleApply_RestartsOnManifestChange(t *testing.T) {
 	cases := []struct {
 		field  string
@@ -239,6 +237,7 @@ func TestHandleApply_RestartsOnManifestChange(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.field, func(t *testing.T) {
 			useFakeRscript(t)
+			settleNow(t)
 			dir := t.TempDir()
 			spec1 := newTestSpec(t, dir, "app", "app.R", freePorts(t, 1)[0])
 
@@ -257,23 +256,24 @@ func TestHandleApply_RestartsOnManifestChange(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("apply: status = %d, body = %s", rec.Code, rec.Body.String())
 			}
-			if process.IsAlive(spec1, a) {
-				t.Fatalf("previous instance (pid %d) is still running after the apply", a.PID)
+			msg := responseMessage(t, rec)
+			if want := "manifest changed: " + c.field + "):"; !strings.Contains(msg, want) {
+				t.Errorf("message %q does not contain %q", msg, want)
+			}
+			if want := "starting copy 2;"; !strings.Contains(msg, want) {
+				t.Errorf("message %q does not contain %q", msg, want)
+			}
+			if !strings.Contains(msg, "copy 1 keeps serving until the new one is ready") {
+				t.Errorf("message %q does not say the old copy keeps serving", msg)
 			}
 
-			b = loadApp(t, spec2)
+			waitStopped(t, spec1, a)
+			b = newestApp(t, spec2)
 			if b.PID <= 0 || b.PID == a.PID {
 				t.Fatalf("recorded pid = %d, want a new process (old %d)", b.PID, a.PID)
 			}
 			if !reflect.DeepEqual(b.StartedFrom, spec2.StartFields()) {
 				t.Errorf("StartedFrom = %v, want %v", b.StartedFrom, spec2.StartFields())
-			}
-			msg := responseMessage(t, rec)
-			if want := "manifest changed: " + c.field + ";"; !strings.Contains(msg, want) {
-				t.Errorf("message %q does not contain %q", msg, want)
-			}
-			if want := fmt.Sprintf("stopped the previous instance: pid %d", a.PID); !strings.Contains(msg, want) {
-				t.Errorf("message %q does not contain %q", msg, want)
 			}
 			waitServed(t, spec2, b.PID)
 			assertNoExitRecorded(t, spec2, b.PID)
@@ -407,12 +407,11 @@ func TestTriggerReconcile_ConvergesToRegistrySpec(t *testing.T) {
 	if err := appRegistry.Remember(spec2); err != nil {
 		t.Fatal(err)
 	}
+	settleNow(t)
 	triggerReconcile(spec1.AppStateFile)
 
-	if process.IsAlive(spec1, a) {
-		t.Fatalf("previous instance (pid %d) is still running after the tick", a.PID)
-	}
-	b = loadApp(t, spec2)
+	waitStopped(t, spec1, a)
+	b = newestApp(t, spec2)
 	if b.PID <= 0 || b.PID == a.PID || !reflect.DeepEqual(b.StartedFrom, spec2.StartFields()) {
 		t.Fatalf("recorded app = %+v, want a new process started from spec2", b)
 	}
@@ -612,49 +611,6 @@ func TestHandleApply_ConcurrentAppsGetDistinctPorts(t *testing.T) {
 		seen[apps[i].Port] = i
 		waitServed(t, spec, apps[i].PID)
 	}
-}
-
-// TestHandleApply_ReplacementKeepsInternalPort: a re-apply that replaces the
-// process reuses its internal port, so the load balancer already points at
-// the replacement and needs no reload. The port is far from the lowest free
-// one, which a fresh pick would choose.
-func TestHandleApply_ReplacementKeepsInternalPort(t *testing.T) {
-	useFakeRscript(t)
-	spec1 := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
-	var a, b state.AppState
-	spec2 := spec1
-	spec2.Env = map[string]string{"GREETING": "again"}
-	t.Cleanup(func() {
-		postJSON(t, handleDelete, spec1)
-		killIfAlive(spec1, a)
-		killIfAlive(spec2, b)
-	})
-
-	high := freeInternalPort(t)
-	if err := appRegistry.Remember(spec1); err != nil {
-		t.Fatal(err)
-	}
-	var err error
-	a, _, err = process.Start(spec1, 1, high, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := state.Save(spec1.AppStateFile, state.State{AppGroup: spec1.AppGroup, Apps: []state.AppState{a}}); err != nil {
-		t.Fatal(err)
-	}
-	waitReady(t, process.InternalHost, high)
-	if err := syncProxy(spec1.AppStateFile); err != nil {
-		t.Fatal(err)
-	}
-
-	if rec := postJSON(t, handleApply, spec2); rec.Code != http.StatusOK {
-		t.Fatalf("apply: status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	b = loadApp(t, spec2)
-	if b.PID == a.PID || b.Port != high {
-		t.Errorf("recorded app = %+v, want a new process on the internal port %d", b, high)
-	}
-	waitServed(t, spec2, b.PID)
 }
 
 // A control character in a path is refused by an apply, with its own message

@@ -2,8 +2,10 @@ package process
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
 	"github.com/spriyansh/shinyctl/internal/state"
@@ -65,8 +67,40 @@ func isOurs(app state.AppState, fallbacks ...string) bool {
 	if !pidRunning(app) {
 		return false
 	}
-	line, ok := commandLine(app.PID)
-	return ok && matches(app, line, fallbacks...)
+	for try := 0; ; try++ {
+		line, ok := commandLine(app.PID)
+		if ok && matches(app, line, fallbacks...) {
+			return true
+		}
+		if try >= freshTries || !fresh(app) {
+			return false
+		}
+		time.Sleep(freshEvery)
+	}
+}
+
+// A process that has only just started can be caught by ps while its image is
+// being replaced (Rscript becomes R, which becomes its binary), when what it
+// prints is not yet the command line: seen once in several thousand starts on
+// macOS. /proc has no such window (an empty read is waited for, see
+// procLook). So a record started within freshWindow whose command line doesn't
+// match is read again a few times before it is called someone else's. A record
+// of a process that has long been running, or a PID that now belongs to a
+// stranger, costs nothing extra.
+const (
+	freshWindow = 5 * time.Second
+	freshTries  = 3
+	freshEvery  = 10 * time.Millisecond
+)
+
+// fresh says app was started within freshWindow and its command line is read
+// with ps.
+func fresh(app state.AppState) bool {
+	if app.StartedAt.IsZero() || time.Since(app.StartedAt) > freshWindow {
+		return false
+	}
+	_, err := os.Stat(procDir + "/self")
+	return err != nil
 }
 
 // matches reports whether line, the command line of the process at app's
@@ -114,6 +148,9 @@ func AliveAll(spec manifest.AppSpec, apps []state.AppState) []bool {
 		}
 		line, ok := lines[app.PID]
 		alive[i] = ok && matches(app, line, spec.EntrypointFile)
+		if !alive[i] && fresh(app) {
+			alive[i] = isOurs(app, spec.EntrypointFile)
+		}
 	}
 	return alive
 }

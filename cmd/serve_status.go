@@ -79,6 +79,8 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 				copy.Role = "active"
 			case slices.Contains(pool.Warm, dial):
 				copy.Role = "warm"
+			case slices.Contains(pool.Draining, dial):
+				copy.Role = "draining"
 			}
 
 			if alive[i] {
@@ -99,6 +101,10 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 				} else {
 					copy.Ready = process.IsReady(spec.EffectiveHost(), rec.Port)
 				}
+			}
+			copy.SkipDrain = rec.SkipDrain
+			if alive[i] && !rec.DrainingSince.IsZero() {
+				copy.DrainEndsAt = rec.DrainingSince.Add(spec.EffectiveDrainTimeout())
 			}
 			copy.GaveUp = !alive[i] && reconcile.GaveUp(spec, rec)
 			changed, restart := reconcile.Outdated(spec, currentState.Revision, rec)

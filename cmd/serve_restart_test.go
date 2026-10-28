@@ -41,13 +41,14 @@ func restartResponse(t *testing.T, spec manifest.AppSpec) api.ApplyResponse {
 	return decodeApplyResponse(t, rec)
 }
 
-// TestHandleRestart_RestartsRunningApp: restart replaces a running app's
-// process with one started from the manifest as it is now, which a
-// re-apply does not do when the port and name are unchanged.
+// TestHandleRestart_RestartsRunningApp: restart starts a new copy from the
+// manifest as it is now, which a re-apply does not do when the port and name
+// are unchanged; the old copy drains and stops.
 func TestHandleRestart_RestartsRunningApp(t *testing.T) {
 	cases := []struct {
 		name    string
-		adopted bool // first instance left behind by a previous daemon: no exit-watcher
+		adopted bool   // first instance left behind by a previous daemon: no exit-watcher
+		changes string // the fields the reply says changed
 		change  func(t *testing.T, old manifest.AppSpec, dir string, newPort int) manifest.AppSpec
 	}{
 		{
@@ -55,7 +56,8 @@ func TestHandleRestart_RestartsRunningApp(t *testing.T) {
 			change: func(t *testing.T, old manifest.AppSpec, dir string, p int) manifest.AppSpec { return old },
 		},
 		{
-			name: "entrypoint-file and env change on the same port",
+			name:    "entrypoint-file and env change on the same port",
+			changes: "entrypoint-file, env",
 			change: func(t *testing.T, old manifest.AppSpec, dir string, p int) manifest.AppSpec {
 				s := newTestSpec(t, dir, old.AppName, "other.R", old.Port)
 				s.Env = map[string]string{"GREETING": "again"}
@@ -79,6 +81,7 @@ func TestHandleRestart_RestartsRunningApp(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			useFakeRscript(t)
+			settleNow(t)
 			dir := t.TempDir()
 			ports := freePorts(t, 2)
 			spec1 := newTestSpec(t, dir, "app", "app.R", ports[0])
@@ -103,31 +106,28 @@ func TestHandleRestart_RestartsRunningApp(t *testing.T) {
 			if resp.Action != reconcile.ActionRestart {
 				t.Errorf("action = %q, want %q", resp.Action, reconcile.ActionRestart)
 			}
-			if process.IsAlive(spec1, a) {
-				t.Fatalf("previous instance (pid %d) is still running after restart", a.PID)
+			changed := ""
+			if c.changes != "" {
+				changed = " (manifest changed: " + c.changes + ")"
+			}
+			if want := fmt.Sprintf("Restarting app %q%s: starting copy 2; copy 1 keeps serving until the new one is ready, then drains for up to 15m", spec2.AppName, changed); resp.Message != want {
+				t.Errorf("message = %q, want %q", resp.Message, want)
 			}
 
-			b = loadApp(t, spec2)
-			if b.PID <= 0 || b.PID == a.PID {
-				t.Fatalf("recorded pid = %d, want a new process (old %d)", b.PID, a.PID)
+			// The old copy serves until the new one is ready, then drains and,
+			// with no visitors, stops.
+			waitStopped(t, spec1, a)
+			b = newestApp(t, spec2)
+			if b.PID <= 0 || b.PID == a.PID || b.Copy == a.Copy {
+				t.Fatalf("recorded app = %+v, want a new copy (old %d)", b, a.PID)
 			}
-			if b.EntrypointFile != spec2.EntrypointFile || b.Copy != 1 {
-				t.Errorf("recorded %q as copy %d, want %q as copy 1", b.EntrypointFile, b.Copy, spec2.EntrypointFile)
-			}
-			if b.Port != a.Port {
-				t.Errorf("internal port = %d, want the previous %d reused", b.Port, a.Port)
+			if b.EntrypointFile != spec2.EntrypointFile {
+				t.Errorf("recorded %q, want %q", b.EntrypointFile, spec2.EntrypointFile)
 			}
 			if !process.IsAlive(spec2, b) {
 				t.Errorf("new instance (pid %d) is not alive", b.PID)
 			}
 			waitServed(t, spec2, b.PID)
-
-			if want := fmt.Sprintf("pid %d", a.PID); !strings.Contains(resp.Message, want) {
-				t.Errorf("message %q does not name %q", resp.Message, want)
-			}
-			if strings.Contains(resp.Message, "not signaled") {
-				t.Errorf("message %q reports nothing was signaled", resp.Message)
-			}
 
 			applied, ok := appRegistry.Spec(spec2.AppStateFile)
 			if !ok || applied.EntrypointFile != spec2.EntrypointFile || applied.Port != spec2.Port || applied.Env["GREETING"] != spec2.Env["GREETING"] {

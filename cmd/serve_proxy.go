@@ -40,6 +40,10 @@ type hooks struct {
 	PortEvery      time.Duration
 	StartDelay     time.Duration // slept before each process is started
 
+	// DrainSettle is reconcile.DrainSettle: how long a draining copy is kept
+	// at least. Zero means the real one.
+	DrainSettle time.Duration
+
 	// Whether a copy accepts connections: the ready-watcher's probe and the
 	// reconcile's own are separate so that a test can make one of them miss.
 	WatchProbe   func(host string, port int) bool
@@ -47,6 +51,10 @@ type hooks struct {
 
 	// WatchExit is process.WatchExit.
 	WatchExit func(spec manifest.AppSpec, app state.AppState) (<-chan struct{}, error)
+
+	// Sessions is what the load balancer says about its open requests per
+	// copy: nil when it can't say (gateway.Sessions).
+	Sessions func() map[string]int
 
 	// Signal0 is kill(pid, 0), the ready-watcher's "is it still there".
 	Signal0 func(pid int) error
@@ -64,7 +72,9 @@ func currentHooks() hooks {
 		WatchProbe:     process.IsReady,
 		ObserveProbe:   process.IsReady,
 		WatchExit:      process.WatchExit,
+		Sessions:       func() map[string]int { return gateway.Sessions() },
 		Signal0:        func(pid int) error { return syscall.Kill(pid, 0) },
+		DrainSettle:    reconcile.DrainSettle,
 	}
 	if o := activeHooks.Load(); o != nil {
 		if o.Served != nil {
@@ -83,11 +93,17 @@ func currentHooks() hooks {
 			h.PortEvery = o.PortEvery
 		}
 		h.StartDelay = o.StartDelay
+		if o.DrainSettle != 0 {
+			h.DrainSettle = o.DrainSettle
+		}
 		if o.WatchProbe != nil {
 			h.WatchProbe = o.WatchProbe
 		}
 		if o.ObserveProbe != nil {
 			h.ObserveProbe = o.ObserveProbe
+		}
+		if o.Sessions != nil {
+			h.Sessions = o.Sessions
 		}
 		if o.WatchExit != nil {
 			h.WatchExit = o.WatchExit
@@ -226,8 +242,8 @@ func refreshPools() {
 			continue
 		}
 		views, _ := observe(spec, &st, observeReadOnly)
-		active, warm := reconcile.Roles(spec, views)
-		table[spec.AppStateFile] = poolOf(reconcile.Plan{Active: active, Warm: warm}, st)
+		active, warm, draining := reconcile.Roles(spec, reconcile.Input{Revision: st.Revision, Copies: views, Now: time.Now(), Settle: currentHooks().DrainSettle})
+		table[spec.AppStateFile] = poolOf(reconcile.Plan{Active: active, Warm: warm, Draining: draining}, st)
 	}
 	gateway.ReplacePools(table, since)
 }

@@ -119,14 +119,17 @@ func TestRecordExit_IgnoresReplacedProcess(t *testing.T) {
 		postJSON(t, handleDelete, spec2)
 		killIfAlive(spec1, a)
 	})
+	settleNow(t)
 	a = applyOK(t, spec1)
 	waitServed(t, spec1, a.PID)
-	b := applyOK(t, spec2)
+	applyOK(t, spec2)
+	waitStopped(t, spec1, a)
+	b := newestApp(t, spec2)
 
-	if recordExit(spec1, 1, a.PID, process.Exit{At: time.Now(), Failed: true}) {
+	if recordExit(spec1, a.Copy, a.PID, process.Exit{At: time.Now(), Failed: true}) {
 		t.Error("recordExit() = true for a replaced process, want false")
 	}
-	got := loadApp(t, spec2)
+	got := newestApp(t, spec2)
 	if got.PID != b.PID || got.CrashCount != 0 || !got.LastExitAt.IsZero() || got.LastExitFailed {
 		t.Errorf("state changed: %+v, want pid %d with no exit recorded", got, b.PID)
 	}

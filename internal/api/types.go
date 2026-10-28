@@ -22,7 +22,7 @@ type ApplyResponse struct {
 // load balancer, whether its own port accepts).
 type CopyStatus struct {
 	Copy       int       `json:"copy"`
-	Role       string    `json:"role,omitempty"` // "active", "warm", or empty when it serves nobody
+	Role       string    `json:"role,omitempty"` // "active", "warm", "draining", or empty when the load balancer doesn't list it
 	PID        int       `json:"pid"`
 	StartedAt  time.Time `json:"started-at"`
 	Alive      bool      `json:"alive"`
@@ -33,9 +33,16 @@ type CopyStatus struct {
 	// back no more (until the next apply or restart).
 	GaveUp bool `json:"gave-up,omitempty"`
 
-	// Outdated says the copy runs the previous version while a restart goes
-	// one copy at a time.
+	// Outdated says the copy runs a previous version, draining or not.
 	Outdated bool `json:"outdated,omitempty"`
+
+	// DrainEndsAt is when drain-timeout ends the copy's drain at the latest;
+	// zero when it isn't draining.
+	DrainEndsAt time.Time `json:"drain-ends-at,omitzero"`
+
+	// SkipDrain says the copy stops without draining once it is replaced
+	// (--now).
+	SkipDrain bool `json:"skip-drain,omitempty"`
 
 	// RSSBytes is the resident memory of the copy's main process; zero when
 	// it isn't running or couldn't be measured.

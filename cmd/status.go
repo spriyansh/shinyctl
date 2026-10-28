@@ -141,46 +141,45 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 		}
 	}
 	for _, app := range resp.Apps {
-		var old []int
-		for _, c := range app.Copies {
-			if c.Outdated {
-				old = append(old, c.Copy)
-			}
-		}
-		if len(old) == 0 {
-			continue
-		}
-		verb := "runs"
-		if len(old) > 1 {
-			verb = "run"
-		}
-		fmt.Fprintf(out, "\n%s: restarting one copy at a time; %s still %s the previous version\n", app.Name, reconcile.ListCopies(old), verb)
-	}
-	for _, app := range resp.Apps {
-		if note := keptOverNote(app); note != "" {
+		if note := rolloutNote(app); note != "" {
 			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
+		}
+	}
+	now := statusNow()
+	for _, app := range resp.Apps {
+		for _, note := range []string{spareNote(app), drainNote(app, now)} {
+			if note != "" {
+				fmt.Fprintf(out, "\n%s: %s.\n", app.Name, note)
+			}
 		}
 	}
 	return nil
 }
 
-// keptOverNote explains copies that run the previous version and are kept
-// above the number wanted: a restart is in progress and the copies that run
-// the new version are not ready, so the old ones go on serving. They go when
-// the new ones are ready; if a new copy is crashing or has given up, that
-// won't happen by itself, and the note says so and where to look. It is empty
-// when there is nothing of the kind.
-func keptOverNote(app api.AppStatus) string {
-	wanted := app.Replicas + app.WarmReplicas
-	if len(app.Copies) <= wanted {
-		return ""
+// statusNow is the clock of the notes; the tests replace it.
+var statusNow = time.Now
+
+func plural(list []int, one, many string) string {
+	if len(list) == 1 {
+		return one
 	}
+	return many
+}
+
+// rolloutNote explains a redeploy that has not taken over yet: copies of a
+// previous version serve (they are not draining) while the new ones are not
+// ready. If a new copy is crashing or has given up, the takeover won't come by
+// itself, and the note says so and where to look. It is empty when there is
+// nothing of the kind.
+func rolloutNote(app api.AppStatus) string {
 	var old, waiting, failing, gaveUp []int
+	allSkip := true
 	for _, c := range app.Copies {
 		switch {
-		case c.Outdated && c.Alive && c.Ready:
+		case c.Outdated && c.Alive && c.Role != "draining":
 			old = append(old, c.Copy)
-		case !c.Outdated && !(c.Alive && c.Ready):
+			allSkip = allSkip && c.SkipDrain
+		case !c.Outdated && c.Role != "draining" && !(c.Alive && c.Ready):
 			waiting = append(waiting, c.Copy)
 			switch {
 			case c.GaveUp:
@@ -194,12 +193,6 @@ func keptOverNote(app api.AppStatus) string {
 		return ""
 	}
 
-	plural := func(list []int, one, many string) string {
-		if len(list) == 1 {
-			return one
-		}
-		return many
-	}
 	if len(failing)+len(gaveUp) > 0 {
 		var why string
 		switch {
@@ -215,11 +208,105 @@ func keptOverNote(app api.AppStatus) string {
 		return fmt.Sprintf("%s %s serving the previous version: %s", reconcile.ListCopies(old), plural(old, "keeps", "keep"), why)
 	}
 
-	copies := "copies"
-	if wanted == 1 {
-		copies = "copy"
+	then := plural(old, "drains", "drain")
+	if allSkip {
+		then = plural(old, "stops", "stop")
 	}
-	return fmt.Sprintf("%s %s until %s %s ready (%d %s wanted)", reconcile.ListCopies(old), plural(old, "stays", "stay"), reconcile.ListCopies(waiting), plural(waiting, "is", "are"), wanted, copies)
+	return fmt.Sprintf("new version starting in %s; %s %s serving the previous version until it is ready, then %s",
+		reconcile.ListCopies(waiting), reconcile.ListCopies(old), plural(old, "keeps", "keep"), then)
+}
+
+// spareNote says that the app has no spare for the seconds between the new
+// version taking over and its spare being ready. It is empty otherwise.
+func spareNote(app api.AppStatus) string {
+	var starting []int
+	active, draining := false, false
+	for _, c := range app.Copies {
+		switch {
+		case c.Role == "draining" && c.Alive:
+			draining = true
+		case c.Role == "active":
+			active = true
+		case c.Alive && !c.Ready && !c.Outdated && c.Role == "":
+			starting = append(starting, c.Copy)
+		}
+	}
+	if !active || !draining || len(starting) == 0 || app.WarmReplicas == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s, the new spare, %s starting; until %s ready the app has no spare", reconcile.ListCopies(starting), plural(starting, "is", "are"), plural(starting, "it is", "they are"))
+}
+
+// drainNote says how many sessions the draining copies still hold and when
+// drain-timeout ends them at the latest. It is empty when nothing drains.
+func drainNote(app api.AppStatus, now time.Time) string {
+	var drain []int
+	sessions, known := 0, true
+	var latest time.Time
+	for _, c := range app.Copies {
+		if c.Role != "draining" || !c.Alive {
+			continue
+		}
+		drain = append(drain, c.Copy)
+		if c.Sessions == nil {
+			known = false
+		} else {
+			sessions += *c.Sessions
+		}
+		if c.DrainEndsAt.After(latest) {
+			latest = c.DrainEndsAt
+		}
+	}
+	if len(drain) == 0 {
+		return ""
+	}
+	list := reconcile.ListCopies(drain)
+	left := latest.Sub(now)
+	each := plural(drain, "it", "each")
+	switch {
+	case known && sessions == 0:
+		return fmt.Sprintf("%s %s draining with no sessions; %s within seconds", list, plural(drain, "is", "are"), plural(drain, "it stops", "they stop"))
+	case left <= 0:
+		with := ""
+		if known {
+			with = " with " + sessionsText(sessions)
+		}
+		return fmt.Sprintf("%s %s draining%s; %s within seconds", list, plural(drain, "is", "are"), with, plural(drain, "it stops", "they stop"))
+	case !known:
+		return fmt.Sprintf("%s %s draining; %s stops when its sessions end, or in %s at the latest", list, plural(drain, "is", "are"), each, formatLeft(left))
+	}
+	what := sessionsText(sessions)
+	ends := "they end"
+	if sessions == 1 {
+		ends = "it ends"
+	}
+	if len(drain) > 1 {
+		return fmt.Sprintf("%s are draining with %s; each stops when its sessions end, or in %s at the latest", list, what, formatLeft(left))
+	}
+	return fmt.Sprintf("%s is draining with %s; it stops when %s, or in %s at the latest", list, what, ends, formatLeft(left))
+}
+
+func sessionsText(n int) string {
+	if n == 1 {
+		return "1 session"
+	}
+	return fmt.Sprintf("%d sessions", n)
+}
+
+// formatLeft writes a time left for a note: seconds under a minute, minutes
+// (rounded up) under an hour, then hours and minutes.
+func formatLeft(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(math.Ceil(d.Seconds())))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(math.Ceil(d.Minutes())))
+	}
+	mins := int(math.Round(d.Minutes()))
+	if mins%60 == 0 {
+		return fmt.Sprintf("%dh", mins/60)
+	}
+	return fmt.Sprintf("%dh%02dm", mins/60, mins%60)
 }
 
 // memoryLine says what the running copies and the load balancer take
@@ -228,7 +315,7 @@ func keptOverNote(app api.AppStatus) string {
 // nothing runs, or nothing could be measured.
 func memoryLine(resp api.StatusResponse) string {
 	var total int64
-	var running, warm int
+	var running, warm, draining int
 	for _, app := range resp.Apps {
 		for _, c := range app.Copies {
 			if !c.Alive {
@@ -236,8 +323,11 @@ func memoryLine(resp api.StatusResponse) string {
 			}
 			running++
 			total += c.RSSBytes
-			if c.Role == "warm" {
+			switch c.Role {
+			case "warm":
 				warm++
+			case "draining":
+				draining++
 			}
 		}
 	}
@@ -250,8 +340,13 @@ func memoryLine(resp api.StatusResponse) string {
 		noun = "process"
 	}
 	line := fmt.Sprintf("Memory: %s in %d R %s", formatMem(total), running, noun)
-	if warm > 0 {
+	switch {
+	case warm > 0 && draining > 0:
+		line += fmt.Sprintf(" (%d warm, %d draining)", warm, draining)
+	case warm > 0:
 		line += fmt.Sprintf(" (%d warm)", warm)
+	case draining > 0:
+		line += fmt.Sprintf(" (%d draining)", draining)
 	}
 	if resp.BalancerRSS > 0 {
 		line += fmt.Sprintf(", plus %s for the load balancer", formatMem(resp.BalancerRSS))

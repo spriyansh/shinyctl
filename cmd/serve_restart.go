@@ -16,14 +16,16 @@ import (
 )
 
 // handleRestart makes the app's copies pick up new code, which a re-apply
-// never notices: apply compares only the manifest, and restarts an app whose
-// manifest changed. It raises the state's revision, which makes every running
-// copy outdated, and reconciles: the copies are replaced one at a time, in
-// place (see reconcile.DecideCopies), so with a warm spare the app keeps
-// serving, and with one copy it is stopped and started again like any
-// restart. It also starts an app that is stopped, never applied, or
-// crash-looping, right away and with a clean crash history, the same as an
-// explicit apply.
+// never notices: apply compares only the manifest, and replaces the copies of
+// an app whose manifest changed. It raises the state's revision, which makes
+// every running copy outdated, and reconciles: a full set of new copies starts
+// next to the running ones on new internal ports, and the request returns at
+// once. The old copies keep serving until enough new ones are ready; then new
+// visitors go to the new copies and the old ones drain (see
+// reconcile.DecideCopies), so nobody is cut off and, since the new copies
+// start before anything stops, nobody waits for R. It also starts an app that
+// is stopped, never applied, or crash-looping, right away and with a clean
+// crash history, the same as an explicit apply.
 //
 // The order matters; each step is here for a reason:
 //   - Validate first, so a bad manifest fails with nothing touched.
@@ -37,12 +39,11 @@ import (
 //     never takes a state lock.
 //   - Remember before the revision is raised, as apply does: if the registry
 //     can't be persisted the request fails before anything changes.
-//   - The revision is saved before the reconcile. The replacement stops the
-//     old process and keeps the copy's internal port, so the new one takes
-//     it over and requests wait for it with no reload; the old process's
-//     exit-watcher finds a PID that isn't its own and records nothing.
-//   - syncProxy last, which follows a port or host change in the request
-//     and picks up a freshly chosen internal port.
+//   - The revision is saved before the reconcile, so the copies it starts
+//     are of the new revision and the running ones are outdated.
+//   - syncProxy last, which follows a port or host change in the request.
+//     The new copies need no reload: the table is pushed to the load
+//     balancer as the copies become ready.
 func handleRestart(w http.ResponseWriter, r *http.Request) {
 	var spec manifest.AppSpec
 	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
