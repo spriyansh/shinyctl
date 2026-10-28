@@ -140,17 +140,42 @@ func TestIsOurs(t *testing.T) {
 	}
 }
 
-// sleepWithArg starts a process whose command line holds extra, which is
-// how the tests give a stand-in the `port=<port>,` an R process has.
-func sleepWithArg(t *testing.T, extra string) int {
+// sleeperEnv makes the test binary a sleeper instead of running the tests:
+// a process that is started once, with a command line that never changes.
+// (A shell that starts sleep, or /bin/sh on macOS, which is a launcher for
+// bash, replaces its own image right after the start, and ps can read the
+// command line in the middle of that.)
+const sleeperEnv = "SHINYCTL_TEST_SLEEPER"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(sleeperEnv) == "1" {
+		time.Sleep(30 * time.Second)
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// startArgSleeper starts a sleeper whose command line is "sleep" and then args.
+func startArgSleeper(t *testing.T, args ...string) *exec.Cmd {
 	t.Helper()
-	// Two commands, so the shell stays the process instead of becoming sleep.
-	cmd := exec.Command("sh", "-c", "sleep 5; :", extra)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, append([]string{"sleep"}, args...)...)
+	cmd.Env = append(os.Environ(), sleeperEnv+"=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
-	return cmd.Process.Pid
+	return cmd
+}
+
+// sleepWithArg starts a process whose command line holds extra, which is
+// how the tests give a stand-in the `port=<port>,` an R process has.
+func sleepWithArg(t *testing.T, extra string) int {
+	t.Helper()
+	return startArgSleeper(t, extra).Process.Pid
 }
 
 func TestIsOurs_PortMustMatch(t *testing.T) {
@@ -584,10 +609,7 @@ func TestIdentity_RightAfterStart(t *testing.T) {
 	arg := rCommandLine("/srv/app.R", 20001)
 	var notOurs, aliveAllNo, batchMissing int
 	for i := 0; i < n; i++ {
-		cmd := exec.Command("sh", "-c", "sleep 5; :", "x", arg)
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
+		cmd := startArgSleeper(t, "x", arg)
 		rec := state.AppState{PID: cmd.Process.Pid, StartedAt: time.Now(), EntrypointFile: "/srv/app.R", Port: 20001, Copy: 1}
 		if !isOurs(rec) || !IsAlive(spec, rec) {
 			notOurs++

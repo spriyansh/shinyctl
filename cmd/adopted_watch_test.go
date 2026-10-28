@@ -223,8 +223,8 @@ func TestAdopted_WatchedRightAtStartup(t *testing.T) {
 		if len(pool.Active) == 1 && pool.Active[0] == dialOf(two) {
 			break
 		}
-		if time.Since(killed) > 2500*time.Millisecond { // well under the 5 s tick, with room for a loaded machine
-			t.Fatalf("pool = %+v 2.5 seconds after the kill, want the warm copy active", pool)
+		if time.Since(killed) > 4*time.Second { // under the 5 s tick, which does not run here, so the deadline tells the watcher from none; room for a loaded machine
+			t.Fatalf("pool = %+v 4 seconds after the kill, want the warm copy active", pool)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
