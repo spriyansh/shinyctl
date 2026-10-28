@@ -336,3 +336,39 @@ func TestSave_OmitsRevisionWhenZero(t *testing.T) {
 		t.Errorf("revision 1 should be written twice: %s", data)
 	}
 }
+
+// A record without draining-since and skip-drain is a copy that is not
+// draining; a copy that is not draining writes neither key; both round trip.
+func TestDrainFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"app-group":"g","apps":[{"name":"a","pid":1,"copy":1,"port":20001}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app, _ := st.Copy(1); !app.DrainingSince.IsZero() || app.SkipDrain {
+		t.Errorf("a record without the keys = %+v, want not draining and unmarked", app)
+	}
+	if err := Save(path, st); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "draining-since") || strings.Contains(string(data), "skip-drain") {
+		t.Errorf("a copy that is not draining wrote its keys: %s", data)
+	}
+
+	since := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
+	st = State{AppGroup: "g", Apps: []AppState{{Name: "a", PID: 1, Copy: 1, Port: 20001, DrainingSince: since, SkipDrain: true}}}
+	if err := Save(path, st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app, _ := got.Copy(1); !app.DrainingSince.Equal(since) || !app.SkipDrain {
+		t.Errorf("round trip = %+v, want draining since %v and marked", app, since)
+	}
+}

@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 func TestEffective(t *testing.T) {
@@ -63,5 +66,37 @@ func TestLoad_WarmReplicasKeepsZero(t *testing.T) {
 	}
 	if got := load("replicas: 2\nwarm-replicas: 3\nlb-policy: first\n"); got.EffectiveReplicas() != 2 || got.EffectiveWarm() != 3 || got.LBPolicy != LBFirst {
 		t.Errorf("read %+v", got)
+	}
+}
+
+func TestEffectiveDrainTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"", 15 * time.Minute},
+		{"0", 0},
+		{"0s", 0},
+		{"90s", 90 * time.Second},
+		{"1h30m", 90 * time.Minute},
+		{"bad", 15 * time.Minute},
+		{"-5m", 15 * time.Minute},
+		{"48h", 24 * time.Hour},
+	} {
+		if got := (AppSpec{DrainTimeout: tc.in}).EffectiveDrainTimeout(); got != tc.want {
+			t.Errorf("EffectiveDrainTimeout(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// YAML reads "drain-timeout: 0" as a number, which a string field takes as
+// "0", and that parses.
+func TestDrainTimeout_YAMLZero(t *testing.T) {
+	var spec AppSpec
+	if err := yaml.Unmarshal([]byte("drain-timeout: 0\n"), &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.DrainTimeout != "0" || spec.EffectiveDrainTimeout() != 0 {
+		t.Errorf("drain-timeout: 0 -> %q, %v; want \"0\" and 0", spec.DrainTimeout, spec.EffectiveDrainTimeout())
 	}
 }

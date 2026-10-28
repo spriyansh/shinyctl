@@ -258,6 +258,16 @@ func TestValidate(t *testing.T) {
 		{"lb-policy first accepted", func(s AppSpec) AppSpec { s.LBPolicy = "first"; return s }, false},
 		{"the engine's spelling least_conn rejected", func(s AppSpec) AppSpec { s.LBPolicy = "least_conn"; return s }, true},
 		{"unknown lb-policy rejected", func(s AppSpec) AppSpec { s.LBPolicy = "ip-hash"; return s }, true},
+		{"drain-timeout 0 accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "0"; return s }, false},
+		{"drain-timeout 0s accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "0s"; return s }, false},
+		{"drain-timeout 90s accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "90s"; return s }, false},
+		{"drain-timeout 15m accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "15m"; return s }, false},
+		{"drain-timeout 1h30m accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "1h30m"; return s }, false},
+		{"drain-timeout 24h accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "24h"; return s }, false},
+		{"drain-timeout 25h rejected", func(s AppSpec) AppSpec { s.DrainTimeout = "25h"; return s }, true},
+		{"drain-timeout -1m rejected", func(s AppSpec) AppSpec { s.DrainTimeout = "-1m"; return s }, true},
+		{"drain-timeout 900 rejected", func(s AppSpec) AppSpec { s.DrainTimeout = "900"; return s }, true},
+		{"drain-timeout abc rejected", func(s AppSpec) AppSpec { s.DrainTimeout = "abc"; return s }, true},
 		{"a space in the entrypoint path accepted", func(s AppSpec) AppSpec { s.WorkingDir = "/srv/my apps"; return s }, false},
 		{"a tab in the working dir is Validate's business no more", func(s AppSpec) AppSpec { s.WorkingDir = "/srv/a\tb"; return s }, false},
 		{"app-name with @ rejected", func(s AppSpec) AppSpec { s.AppName = "a@2"; return s }, true},
@@ -430,5 +440,20 @@ func TestCheckPathCharacters(t *testing.T) {
 		if err := CheckPathCharacters(spec); err == nil || err.Error() != c.want {
 			t.Errorf("%s: %v, want %q", name, err, c.want)
 		}
+	}
+}
+
+func TestValidate_DrainTimeoutMessage(t *testing.T) {
+	t.Cleanup(func() { lookPath = exec.LookPath })
+	lookPath = func(string) (string, error) { return "/usr/bin/Rscript", nil }
+	entrypoint := filepath.Join(t.TempDir(), "app.R")
+	if err := os.WriteFile(entrypoint, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	spec := AppSpec{AppGroup: "g", AppName: "n", EntrypointFile: entrypoint, Port: 8881, DrainTimeout: "900"}
+	err := Validate(spec)
+	want := `drain-timeout must be a duration from 0 to 24h, such as 15m, 90s or 1h (got "900")`
+	if err == nil || err.Error() != want {
+		t.Errorf("Validate = %v, want %q", err, want)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"go.yaml.in/yaml/v3"
@@ -166,6 +167,12 @@ func Validate(spec AppSpec) error {
 	case "", LBLeastConn, LBRoundRobin, LBRandom, LBFirst:
 	default:
 		return fmt.Errorf("lb-policy must be one of %q, %q, %q, %q", LBLeastConn, LBRoundRobin, LBRandom, LBFirst)
+	}
+
+	if spec.DrainTimeout != "" {
+		if d, err := time.ParseDuration(spec.DrainTimeout); err != nil || d < 0 || d > MaxDrainTimeout {
+			return fmt.Errorf("drain-timeout must be a duration from 0 to 24h, such as 15m, 90s or 1h (got %q)", spec.DrainTimeout)
+		}
 	}
 
 	switch spec.RestartPolicy {

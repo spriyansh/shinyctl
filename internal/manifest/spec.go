@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"time"
 )
 
 // RestartPolicy controls whether the reconcile loop restarts an app after
@@ -62,6 +63,13 @@ const (
 	LBFirst      = "first"
 )
 
+// How long a copy that is replaced or no longer wanted keeps the visitors it
+// has (see EffectiveDrainTimeout).
+const (
+	DefaultDrainTimeout = 15 * time.Minute
+	MaxDrainTimeout     = 24 * time.Hour
+)
+
 type AppSpec struct {
 	AppGroup       string            `yaml:"app-group" json:"app-group"`
 	AppName        string            `yaml:"app-name" json:"app-name"`
@@ -71,6 +79,7 @@ type AppSpec struct {
 	Replicas       int               `yaml:"replicas" json:"replicas"`
 	WarmReplicas   *int              `yaml:"warm-replicas" json:"warm-replicas,omitempty"`
 	LBPolicy       string            `yaml:"lb-policy" json:"lb-policy,omitempty"`
+	DrainTimeout   string            `yaml:"drain-timeout" json:"drain-timeout,omitempty"`
 	AppStateFile   string            `yaml:"app-state-file" json:"app-state-file"`
 	RestartPolicy  RestartPolicy     `yaml:"restart-policy" json:"restart-policy"`
 	WorkingDir     string            `yaml:"working-dir" json:"working-dir"`
@@ -115,6 +124,21 @@ func (s AppSpec) EffectiveLBPolicy() string {
 		return LBLeastConn
 	}
 	return s.LBPolicy
+}
+
+// EffectiveDrainTimeout is how long a draining copy keeps its visitors at
+// most: drain-timeout as a Go duration ("15m", "90s", "0"), DefaultDrainTimeout
+// when unset. Validate refuses a value that doesn't parse; one that slipped
+// past it (a registry written by hand) reads as the default.
+func (s AppSpec) EffectiveDrainTimeout() time.Duration {
+	if s.DrainTimeout == "" {
+		return DefaultDrainTimeout
+	}
+	d, err := time.ParseDuration(s.DrainTimeout)
+	if err != nil || d < 0 {
+		return DefaultDrainTimeout
+	}
+	return min(d, MaxDrainTimeout)
 }
 
 // CopyCount is how many processes the app runs: the copies that serve

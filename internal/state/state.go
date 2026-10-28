@@ -40,6 +40,17 @@ type AppState struct {
 	// revision is below the state's runs code from before the last restart.
 	// Absent means 0.
 	Revision int `json:"revision,omitempty"`
+
+	// DrainingSince is when the copy began draining: it gets no new visitors
+	// and keeps the ones it has until their sessions end or the app's
+	// drain-timeout passes, and it is never started again. Zero means it is
+	// not draining.
+	DrainingSince time.Time `json:"draining-since,omitzero"`
+
+	// SkipDrain says the copy stops instead of draining when it is replaced
+	// or already draining: set by apply or restart with --now on the copies
+	// running then, so the switch, which comes later, still knows.
+	SkipDrain bool `json:"skip-drain,omitempty"`
 }
 
 // State is the on-disk shape of one app's state.json.
@@ -50,9 +61,8 @@ type AppState struct {
 // record with copy 0 is from before the load balancer, and is only ever the
 // sole record.
 //
-// This key is reserved for rolling out new versions, and nothing writes it
-// yet. A record that lacks it reads as a copy that is not draining:
-//   - AppState.draining-since (time): absent means the copy is not draining.
+// A record without draining-since or skip-drain is a copy that is not
+// draining and has no mark, which is every record written before them.
 type State struct {
 	AppGroup string `json:"app-group"`
 

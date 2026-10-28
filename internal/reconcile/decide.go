@@ -97,7 +97,7 @@ func GaveUp(spec manifest.AppSpec, app state.AppState) bool {
 
 // fieldOrder is the order manifest fields are listed in replies: the order
 // of the README's manifest example.
-var fieldOrder = []string{"app-group", "app-name", "entrypoint-file", "port", "host", "replicas", "warm-replicas", "lb-policy", "restart-policy", "working-dir", "env"}
+var fieldOrder = []string{"app-group", "app-name", "entrypoint-file", "port", "host", "replicas", "warm-replicas", "lb-policy", "drain-timeout", "restart-policy", "working-dir", "env"}
 
 // OrderFields sorts manifest field names into fieldOrder. A name this
 // version doesn't know goes last, alphabetically.
@@ -169,6 +169,9 @@ func SettingsChanged(previous, spec manifest.AppSpec) []string {
 	}
 	if previous.EffectiveLBPolicy() != spec.EffectiveLBPolicy() {
 		changed = append(changed, "lb-policy")
+	}
+	if previous.EffectiveDrainTimeout() != spec.EffectiveDrainTimeout() {
+		changed = append(changed, "drain-timeout")
 	}
 	if previous.RestartPolicy.Effective() != spec.RestartPolicy.Effective() {
 		changed = append(changed, "restart-policy")
