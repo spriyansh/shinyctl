@@ -224,6 +224,11 @@ type errorsConfig struct {
 	Routes []route `json:"routes"`
 }
 
+// inFlightHandler counts the requests being answered (see lb.InFlight).
+type inFlightHandler struct {
+	Handler string `json:"handler"`
+}
+
 type headersHandler struct {
 	Handler  string    `json:"handler"`
 	Response headerOps `json:"response"`
@@ -413,6 +418,7 @@ func renderServer(a App, secret, fallback string, try time.Duration) server {
 		AutomaticHTTPS: autoHTTPS{Disable: true},
 		TrustedProxies: trustedProxies{Source: "static", Ranges: []string{"127.0.0.0/8", "::1/128"}},
 		Routes: []route{{Handle: []any{
+			inFlightHandler{Handler: "shinyctl_inflight"},
 			headersHandler{Handler: "headers", Response: headerOps{Delete: []string{"Server", "Via"}, Deferred: true}},
 			rp,
 		}}},

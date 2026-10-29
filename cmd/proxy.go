@@ -8,7 +8,10 @@ import (
 	"github.com/spriyansh/shinyctl/internal/proxy"
 )
 
-var proxyConfig string
+var (
+	proxyConfig string
+	proxyAfter  int
+)
 
 // proxyCmd is the load balancer's process. shinyctl-api starts it and
 // keeps it running; it is hidden because nobody runs it by hand.
@@ -23,13 +26,14 @@ var proxyCmd = &cobra.Command{
 	SilenceUsage: true,
 
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return proxy.Run(proxyConfig)
+		return proxy.Run(proxyConfig, proxyAfter)
 	},
 }
 
 func init() {
 	proxyCmd.Flags().StringVar(&proxyConfig, "config", "", "the load balancer's settings file (absolute path)")
 	proxyCmd.MarkFlagRequired("config")
+	proxyCmd.Flags().IntVar(&proxyAfter, "after", 0, "the pid of the load balancer this one replaces: serve next to it first")
 
 	rootCmd.AddCommand(proxyCmd)
 }

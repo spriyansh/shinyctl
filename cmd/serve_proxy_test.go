@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -336,5 +337,129 @@ func TestAdminSocketPathAgrees(t *testing.T) {
 	}
 	if want := filepath.Join(config, "proxy", "admin.sock"); proxy.SettingsFor(dir).AdminSocket != want {
 		t.Errorf("admin socket = %s, want %s", proxy.SettingsFor(dir).AdminSocket, want)
+	}
+}
+
+// duringAHandover makes the gateway look as it does while the load balancer
+// of another build is being replaced: it says nothing is served, and the
+// check of ports waits (Ready) until the handover is over, when it says what
+// is served again. release ends it.
+func duringAHandover(t *testing.T) (release func()) {
+	t.Helper()
+	done := make(chan struct{})
+	var over atomic.Bool
+	useHooks(t, hooks{
+		Served: func() []proxy.App {
+			if !over.Load() {
+				return nil
+			}
+			return gateway.Served()
+		},
+		Ready: func() { <-done },
+		// The retry a taken port gets is shorter than the handover here, as
+		// it is when a handover drains a long request.
+		PortWait:  100 * time.Millisecond,
+		PortEvery: 20 * time.Millisecond,
+	})
+	var once sync.Once
+	release = func() { once.Do(func() { over.Store(true); close(done) }) }
+	t.Cleanup(release)
+	return release
+}
+
+// An apply sent while the load balancer is being replaced waits for it, and
+// then goes through. Without the wait the app's own port, held by the load
+// balancer, is taken for another program's, and the apply fails although the
+// change is made moments later.
+func TestApply_DuringAHandoverWaitsForTheLoadBalancer(t *testing.T) {
+	useFakeRscript(t)
+	spec := copiesSpec(t, "app", 1, 0)
+	cleanupApp(t, spec)
+	applyOK(t, spec)
+	waitRoles(t, spec, 1, 0)
+
+	release := duringAHandover(t)
+	time.AfterFunc(300*time.Millisecond, release)
+	spec.WarmReplicas = new(int)
+	*spec.WarmReplicas = 1
+	start := time.Now()
+	rec := postJSON(t, handleApply, spec)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply during the handover: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if took := time.Since(start); took < 250*time.Millisecond {
+		t.Errorf("apply took %s, want it to wait for the load balancer", took)
+	}
+	waitRoles(t, spec, 1, 1)
+}
+
+// So does a restart.
+func TestRestart_DuringAHandoverWaitsForTheLoadBalancer(t *testing.T) {
+	useFakeRscript(t)
+	spec := copiesSpec(t, "app", 1, 0)
+	cleanupApp(t, spec)
+	applyOK(t, spec)
+	pool := waitRoles(t, spec, 1, 0)
+	old := copyByDial(t, spec, pool.Active[0])
+
+	release := duringAHandover(t)
+	time.AfterFunc(300*time.Millisecond, release)
+	rec := postJSON(t, handleRestart, spec)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restart during the handover: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	waitUntil(t, "the new copy to serve", 20*time.Second, func() bool {
+		p, _ := gateway.Pool(spec.AppStateFile)
+		return len(p.Active) == 1 && p.Active[0] != dialOf(old)
+	})
+}
+
+// While the load balancer is being started or replaced, status says so, and
+// the copies' READY reads as starting until it is done.
+func TestWriteStatus_BalancerStarting(t *testing.T) {
+	resp := api.StatusResponse{BalancerStarting: true, Apps: []api.AppStatus{{Name: "a", Port: 8080, Copies: []api.CopyStatus{{Copy: 1, PID: 5, Alive: true}}}}}
+	var out bytes.Buffer
+	if err := writeStatus(&out, resp); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "The load balancer is starting or being replaced") {
+		t.Errorf("status = %q, want the line about the load balancer", out.String())
+	}
+	if strings.Contains(out.String(), "not available") || strings.Contains(out.String(), "not started") {
+		t.Errorf("status = %q, want no port error", out.String())
+	}
+	resp.BalancerStarting = false
+	out.Reset()
+	writeStatus(&out, resp)
+	if strings.Contains(out.String(), "starting or being replaced") {
+		t.Errorf("status = %q, want no line when the load balancer is up", out.String())
+	}
+}
+
+// The wait for a load balancer that is being started or replaced is the
+// default of the hook, and only then: with one running, or with none expected,
+// the check goes ahead at once.
+func TestDefaultReady_WaitsOnlyWhileTheLoadBalancerIsStarting(t *testing.T) {
+	dir := shortTmp(t)
+	exe, _ := os.Executable()
+	g, sup, err := newGateway(dir, exe, filepath.Join(dir, "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig, origWait := gateway, handoverWaitFor
+	gateway, handoverWaitFor = g, func() time.Duration { return 300 * time.Millisecond }
+	t.Cleanup(func() { gateway, handoverWaitFor = orig, origWait })
+
+	took := func() time.Duration {
+		start := time.Now()
+		currentHooks().Ready()
+		return time.Since(start)
+	}
+	if d := took(); d > 100*time.Millisecond {
+		t.Errorf("Ready took %s with no load balancer expected, want it not to wait", d)
+	}
+	sup.Expect()
+	if d := took(); d < 250*time.Millisecond || d > 2*time.Second {
+		t.Errorf("Ready took %s while the load balancer is starting, want about the wait (300ms)", d)
 	}
 }

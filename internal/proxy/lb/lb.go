@@ -20,4 +20,5 @@ func init() {
 	caddy.RegisterModule(Copies{})
 	caddy.RegisterModule(&Sticky{})
 	caddy.RegisterModule(adminCopies{})
+	caddy.RegisterModule(InFlightCounter{})
 }

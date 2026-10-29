@@ -22,6 +22,7 @@ type proc interface {
 	Running() bool
 	Generation() int
 	PID() int
+	Starting() bool
 }
 
 // Gateway pushes the set of apps to the running load balancer, and knows
@@ -119,6 +120,22 @@ func (g *Gateway) Served() []App {
 	defer g.mu.Unlock()
 	g.refreshLocked()
 	return slices.Clone(g.loaded)
+}
+
+// Starting reports that the load balancer is being started or replaced and is
+// not answering yet.
+func (g *Gateway) Starting() bool { return g.proc.Starting() }
+
+// WaitWhileStarting waits while the load balancer is being started or replaced,
+// up to timeout, and reports whether it is running when the wait ends. It ends
+// when the supervisor's attempt does, whether that worked or failed: a load
+// balancer that cannot start is not waited for to the end of the timeout.
+func (g *Gateway) WaitWhileStarting(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for g.proc.Starting() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	return g.proc.Running()
 }
 
 // NotServed says why the load balancer leaves the app at key out, from the

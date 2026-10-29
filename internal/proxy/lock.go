@@ -65,6 +65,38 @@ func acquireLock(path string, info lockInfo) (*os.File, error) {
 	return f, nil
 }
 
+// takeoverWait is how long a load balancer started next to another waits for
+// the other to be gone and its lock free.
+var takeoverWait = 30 * time.Second
+
+// waitLock takes the lock at path once its holder lets go, or gives up after
+// timeout. With replacing set, it also gives up at once when the lock is
+// taken by some other process than replacing: another load balancer replaced
+// that one first, and this one must not go on serving next to it.
+func waitLock(path string, info lockInfo, timeout time.Duration, replacing int) (*os.File, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		f, err := acquireLock(path, info)
+		if err == nil {
+			return f, nil
+		}
+		if replacing > 0 {
+			if h := readHolderPID(path); h > 0 && h != replacing && h != info.PID {
+				return nil, fmt.Errorf("another load balancer (pid %d) took over first", h)
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func readHolderPID(path string) int {
+	info, _ := readLock(path)
+	return info.PID
+}
+
 // waitHolder reads the record of the process holding the lock at path. The
 // holder writes it right after taking the lock, so a read in that gap sees an
 // empty file; wait for it briefly. Zero when there is none.

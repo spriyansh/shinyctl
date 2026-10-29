@@ -129,6 +129,9 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 	if line := memoryLine(resp); line != "" {
 		fmt.Fprintf(out, "\n%s\n", line)
 	}
+	if resp.BalancerStarting {
+		fmt.Fprintf(out, "\nThe load balancer is starting or being replaced: copies show as starting until it is done, usually in under a second.\n")
+	}
 
 	// A running app can still be unreachable: its port belongs to something
 	// else. The table can't say so, and the reason is otherwise only in the

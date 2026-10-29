@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestMain isolates the package from the real home directory, and lets the
@@ -16,7 +18,25 @@ import (
 // share the load balancer library's global state.
 func TestMain(m *testing.M) {
 	if len(os.Args) >= 4 && os.Args[1] == "proxy" && os.Args[2] == "--config" {
-		if err := Run(os.Args[3]); err != nil {
+		after := 0
+		if len(os.Args) >= 6 && os.Args[4] == "--after" {
+			after, _ = strconv.Atoi(os.Args[5])
+		}
+		// Timings a test of the handover changes in the process it starts.
+		for env, dst := range map[string]*time.Duration{
+			"SHINYCTL_TEST_HANDOVER_GRACE": &handoverGrace,
+			"SHINYCTL_TEST_TAKEOVER_WAIT":  &takeoverWait,
+			"SHINYCTL_TEST_SERVE_DELAY":    &serveDelay,
+			"SHINYCTL_TEST_STOP_TIMEOUT":   &stopTimeout,
+			"SHINYCTL_TEST_STOP_DELAY":     &stopDelay,
+		} {
+			if v := os.Getenv(env); v != "" {
+				if d, err := time.ParseDuration(v); err == nil {
+					*dst = d
+				}
+			}
+		}
+		if err := Run(os.Args[3], after); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)
 		}

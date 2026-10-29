@@ -17,6 +17,10 @@ const stopGrace = 10 * time.Second
 // actually be gone — the kill itself is immediate; this covers the reap.
 const killGrace = 2 * time.Second
 
+// StopWait is the longest StopIf takes to end a process: the SIGTERM grace
+// period, then the wait after SIGKILL.
+const StopWait = stopGrace + killGrace
+
 // Stop terminates app's recorded process and only returns once it's
 // actually gone: SIGTERM first, then SIGKILL if the process is still around
 // after stopGrace. The caller's next step is clearing the record from

@@ -209,13 +209,22 @@ func startSubproxy(t *testing.T, dir, homeDir string, cfg []byte) *subproxy {
 
 func startSubproxyAt(t *testing.T, configPath, homeDir string) *subproxy {
 	t.Helper()
+	return startSubproxyArgs(t, configPath, homeDir)
+}
+
+// startSubproxyArgs is startSubproxyAt with more arguments after --config.
+func startSubproxyArgs(t *testing.T, configPath, homeDir string, extra ...string) *subproxy {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := &subproxy{stderr: &syncBuffer{}, exited: make(chan struct{})}
-	p.cmd = exec.Command(exe, "proxy", "--config", configPath)
-	p.cmd.Env = append(os.Environ(), "HOME="+homeDir, "XDG_DATA_HOME="+homeDir, "XDG_CONFIG_HOME="+homeDir)
+	p.cmd = exec.Command(exe, append([]string{"proxy", "--config", configPath}, extra...)...)
+	// A load balancer built with the race detector sleeps a second at exit, and
+	// its servers go on answering during it; that would hide whether a stop
+	// waits for the requests in flight, so it does not.
+	p.cmd.Env = append(os.Environ(), "HOME="+homeDir, "XDG_DATA_HOME="+homeDir, "XDG_CONFIG_HOME="+homeDir, "GORACE=atexit_sleep_ms=0")
 	p.cmd.Stderr = p.stderr
 	p.cmd.Stdout = p.stderr
 	if err := p.cmd.Start(); err != nil {
@@ -313,5 +322,42 @@ func reapTracked() {
 			}
 		}
 		os.RemoveAll(dir)
+	}
+}
+
+// hammer sends requests on fresh connections to url, one after another, until
+// the returned stop is called; stop reports how many answered 200 and how
+// many failed (refused, reset, or any other answer).
+func hammer(url string) (stop func() (ok, failed int)) {
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	quit, done := make(chan struct{}), make(chan struct{})
+	var ok, failed int
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-quit:
+				return
+			default:
+			}
+			resp, err := client.Get(url)
+			if err != nil {
+				failed++
+			} else {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode == 200 {
+					ok++
+				} else {
+					failed++
+				}
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	return func() (int, int) {
+		close(quit)
+		<-done
+		return ok, failed
 	}
 }

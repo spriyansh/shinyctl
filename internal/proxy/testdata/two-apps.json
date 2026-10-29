@@ -55,6 +55,9 @@
             {
               "handle": [
                 {
+                  "handler": "shinyctl_inflight"
+                },
+                {
                   "handler": "headers",
                   "response": {
                     "delete": [
@@ -169,6 +172,9 @@
           "routes": [
             {
               "handle": [
+                {
+                  "handler": "shinyctl_inflight"
+                },
                 {
                   "handler": "headers",
                   "response": {

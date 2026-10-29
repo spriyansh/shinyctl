@@ -289,6 +289,7 @@ type fakeProc struct{ ready bool }
 
 func (f fakeProc) WaitReady(time.Duration) bool { return f.ready }
 func (f fakeProc) Running() bool                { return f.ready }
+func (f fakeProc) Starting() bool               { return false }
 func (f fakeProc) Generation() int              { return 1 }
 func (f fakeProc) PID() int                     { return 4242 }
 
@@ -763,5 +764,31 @@ func TestGateway_InvalidCopyIsLeftOut(t *testing.T) {
 	}
 	if got, _ := (Admin{Socket: e.settings.AdminSocket}).Copies(); !got.Equal(Table{"good": good, "bad": twoCopies(20002, 20003)}) {
 		t.Errorf("the load balancer has %v after the fix", got)
+	}
+}
+
+// A load balancer that cannot be started is not waited for to the end of the
+// timeout: the wait ends when the supervisor's attempt does, and Starting()
+// turns false then.
+func TestGateway_WaitWhileStartingEndsWhenTheAttemptFails(t *testing.T) {
+	e := newSupEnv(t)
+	sup := e.supervisor(t, "")
+	sup.Exe = filepath.Join(e.dir, "no-such-program")
+	g := NewGateway(e.settings, sup)
+	sup.Expect()
+	if !sup.Starting() {
+		t.Fatal("Starting() is false before the attempt")
+	}
+	run(t, sup)
+
+	start := time.Now()
+	if g.WaitWhileStarting(15 * time.Second) {
+		t.Fatal("a load balancer that cannot start is running")
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("the wait took %s, want it to end when the attempt failed", took)
+	}
+	if sup.Starting() {
+		t.Error("Starting() is still true after the attempt failed")
 	}
 }

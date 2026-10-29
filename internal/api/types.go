@@ -86,4 +86,8 @@ type StatusResponse struct {
 	// BalancerRSS is the resident memory of the load balancer's process;
 	// zero when it couldn't be measured.
 	BalancerRSS int64 `json:"balancer-rss-bytes,omitempty"`
+
+	// BalancerStarting says the load balancer is being started or replaced by
+	// one of another build, and does not answer for the moment.
+	BalancerStarting bool `json:"balancer-starting,omitempty"`
 }

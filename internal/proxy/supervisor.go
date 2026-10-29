@@ -6,7 +6,9 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/atomicfile"
@@ -28,6 +30,17 @@ type Supervisor struct {
 	// becomes available (started or adopted), so shinyctl-api can bring it
 	// up to date.
 	OnReady func()
+
+	// OnHandedOver is called, with no lock held, when the load balancer that
+	// has just become available took over from another that was running (a
+	// handover between builds), so shinyctl-api can act on what it had to
+	// wait for at once and not at its next tick.
+	OnHandedOver func()
+
+	// ensuring is true from Expect, and while ensure runs, until the load
+	// balancer is running: the load balancer is being started or replaced.
+	ensuring   atomic.Bool
+	handedOver atomic.Bool
 
 	mu         sync.Mutex
 	running    bool
@@ -77,8 +90,10 @@ type child struct {
 func (s *Supervisor) Run(ctx context.Context) {
 	restarts := 0
 	for {
+		s.ensuring.Store(true)
 		pid, c, err := s.ensure()
 		if err != nil {
+			s.ensuring.Store(false)
 			log.Printf("proxy: could not start the load balancer: %v; retrying in %s", err, backoff(restarts))
 			if !sleep(ctx, backoff(restarts)) {
 				return
@@ -88,9 +103,13 @@ func (s *Supervisor) Run(ctx context.Context) {
 		}
 
 		s.setRunning(pid)
+		s.ensuring.Store(false)
 		started := time.Now()
 		if s.OnReady != nil {
 			s.OnReady()
+		}
+		if s.handedOver.Swap(false) && s.OnHandedOver != nil {
+			go s.OnHandedOver()
 		}
 
 		how := s.watch(ctx, pid, c)
@@ -163,6 +182,11 @@ func (s *Supervisor) ensure() (int, *child, error) {
 	lock := LockPath(s.Settings.ConfigPath)
 	admin := Admin{Socket: s.Settings.AdminSocket}
 
+	// A handover that an earlier shinyctl-api started and that is still going
+	// on finishes by itself; this one waits for it instead of starting a
+	// third load balancer.
+	s.settleHandover(admin, lock)
+
 	if lockHeld(lock) {
 		info := waitHolder(lock)
 		ours := func() bool { return info.PID > 0 && process.HasCommandLine(info.PID, s.commandLine()) }
@@ -176,6 +200,15 @@ func (s *Supervisor) ensure() (int, *child, error) {
 			log.Printf("proxy: the load balancer (pid %d) does not answer; replacing it", info.PID)
 		case info.Build != s.Build:
 			log.Printf("proxy: replacing the load balancer (pid %d), which another shinyctl build started", info.PID)
+			pid, c, err := s.startAlongside(admin, info.PID)
+			if err == nil {
+				return pid, c, nil
+			}
+			log.Printf("proxy: could not start the new load balancer next to the old one (%v); stopping the old one first", err)
+			if h := readHolderPID(lock); h > 0 && h != info.PID {
+				// Another load balancer replaced it meanwhile: look again.
+				return s.ensure()
+			}
 		default:
 			log.Printf("proxy: adopted the running load balancer (pid %d)", info.PID)
 			return info.PID, nil, nil
@@ -188,6 +221,96 @@ func (s *Supervisor) ensure() (int, *child, error) {
 
 	return s.start(admin)
 }
+
+// settleHandover waits while the control socket is answered by a load
+// balancer that was started to replace the one holding the lock (--after its
+// pid): that one stops the old one and takes the lock by itself, and in the
+// moment between the two the lock is free, which must not look like "no load
+// balancer". It returns when the lock has moved to the one that answers, when
+// what answers is not such a successor, or after handoverWait.
+func (s *Supervisor) settleHandover(admin Admin, lock string) {
+	deadline := time.Now().Add(handoverWait())
+	for time.Now().Before(deadline) {
+		next, err := admin.ServingPID()
+		if err != nil || next <= 0 || readHolderPID(lock) == next ||
+			!process.HasCommandLine(next, s.commandLine()+" "+afterFlag+" ") {
+			return
+		}
+		s.handedOver.Store(true)
+		time.Sleep(50 * time.Millisecond)
+	}
+	log.Printf("proxy: a handover between load balancers did not finish in %s", handoverWait())
+}
+
+// HandoverWait is how long a handover may take, for callers that wait for it.
+func HandoverWait() time.Duration { return handoverWait() }
+
+// handoverWait is how long a handover may take: the new load balancer's grace,
+// the old one's stop (SIGTERM, then SIGKILL) and a margin. A variable so a
+// test can shorten it.
+var handoverWait = func() time.Duration {
+	return handoverGrace + process.StopWait + startTimeout
+}
+
+// startAlongside starts a load balancer next to the running one, old, and
+// waits for the handover. The new one serves every port too (both listen with
+// SO_REUSEPORT), says so on the control socket, and after handoverGrace stops
+// old itself (SIGTERM, SIGKILL after the usual grace) and takes the lock; this
+// only watches, so the handover also finishes if shinyctl-api goes away in the
+// middle. The old one is stopped with SIGTERM, answers the requests in flight, and leaves the control socket as the new one's.
+func (s *Supervisor) startAlongside(admin Admin, old int) (int, *child, error) {
+	cmd, err := process.StartDetached(s.Exe, []string{"proxy", "--config", s.Settings.ConfigPath, afterFlag, strconv.Itoa(old)}, s.LogPath)
+	if err != nil {
+		return 0, nil, err
+	}
+	c := &child{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		c.err = cmd.Wait()
+		close(c.done)
+	}()
+	pid := cmd.Process.Pid
+	fail := func(err error) (int, *child, error) {
+		cmd.Process.Kill()
+		<-c.done
+		return 0, nil, err
+	}
+
+	deadline := time.Now().Add(startTimeout)
+	for {
+		select {
+		case <-c.done:
+			return 0, nil, fmt.Errorf("it exited as it started (%v)", c.err)
+		default:
+		}
+		if got, err := admin.ServingPID(); err == nil && got == pid {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fail(fmt.Errorf("it did not answer within %s", startTimeout))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	lock := LockPath(s.Settings.ConfigPath)
+	for deadline := time.Now().Add(handoverWait()); readHolderPID(lock) != pid; {
+		select {
+		case <-c.done:
+			return 0, nil, fmt.Errorf("it exited (%v)", c.err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			return fail(fmt.Errorf("it did not take the lock within %s", handoverWait()))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	log.Printf("proxy: started the load balancer (pid %d) next to the old one (pid %d), which it then stopped", pid, old)
+	s.handedOver.Store(true)
+	return pid, c, nil
+}
+
+// afterFlag is the new load balancer's flag naming the one it replaces; a
+// variable so a test can make the new one exit, to see the fall back.
+var afterFlag = "--after"
 
 func (s *Supervisor) commandLine() string {
 	return "proxy --config " + s.Settings.ConfigPath
@@ -237,7 +360,12 @@ func (s *Supervisor) start(admin Admin) (int, *child, error) {
 			return 0, nil, fmt.Errorf("the load balancer exited as it started (%v); see shinyctl logs --api", c.err)
 		default:
 		}
-		if admin.Ping() == nil {
+		// Ready is when the control socket names this process as serving
+		// (lb.MarkServing, after the settings loaded or the fallback without
+		// apps did), not when it first answers: while a load fails, the
+		// control socket of that load answers for a moment before it is torn
+		// down, and a push at that instant meets an EOF.
+		if got, err := admin.ServingPID(); err == nil && got == cmd.Process.Pid {
 			log.Printf("proxy: started the load balancer (pid %d)", cmd.Process.Pid)
 			return cmd.Process.Pid, c, nil
 		}
@@ -272,6 +400,14 @@ func (s *Supervisor) setNotRunning() {
 	s.running = false
 	s.ready = make(chan struct{})
 }
+
+// Expect says a load balancer is about to be started, before Run has got as
+// far as saying so itself.
+func (s *Supervisor) Expect() { s.ensuring.Store(true) }
+
+// Starting reports that the load balancer is being started, or replaced by
+// one of another build: not running yet, but on its way.
+func (s *Supervisor) Starting() bool { return s.ensuring.Load() && !s.Running() }
 
 // WaitReady blocks until the load balancer is running, or timeout passes.
 func (s *Supervisor) WaitReady(timeout time.Duration) bool {

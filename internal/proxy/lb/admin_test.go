@@ -94,3 +94,25 @@ func TestAdmin_RoutesAreMounted(t *testing.T) {
 		t.Errorf("routes = %+v, want one at %s", routes, AdminPath)
 	}
 }
+
+func TestAdmin_NamesTheServingProcess(t *testing.T) {
+	resetTable(t)
+	t.Cleanup(func() { MarkServing(0) })
+
+	w, err := callAdmin(http.MethodGet, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.Header().Get(PIDHeader); got != "" {
+		t.Errorf("%s = %q before the process serves, want none", PIDHeader, got)
+	}
+
+	MarkServing(4242)
+	w, err = callAdmin(http.MethodGet, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.Header().Get(PIDHeader); got != "4242" {
+		t.Errorf("%s = %q after MarkServing(4242), want 4242", PIDHeader, got)
+	}
+}

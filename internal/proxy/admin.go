@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/proxy/lb"
@@ -160,6 +161,20 @@ func (a Admin) PutCopies(t Table) error {
 		return fmt.Errorf("the load balancer refused the copies table: %s", bytes.TrimSpace(data))
 	}
 	return nil
+}
+
+// ServingPID is the process that answers on the control socket, once it
+// serves its settings; 0 from one that doesn't say.
+func (a Admin) ServingPID() (int, error) {
+	c := a.client(2 * time.Second)
+	resp, err := c.Get("http://admin" + lb.AdminPath)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	pid, _ := strconv.Atoi(resp.Header.Get(lb.PIDHeader))
+	return pid, nil
 }
 
 // Copies returns the copies table the load balancer is serving from.

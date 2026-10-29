@@ -117,6 +117,7 @@ var serveCmd = &cobra.Command{
 
 		loopCtx, cancelLoop := context.WithCancel(context.Background())
 		defer cancelLoop()
+		sup.Expect()
 		go sup.Run(loopCtx)
 
 		mux := http.NewServeMux()

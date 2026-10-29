@@ -27,6 +27,10 @@ import (
 // ticker read it from their own goroutines.
 var gateway *proxy.Gateway
 
+// handoverWaitFor is how long a check of ports waits for a load balancer that
+// is being started or replaced; a variable for the tests.
+var handoverWaitFor = proxy.HandoverWait
+
 // hooks are the few things the tests substitute (they exist for the tests,
 // nothing else sets them): what the load balancer is
 // serving, how an address is probed, and how long a recorded port is waited
@@ -63,13 +67,24 @@ type hooks struct {
 
 	// Signal0 is kill(pid, 0), the ready-watcher's "is it still there".
 	Signal0 func(pid int) error
+
+	// Ready waits for the load balancer when it is being started or replaced
+	// (up to a handover's time), before a check of what it serves: during a
+	// handover it serves, but the gateway can't say so, and its own sockets
+	// would be taken for another program's.
+	Ready func()
 }
 
 var activeHooks atomic.Pointer[hooks]
 
 func currentHooks() hooks {
 	h := hooks{
-		Served:         func() []proxy.App { return gateway.Served() },
+		Served: func() []proxy.App { return gateway.Served() },
+		Ready: func() {
+			if gateway != nil && gateway.Starting() {
+				gateway.WaitWhileStarting(handoverWaitFor())
+			}
+		},
 		Probe:          process.PortAvailable,
 		ProbeAlongside: process.PortAvailableAlongside,
 		PortWait:       time.Second,
@@ -86,6 +101,10 @@ func currentHooks() hooks {
 	if o := activeHooks.Load(); o != nil {
 		if o.Served != nil {
 			h.Served = o.Served
+			h.Ready = func() {} // a test that says what is served has no load balancer to wait for
+		}
+		if o.Ready != nil {
+			h.Ready = o.Ready
 		}
 		if o.Probe != nil {
 			h.Probe = o.Probe
@@ -164,6 +183,10 @@ func newGateway(dir, exe, logPath string) (*proxy.Gateway, *proxy.Supervisor, er
 			refreshPools()
 			syncProxy("")
 		},
+
+		// A handover between builds has settled: act at once on whatever
+		// waited for it, not at the next tick.
+		OnHandedOver: reconcileOnce,
 	}
 	return proxy.NewGateway(settings, sup), sup, nil
 }
@@ -276,6 +299,7 @@ func refreshPools() {
 func claimPort(spec manifest.AppSpec) error {
 	want := proxy.App{Key: spec.AppStateFile, Host: spec.EffectiveHost(), Port: spec.Port}
 	h := currentHooks()
+	h.Ready()
 	served := h.Served()
 
 	for _, a := range served {
@@ -304,7 +328,9 @@ func claimPort(spec manifest.AppSpec) error {
 
 // servedApp returns what the load balancer serves for the app at key.
 func servedApp(key string) (proxy.App, bool) {
-	for _, a := range currentHooks().Served() {
+	h := currentHooks()
+	h.Ready()
+	for _, a := range h.Served() {
 		if a.Key == key {
 			return a, true
 		}

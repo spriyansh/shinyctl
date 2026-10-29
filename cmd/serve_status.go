@@ -133,6 +133,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp.BalancerRSS = rss[balancer]
+	resp.BalancerStarting = gateway.Starting()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
