@@ -1,4 +1,4 @@
-.PHONY: vet test test-race check-format cross notices install show-busy-ports tidy format run
+.PHONY: vet test test-race check-format cross notices vuln snapshot install show-busy-ports tidy format run
 
 vet:
 	go vet ./...
@@ -22,6 +22,16 @@ cross:
 # notices writes the license notices that the release archives carry.
 notices:
 	go run ./tools/notices -o build/THIRD_PARTY_NOTICES
+
+# vuln looks for known vulnerabilities in the code that is called. The
+# version is the one .github/workflows/vuln.yml uses.
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+# snapshot builds the release archives for all four systems into dist/ without
+# publishing anything; it needs goreleaser.
+snapshot:
+	goreleaser release --snapshot --clean --skip=publish
 
 install: vet
 	go install .

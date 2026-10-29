@@ -1,0 +1,27 @@
+name: vuln
+
+# Known vulnerabilities in what shinyctl calls. Apart from ci.yml so that a
+# new advisory in a dependency doesn't fail unrelated changes; it must be
+# clean before a release is tagged (see CONTRIBUTING.md).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

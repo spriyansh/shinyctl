@@ -16,23 +16,40 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -trimpath
+    # The commit's time, not the build's, so the same commit builds the same files.
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
-      - -s -w -X github.com/spriyansh/shinyctl/cmd.Version={{.Version}}
+      - -s -w -X github.com/spriyansh/shinyctl/cmd.Version=v{{.Version}}
 
 archives:
   - formats: [tar.gz]
     name_template: "shinyctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: true
+    builds_info:
+      owner: root
+      group: root
+      mtime: "{{ .CommitDate }}"
     files:
-      - README.md
-      - LICENSE
+      - src: README.md
+        info: &info {owner: root, group: root, mtime: "{{ .CommitDate }}"}
+      - src: LICENSE
+        info: *info
       - src: build/THIRD_PARTY_NOTICES
         dst: THIRD_PARTY_NOTICES
+        info: *info
       # named, not globbed: a state.json left in the example folder is not packed
-      - examples/hello/app.R
-      - examples/hello/shinyctl.yaml
+      - src: examples/hello/app.R
+        info: *info
+      - src: examples/hello/shinyctl.yaml
+        info: *info
 
 checksum:
   name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incminor .Version }}-snapshot-{{ .ShortCommit }}"
 
 changelog:
   disable: true

@@ -24,7 +24,11 @@ Run `make test-race` too before sending anything that touches `cmd/` or
 handlers all run concurrently, and the race detector is what catches an
 unsynchronized Load → Save. CI (`.github/workflows/ci.yml`) runs
 `check-format`, `vet` and `test-race` on Linux and macOS for pushes to
-`main` and pull requests.
+`main` and pull requests, plus `make cross`, a check of the license notices
+and of `.goreleaser.yaml`. `.github/workflows/vuln.yml` runs `govulncheck`
+weekly and on pushes; a failure there is a dependency to update, not a broken
+change. Dependabot opens one pull request a week for the Go modules and one
+for the actions.
 
 To run the suite on Linux from a Mac, start [colima](https://github.com/abiosoft/colima)
 (`colima start`) and run it in a container, with the repo mounted read-only:

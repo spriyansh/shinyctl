@@ -10,6 +10,7 @@ permissions:
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,10 +18,11 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.10"
+          go-version-file: go.mod
 
       - uses: goreleaser/goreleaser-action@v6
         with:
+          version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

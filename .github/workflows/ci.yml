@@ -23,6 +23,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: go.mod and go.sum are tidy
+        run: go mod tidy -diff
       - name: gofmt
         run: make check-format
       - name: go vet
@@ -43,3 +45,17 @@ jobs:
         run: make cross
       - name: license notices (every module has a license)
         run: go run ./tools/notices -o /dev/null
+
+  release-config:
+    name: release configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check
