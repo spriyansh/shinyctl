@@ -1,4 +1,4 @@
-.PHONY: vet test test-race check-format cross install show-busy-ports tidy format run
+.PHONY: vet test test-race check-format cross notices install show-busy-ports tidy format run
 
 vet:
 	go vet ./...
@@ -18,6 +18,10 @@ cross:
 	@for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
 		echo "vet $$t"; GOOS=$${t%/*} GOARCH=$${t#*/} CGO_ENABLED=0 go vet ./... || exit 1; \
 	done
+
+# notices writes the license notices that the release archives carry.
+notices:
+	go run ./tools/notices -o build/THIRD_PARTY_NOTICES
 
 install: vet
 	go install .

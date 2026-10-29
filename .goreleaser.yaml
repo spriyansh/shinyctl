@@ -1,5 +1,9 @@
 version: 2
 
+before:
+  hooks:
+    - go run ./tools/notices -o build/THIRD_PARTY_NOTICES
+
 builds:
   - id: shinyctl
     main: .
@@ -18,6 +22,14 @@ builds:
 archives:
   - formats: [tar.gz]
     name_template: "shinyctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - src: build/THIRD_PARTY_NOTICES
+        dst: THIRD_PARTY_NOTICES
+      # named, not globbed: a state.json left in the example folder is not packed
+      - examples/hello/app.R
+      - examples/hello/shinyctl.yaml
 
 checksum:
   name_template: "checksums.txt"

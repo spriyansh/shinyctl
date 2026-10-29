@@ -41,3 +41,5 @@ jobs:
           go-version-file: go.mod
       - name: vet for linux and macOS, amd64 and arm64
         run: make cross
+      - name: license notices (every module has a license)
+        run: go run ./tools/notices -o /dev/null
