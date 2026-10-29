@@ -11,6 +11,9 @@ make vet           # go vet ./...
 make cross         # go vet for linux and darwin, amd64 and arm64
 make test          # go test ./...
 make test-race     # go test -race -shuffle=on ./...
+make notices       # write the license notices of the release archives to build/
+make vuln          # govulncheck: known vulnerabilities in what is called
+make snapshot      # build the four release archives into dist/ (needs goreleaser)
 make install       # vet, then go install .
 make run           # format, install, then apply the example app in examples/hello
 ```
@@ -108,21 +111,31 @@ Words that mean one thing in the code:
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs
 [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) and publishes a
-GitHub Release with binaries for `linux`/`darwin` × `amd64`/`arm64`, plus a
-`checksums.txt`. Nothing manual beyond the tag itself:
+GitHub Release with an archive for each of `linux`/`darwin` × `amd64`/`arm64`,
+plus a `checksums.txt`. An archive unpacks into a folder of its own
+(`shinyctl_0.1.0_linux_arm64/`) with the binary, `README.md`, `LICENSE`,
+`THIRD_PARTY_NOTICES` and the example in `examples/hello`. The notices are
+made by `tools/notices` from the licenses of every module the binary is built
+from; it fails when a module has none. Builds use `-trimpath` and the commit's
+time, so the same commit gives the same files.
 
-```sh
-git tag v0.1.0
-git push --tags
-```
+Before tagging:
 
-To sanity-check the GoReleaser config locally before trusting a real tag
-push (doesn't need a tag, doesn't need push access, doesn't publish
-anything):
+1. CI is green on all jobs, `vuln` included.
+2. `make snapshot` works, and the archive for your system runs
+   (`shinyctl version` prints `v0.1.0-snapshot-<commit>`). It writes `dist/`,
+   which git ignores.
+3. A fresh install on a machine that is not your own follows the README word
+   for word, through a reboot.
+4. The release notes are ready.
+5. Tag and push:
 
-```sh
-goreleaser build --snapshot --clean
-```
+   ```sh
+   git tag v0.1.0
+   git push --tags
+   ```
 
-`shinyctl version` reports whatever GoReleaser injected for that build;
-a plain `go build`/`go install` leaves it at `dev`.
+6. Paste the notes into the GitHub release.
+
+`shinyctl version` prints the tag for a release (GoReleaser sets it), the tag
+for `go install ...@v0.1.0`, and `dev (abc1234)` for a build from a checkout.

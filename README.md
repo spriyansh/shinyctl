@@ -1,33 +1,63 @@
 # shinyctl
 
-Keeps R Shiny apps running on a single machine. No root, no containers.
+shinyctl keeps R Shiny apps running on one machine, with no root and no
+containers: one binary, a YAML file for each app, and `shinyctl apply`. It
+restarts an app when it dies, runs it as several copies behind a built-in
+load balancer with a warm spare, keeps each visitor on one copy, and
+redeploys a new version without cutting off the visitors of the old one. It
+is for a lab server, a Raspberry Pi or a small VPS.
 
-You describe an app in a YAML manifest and run `shinyctl apply`. A per-user
-background process, `shinyctl-api`, starts the app and restarts it whenever
-it dies. Each app runs as one or more R processes, called copies, behind a
-built-in load balancer that listens on the port you chose. A warm spare
-copy is kept ready, so when a copy dies another takes its place at once.
-Each visitor stays on one copy. A new version takes over without cutting
-off the visitors of the old one. When no copy is ready, requests to that
-port wait instead of failing.
+## What you get
+
+- **Restarts.** An app that dies comes back, with a backoff when it keeps
+  dying, as `restart-policy` says.
+- **Copies and a warm spare.** Each app is one or more R processes ("copies")
+  behind a load balancer on the port you chose. A ready spare takes over the
+  moment a copy dies.
+- **Sticky sessions.** A visitor stays on the copy that holds their Shiny
+  session.
+- **Redeploys that don't cut visitors off.** New copies start next to the
+  old ones; the old ones keep their visitors until those leave.
+- **One status view.** `shinyctl status` shows every copy, its role,
+  memory, open sessions and crashes, and says what is going on.
+- **Start at boot** on Linux, through a systemd user unit.
 
 ## Requirements
 
-- Linux or macOS
+- Linux or macOS, on amd64 or arm64
 - R with the `shiny` package, and `Rscript` on your `PATH`
-- Go 1.26.10 or newer to install. There are no prebuilt binaries yet.
+- systemd, for starting at boot on Linux (optional)
+- Go 1.26.10 or newer, only to build it yourself
 
 ## Install
 
+Download the archive for your system and `checksums.txt` from the
+[releases page](https://github.com/spriyansh/shinyctl/releases), check the
+download, unpack it and put `shinyctl` on your `PATH`. For Linux on arm64
+(a Raspberry Pi), version 0.1.0:
+
 ```sh
-go install github.com/spriyansh/shinyctl@latest
+curl -LO https://github.com/spriyansh/shinyctl/releases/download/v0.1.0/shinyctl_0.1.0_linux_arm64.tar.gz
+curl -LO https://github.com/spriyansh/shinyctl/releases/download/v0.1.0/checksums.txt
+sha256sum --ignore-missing -c checksums.txt        # macOS: shasum -a 256 --ignore-missing -c checksums.txt
+tar -xzf shinyctl_0.1.0_linux_arm64.tar.gz
+mkdir -p ~/.local/bin && cp shinyctl_0.1.0_linux_arm64/shinyctl ~/.local/bin/
 ```
 
-Or from a clone of this repo:
+The other archives are `linux_amd64`, `darwin_arm64` (Apple silicon) and
+`darwin_amd64`. Each unpacks into a folder of its own with `shinyctl`, this
+README, the license and notices, and the example in `examples/hello`.
 
-```sh
-make install
-```
+- On Debian and Ubuntu, `~/.local/bin` is on your `PATH` after your next
+  login. On macOS, add `export PATH="$HOME/.local/bin:$PATH"` to
+  `~/.zprofile`. A file downloaded with a browser on macOS is quarantined;
+  `curl` doesn't do that, and `xattr -d com.apple.quarantine shinyctl` lifts
+  it.
+- With Go 1.26.10 or newer: `go install github.com/spriyansh/shinyctl@latest`.
+- From a clone of this repo: `make install`.
+
+Check it with `shinyctl version`. It prints `v0.1.0` for a release (and for
+`go install ...@v0.1.0`), and `dev (abc1234)` for a build from a checkout.
 
 ## Quick start
 
@@ -46,7 +76,12 @@ my-app  2     warm    8080  61430  alive   ready  139M  0         -        2026-
 Memory: 281M in 2 R processes (1 warm), plus 41M for the load balancer.
 ```
 
+Open `http://127.0.0.1:8080` (the `port` in your manifest).
+
 ## Try the example
+
+The example app is in the archive, in `examples/hello`, and in this repo.
+From the unpacked archive folder:
 
 ```sh
 shinyctl apply -f examples/hello/shinyctl.yaml
@@ -61,95 +96,45 @@ until then) and becomes the spare, so the roles in `status` have swapped.
 printed, including the crash. Remove the app with
 `shinyctl delete -f examples/hello/shinyctl.yaml`.
 
-## Commands
+If something else on the machine already uses port 8765, `apply` says so and
+`status` shows `port-in-use`. Change `port` in `examples/hello/shinyctl.yaml`
+and apply again.
 
-| Command | What it does |
-|---|---|
-| `init` | Writes a starter manifest. `-o` sets the path, `--force` overwrites. |
-| `apply -f <file>` | Starts the app, or updates it if the manifest changed (see below). Starts `shinyctl-api` on first use. Also resumes a stopped app. `--now` stops copies that are replaced or no longer wanted without waiting for their visitors. |
-| `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. |
-| `stop -f <file>` | Sends SIGTERM to each of the app's processes, waits 10 seconds, then SIGKILL, and closes the app's port. The app stays down until the next `apply` or `restart`. |
-| `restart -f <file>` | Starts new copies from the manifest as it is now, so new code in `app.R` and other app files takes effect, and returns at once. Once they are ready they take new visitors; the old copies keep theirs until those leave or `drain-timeout` passes (see Redeploys). `--now` stops the old copies as soon as the new ones are ready. Also starts a stopped or crash-looping app right away. |
-| `logs -f <file>` | Prints the last 100 lines of the app's log. `--copy N` shows one copy; without it every copy is shown. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
-| `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
-| `startup` | Prints a systemd user unit that starts `shinyctl-api` at boot (Linux), and on stderr how to install it. |
-| `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
-| `version` | Prints the version. Source builds print `dev`. |
+## How it works
 
-`apply` replaces the copies of a running app, as `restart` does, when a
-manifest field that shapes its process changed: `app-group`, `app-name`,
-`entrypoint-file`, `working-dir` or `env`. A changed `port`, `host`,
-`replicas`, `warm-replicas`, `lb-policy`, `drain-timeout` or
-`restart-policy` takes effect without restarting the app's processes
-(copies are started, or drained, as needed). `apply` never looks at `app.R`
-or other app files: run `restart` for code changes.
-
-`stop`, `restart`, `delete` and a re-apply signal a process only if its
-command line contains the app's `entrypoint-file`. If the recorded process
-ID now belongs to something else, shinyctl leaves it alone, and `stop`,
-`restart` or `delete` names it in the reply.
-
-## Manifest
-
-```yaml
-app-group: lab                  # required
-app-name: explorer              # required
-entrypoint-file: ./app.R        # required
-port: 8080                      # required; not 20000-29999
-app-state-file: ./state.json    # required; identifies the app to stop and delete
-host: 0.0.0.0                   # default 0.0.0.0 (all interfaces); 127.0.0.1 = this machine only
-restart-policy: always          # always (default), on-failure, or never
-working-dir: ./                 # default: the entrypoint-file's directory
-env:                            # added on top of shinyctl-api's own environment
-  R_LIBS_USER: /home/me/Rlibs
-replicas: 2                     # copies that serve visitors; default 1; 1-16
-warm-replicas: 1                # ready spares that take over at once; default 1; 0-16; 0 turns them off
-lb-policy: least-conn           # how a new visitor picks a copy: least-conn (default), round-robin, random, first
-drain-timeout: 15m              # how long replaced copies keep their visitors; default 15m; 0 to 24h; 0 stops them at once
-```
-
-- **Relative paths resolve from the manifest's folder**, so commands work
-  from any directory. `~` is not expanded.
-- **`app-group` and `app-name` can't contain `/` or `@`**, which name the
-  app's log files.
-- **`host` must be an IP address**, not a hostname. `0.0.0.0` listens on
-  IPv4 only and `::` on IPv6 only.
-- **`port` can't be between 20000 and 29999.** shinyctl runs each app's R
-  process on a port in that range, on 127.0.0.1, behind the load balancer
-  that listens on `port`. Your app sees requests coming from 127.0.0.1; the
-  visitor's address is the first entry of its `X-Forwarded-For` header. When
-  a web server on the same machine in front of the port (nginx terminating
-  TLS, say) sends its own `X-Forwarded-For`, `X-Forwarded-Proto` and
-  `X-Forwarded-Host`, they reach the app, with 127.0.0.1 added to the end of
-  `X-Forwarded-For`. Those headers from anywhere else are replaced. Each copy gets a port
-  of its own in that range, and `shinyctl-api` checks that the socket on it belongs
-  to the copy before it sends visitors there: if another program holds the
-  port, the copy is moved to another one.
-- **`drain-timeout` is a duration** such as `90s`, `15m` or `1h`; a number
-  alone is refused.
-- **`shinyctl-api` inherits the environment of the shell that started
-  it.** Apps get that environment plus `env`.
-
-## Copies and warm spares
-
-- **Roles.** Of the copies that are running and ready, the oldest
+- **`shinyctl-api` and the load balancer.** `shinyctl-api` is a per-user
+  background process that `apply` starts when it is not running. It starts
+  your apps, restarts them, and tells the load balancer where they are. The
+  load balancer, a process of its own, listens on each app's port and sends
+  every request to one of the app's copies. Apps and the load balancer keep
+  running if `shinyctl-api` dies; a new `shinyctl-api` adopts them.
+- **Copies and roles.** Of the copies that are running and ready, the oldest
   `replicas` are *active* and take new visitors. The rest are *warm*:
   running, ready, and given no new visitors while every active copy is up
-  (a visitor whose cookie names a warm copy stays on it). A warm copy stands
-  in for an active copy that is down. A copy that is being replaced is
-  *draining* (see Redeploys). `status` shows each copy's role.
+  (a visitor whose cookie names a warm copy stays on it). A copy that is
+  being replaced is *draining* (see Redeploys). `status` shows each copy's
+  role.
 - **Takeover.** When an active copy fails, the load balancer sends its
   visitors to a warm copy at once, and `shinyctl-api` makes that copy active
   within milliseconds; the visitors stay on it. This holds for copies that
-  an earlier `shinyctl-api` started too. A page with the example's script reloads by
-  itself within about a second and lands on the warm copy. The dead copy
-  restarts after its backoff and comes back as the newest copy, so it is the
-  spare: roles don't swap back on their own. While `shinyctl-api` is down the
-  load balancer still puts the spare in, but nothing restarts the dead copy
-  until `shinyctl-api` is up again. Where the system can't watch copies from
-  an earlier run (Linux before 5.3, or a sandbox that forbids it),
-  `shinyctl-api` notices them at its next check, every 5 seconds; the
+  an earlier `shinyctl-api` started too. A page with the example's script
+  reloads by itself within about a second and lands on the warm copy. The
+  dead copy restarts after its backoff and comes back as the newest copy, so
+  it is the spare: roles don't swap back on their own. While `shinyctl-api`
+  is down the load balancer still puts the spare in, but nothing restarts the
+  dead copy until `shinyctl-api` is up again. Where the system can't watch
+  copies from an earlier run (Linux before 5.3, or a sandbox that forbids
+  it), `shinyctl-api` notices them at its next check, every 5 seconds; the
   load balancer still puts the spare in.
+- **Sticky sessions.** A visitor stays on one copy, for as long as it is
+  running, through a cookie named `lb_<port>` (for example `lb_8080`) that
+  the load balancer sets. Copies don't share memory, so a Shiny session
+  has to stay where its R process is. Stickiness needs the browser to
+  keep that cookie: it doesn't hold for an app embedded in another site's
+  frame, or in Safari with third-party cookies blocked.
+- **`lb-policy`** picks the copy for a visitor who has none, among the
+  active copies: `least-conn` (the fewest open connections, the default),
+  `round-robin`, `random`, or `first` (always the oldest active copy).
 - **Redeploys.** `restart`, and an `apply` that changes `env`,
   `working-dir`, `app-group`, `app-name` or `entrypoint-file`, start new
   copies next to the running ones and return at once: `replicas` of them
@@ -186,63 +171,221 @@ drain-timeout: 15m              # how long replaced copies keep their visitors; 
 
   hello: copy 1 is draining with 2 sessions; it stops when they end, or in 15m at the latest.
   ```
-- **Sticky sessions.** A visitor stays on one copy, for as long as it is
-  running, through a cookie named `lb_<port>` (for example `lb_8080`) that
-  the load balancer sets. Copies don't share memory, so a Shiny session
-  has to stay where its R process is. Stickiness needs the browser to
-  keep that cookie: it doesn't hold for an app embedded in another site's
-  frame, or in Safari with third-party cookies blocked.
-- **`lb-policy`** picks the copy for a visitor who has none, among the
-  active copies: `least-conn` (the fewest open connections, the default),
-  `round-robin`, `random`, or `first` (always the oldest active copy).
-- **Scaling down** with `replicas` or `warm-replicas` drains the copies it
-  removes the same way: they get no new visitors, and stop when their
-  sessions end or at `drain-timeout`. Copies that are starting or dead stop
-  at once, and `--now` stops them all at once. Copies are retired in this
-  order: with no process, still starting, then ready ones with the fewest
-  open sessions (a warm copy before an active one when they tie).
+- **Scaling.** Changing `replicas` or `warm-replicas` starts copies, or drains
+  the ones it removes the same way: they get no new visitors, and stop when
+  their sessions end or at `drain-timeout`. Copies that are starting or dead
+  stop at once, and `--now` stops them all at once. Copies are retired in
+  this order: with no process, still starting, then ready ones with the
+  fewest open sessions (a warm copy before an active one when they tie).
+- **Restarts and crashes.** `restart-policy: always` restarts after any
+  exit, `on-failure` only after a non-zero exit, `never` leaves the app
+  down. A crash is noticed the moment it happens, and a check every 5
+  seconds catches anything else. Crashes are counted and backed off for each
+  copy: 2 seconds, doubling up to 1 minute. While an app restarts, a request
+  to its port waits up to 15 seconds for it; after that the visitor gets a
+  page saying the app is restarting, which reloads itself every few seconds.
+  After a restart, an open page greys out until it is reloaded. The example
+  reloads it by itself once the app answers again: copy its `tags$script`
+  into your app's UI. Shiny's own `session$allowReconnect("force")` is no
+  substitute: with shiny 1.14, a page reconnected to a new R process keeps
+  its old outputs, and its downloads stop working.
 - **Memory.** Each copy is a full R process: with the defaults every app
   runs two. A small app takes about 110-140 MB per copy on a Raspberry Pi 5.
   During a redeploy both versions run side by side: the peak is the old
   copies plus `replicas` new ones (3 processes with the defaults, for the
   few seconds R takes to start), and old copies that still have visitors run
-  until `drain-timeout`. The peak can be one higher, for up to about 15 seconds, if the
-  load balancer is restarting at the moment of the switch, or if a second
-  restart comes within about 15 seconds of the previous one's switch. On a small machine, set `warm-replicas: 0`, a
-  shorter `drain-timeout`, or use `--now`. `status` shows the total.
+  until `drain-timeout`. The peak can be one higher, for up to about 15
+  seconds, if the load balancer is restarting at the moment of the switch, or
+  if a second restart comes within about 15 seconds of the previous one's
+  switch. On a small machine, set `warm-replicas: 0`, a shorter
+  `drain-timeout`, or use `--now`. `status` shows the total.
 
-## Restarts
+## Manifest
 
-- `always` restarts after any exit. `on-failure` restarts only after a
-  non-zero exit. `never` leaves the app down.
-- A crash is noticed the moment it happens. A check every 5 seconds
-  catches anything else.
-- Crashes are counted and backed off for each copy: 2 seconds, doubling up
-  to 1 minute. The count resets once the copy stays up for a minute.
-- `STATUS` in `status` is `alive`, `dead`, `stopped`, `crash-looping` or
-  `port-in-use`. `port-in-use` means another program holds the app's port,
-  so no copy was started; the reason is printed under the table, nothing
-  is counted as a crash, and the next check tries again.
-  `READY` turns from `starting` to `ready` once the copy's R process
-  accepts connections and the load balancer lists it. `ROLE` is `active`,
-  `warm` or `draining`. `SESSIONS` is the number of requests open to the
-  copy, a Shiny session being one open WebSocket. A draining copy stops when
-  its `SESSIONS` reach 0; a line under the table says how many are left and
-  when `drain-timeout` ends it. `MEM` is the resident memory of
-  the copy's main R process; worker processes it started aren't counted.
-  The load balancer's own memory, about 40 MB for all apps together, is
-  shown on the `Memory:` line and isn't counted in any copy.
-- While an app restarts, a request to its port waits up to 15 seconds for
-  it. After that the visitor gets a page saying the app is restarting,
-  which reloads itself every few seconds.
-- After a restart, an open page greys out until it is reloaded. The
-  example reloads it by itself once the app answers again: copy its
-  `tags$script` into your app's UI. Shiny's own
-  `session$allowReconnect("force")` is no substitute: with shiny 1.14, a
-  page reconnected to a new R process keeps its old outputs, and its
-  downloads stop working.
+```yaml
+app-group: lab                  # required
+app-name: explorer              # required
+entrypoint-file: ./app.R        # required
+port: 8080                      # required; not 20000-29999
+app-state-file: ./state.json    # required; identifies the app to stop and delete
+host: 0.0.0.0                   # default 0.0.0.0 (all interfaces); 127.0.0.1 = this machine only
+restart-policy: always          # always (default), on-failure, or never
+working-dir: ./                 # default: the entrypoint-file's directory
+env:                            # added on top of shinyctl-api's own environment
+  R_LIBS_USER: /home/me/Rlibs
+replicas: 2                     # copies that serve visitors; default 1; 1-16
+warm-replicas: 1                # ready spares that take over at once; default 1; 0-16; 0 turns them off
+lb-policy: least-conn           # how a new visitor picks a copy: least-conn (default), round-robin, random, first
+drain-timeout: 15m              # how long replaced copies keep their visitors; default 15m; 0 to 24h; 0 stops them at once
+```
 
-## Survive reboots (Linux)
+| Field | Required / default | Meaning and limits |
+|---|---|---|
+| `app-group` | required | Names the app together with `app-name`. No `/` or `@`: they name the log files. |
+| `app-name` | required | The app's name in `status` and in the log file names. No `/` or `@`. |
+| `entrypoint-file` | required | The R file that starts the app. A running process is recognised by this path in its command line. |
+| `port` | required | The port the app is served on. Not between 20000 and 29999. |
+| `app-state-file` | required | Where shinyctl keeps the app's state. It identifies the app: changing it makes a different app. |
+| `host` | `0.0.0.0` | An IP address, not a hostname. `0.0.0.0` listens on IPv4 only and `::` on IPv6 only. `127.0.0.1` is this machine only. |
+| `restart-policy` | `always` | `always`, `on-failure` or `never`. |
+| `working-dir` | the entrypoint's folder | The folder the app starts in. |
+| `env` | none | Variables added on top of `shinyctl-api`'s environment. |
+| `replicas` | 1 | Copies that serve visitors, 1 to 16. |
+| `warm-replicas` | 1 | Ready spares, 0 to 16. Each is an R process. |
+| `lb-policy` | `least-conn` | `least-conn`, `round-robin`, `random` or `first`. |
+| `drain-timeout` | `15m` | A duration such as `90s`, `15m` or `1h`, from `0` to `24h`; a number alone is refused. `0` stops replaced copies at once. |
+
+- **Relative paths resolve from the manifest's folder**, so commands work
+  from any directory. `~` is not expanded.
+- **`port` can't be between 20000 and 29999.** shinyctl runs each app's R
+  process on a port in that range, on 127.0.0.1, behind the load balancer
+  that listens on `port`. Your app sees requests coming from 127.0.0.1; the
+  visitor's address is the first entry of its `X-Forwarded-For` header. When
+  a web server on the same machine in front of the port (nginx terminating
+  TLS, say) sends its own `X-Forwarded-For`, `X-Forwarded-Proto` and
+  `X-Forwarded-Host`, they reach the app, with 127.0.0.1 added to the end of
+  `X-Forwarded-For`. Those headers from anywhere else are replaced. Each
+  copy gets a port of its own in that range, and `shinyctl-api` checks that
+  the socket on it belongs to the copy before it sends visitors there: if
+  another program holds the port, the copy is moved to another one.
+- **`shinyctl-api` inherits the environment of the shell that started
+  it.** Apps get that environment plus `env`.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `init` | Writes a starter manifest. `-o` sets the path, `--force` overwrites. |
+| `apply -f <file>` | Starts the app, or updates it if the manifest changed (see below). Starts `shinyctl-api` on first use. Also resumes a stopped app. `--now` stops copies that are replaced or no longer wanted without waiting for their visitors. |
+| `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. |
+| `stop -f <file>` | Sends SIGTERM to each of the app's processes, waits 10 seconds, then SIGKILL, and closes the app's port. The app stays down until the next `apply` or `restart`. |
+| `restart -f <file>` | Starts new copies from the manifest as it is now, so new code in `app.R` and other app files takes effect, and returns at once. Once they are ready they take new visitors; the old copies keep theirs until those leave or `drain-timeout` passes (see Redeploys). `--now` stops the old copies as soon as the new ones are ready. Also starts a stopped or crash-looping app right away. |
+| `logs -f <file>` | Prints the last 100 lines of the app's log. `--copy N` shows one copy; without it every copy is shown. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
+| `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
+| `startup` | Prints a systemd user unit that starts `shinyctl-api` at boot (Linux), and on stderr how to install it. |
+| `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
+| `version` | Prints the version: `v0.1.0` for a release or `go install ...@v0.1.0`, `dev (abc1234)` for a build from a checkout (`, modified` when it has uncommitted changes). |
+
+`apply` replaces the copies of a running app, as `restart` does, when a
+manifest field that shapes its process changed: `app-group`, `app-name`,
+`entrypoint-file`, `working-dir` or `env`. A changed `port`, `host`,
+`replicas`, `warm-replicas`, `lb-policy`, `drain-timeout` or
+`restart-policy` takes effect without restarting the app's processes
+(copies are started, or drained, as needed). `apply` never looks at `app.R`
+or other app files: run `restart` for code changes.
+
+`stop`, `restart`, `delete` and a re-apply signal a process only if its
+command line contains the app's `entrypoint-file`. If the recorded process
+ID now belongs to something else, shinyctl leaves it alone, and `stop`,
+`restart` or `delete` names it in the reply.
+
+## Reading `status`
+
+The columns:
+
+- `COPY`, `ROLE` (`active`, `warm` or `draining`) and `PORT`, the app's
+  public port.
+- `PID` and `STARTED`: the copy's R process and when it started.
+- `STATUS` is `alive`, `dead`, `stopped`, `crash-looping`, `exited` or
+  `port-in-use`:
+  - `crash-looping` is a copy that keeps dying and is being restarted with a
+    backoff; `dead` is a copy that is not running and not counted as a
+    crash.
+  - `exited` is a copy that stopped and that `restart-policy` leaves down on
+    purpose (`never`, or a clean exit under `on-failure`); a line under the
+    table says so, and `apply` or `restart` starts it again.
+  - `port-in-use` means another program holds the app's port, so no copy was
+    started; the reason is printed under the table, nothing is counted as a
+    crash, and the next check tries again.
+- `READY` turns from `starting` to `ready` once the copy's R process accepts
+  connections and the load balancer lists it.
+- `MEM` is the resident memory of the copy's main R process; worker
+  processes it started aren't counted.
+- `SESSIONS` is the number of requests open to the copy, a Shiny session
+  being one open WebSocket.
+- `CRASHES` counts crashes in a row: it goes back to `-` once the copy has
+  stayed up for a minute.
+
+Under the table, `status` says what the table can't:
+
+- a `Memory:` line with the total of the running copies, plus about 40 MB for
+  the load balancer, which isn't counted in any copy;
+- an app's port that is not served, and why;
+- an app that was not started, and why;
+- a redeploy that has not taken over yet: which copy is starting, and, if the
+  new version does not start, which copy and where to look;
+- draining copies: how many sessions are left and when `drain-timeout` ends
+  them at the latest;
+- copies that `exited`, and why;
+- an app without a spare for the seconds between a switch and its new spare
+  being ready.
+
+## HTTPS and the internet
+
+shinyctl serves plain HTTP. To put an app on the internet over HTTPS, set
+`host: 127.0.0.1` in its manifest, so only this machine can reach the port,
+and put one of these in front.
+
+**nginx**, with a certificate from Let's Encrypt (for example through
+[certbot](https://certbot.eff.org/)). Shiny needs the WebSocket upgrade and a
+long read timeout:
+
+```nginx
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+server {
+    listen 443 ssl;
+    server_name shiny.example.org;
+    ssl_certificate     /etc/letsencrypt/live/shiny.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/shiny.example.org/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_read_timeout 1d;
+        proxy_buffering off;
+    }
+}
+```
+
+To serve the app under a path, use `location /myapp/ { proxy_pass http://127.0.0.1:8080/; ... }`
+with both slashes, so the app sees `/`, and send the address without the
+final slash to the one with it:
+
+```nginx
+location = /myapp { return 301 /myapp/; }
+```
+
+**Cloudflare Tunnel** needs no open port. For a quick try:
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:8080
+```
+
+For a permanent address, create a named tunnel (see Cloudflare's
+[documentation](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)).
+WebSockets work as they are.
+
+**Tailscale** serves the app inside your tailnet over HTTPS, or to the
+internet with Funnel (see [Serve](https://tailscale.com/kb/1312/serve) and
+[Funnel](https://tailscale.com/kb/1223/funnel)):
+
+```sh
+tailscale serve --bg 8080       # HTTPS inside your tailnet
+tailscale funnel --bg 8080      # public
+```
+
+What shinyctl does with these: a web server on the same machine in front of
+the port is trusted for `X-Forwarded-*`, so the app sees the visitor's
+address and that the request was HTTPS. The cookie that keeps a visitor on a
+copy becomes `Secure; SameSite=None` when that server says the request was
+`https`.
+
+## Start at boot (Linux)
 
 Nothing restarts `shinyctl-api` after a reboot by itself. `shinyctl startup`
 prints a systemd user unit for it, and on stderr the commands to install it:
@@ -266,7 +409,26 @@ loginctl enable-linger "$USER"
 - Run `startup` again after moving `shinyctl` or R.
 - On macOS, run `shinyctl serve -d` after a reboot.
 
-## Stopping everything
+## Upgrading shinyctl
+
+Replace the binary as in Install, then restart `shinyctl-api`:
+
+```sh
+systemctl --user restart shinyctl                 # if you installed the service
+# or, if you started it by hand:
+pkill -u "$USER" -f '(^|/)shinyctl serve$' && shinyctl serve -d
+```
+
+Your apps keep running: the new `shinyctl-api` adopts them. If the new
+version comes with a new load balancer, it is started next to the old one
+and takes over without refusing a connection. The old one answers the
+requests it is in the middle of, for up to five seconds, and then stops.
+Connections that were open on it (a Shiny session is one) end, so a page open
+at that moment reconnects or reloads once (pages with the example's script do
+it by themselves). On Linux, a request that reaches the old one in the very
+instant it closes can fail once.
+
+## Stopping and uninstalling
 
 `shinyctl-api` and the load balancer keep running after you remove the
 `shinyctl` binary, and the load balancer keeps every app's port open. To stop
@@ -283,6 +445,14 @@ pkill -u "$USER" -f '(^|/)shinyctl (serve|proxy --config .*)$'
 The pattern matches only `shinyctl serve` and `shinyctl proxy --config …` of
 your user, not other `shinyctl` commands. An app you didn't delete keeps
 running, and its port stays closed once the load balancer is gone.
+
+To remove shinyctl itself:
+
+```sh
+rm -f ~/.config/systemd/user/shinyctl.service && systemctl --user daemon-reload   # Linux, if you installed the service
+rm -f ~/.local/bin/shinyctl                       # or wherever you put it
+rm -rf ~/.shinyctl                                # logs, settings and the load balancer's files
+```
 
 ## Files
 
@@ -305,7 +475,7 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
   `delete` the old one with its old manifest first.
 - **Apps keep running if `shinyctl-api` dies, but nothing watches them.**
   Run `shinyctl serve -d` or any `apply` to bring it back. It resumes every
-  app it was managing. On Linux, [the unit above](#survive-reboots-linux)
+  app it was managing. On Linux, [the unit above](#start-at-boot-linux)
   starts it at boot and restarts it whenever it dies. The load balancer
   keeps serving them, but if it dies too, every app is unreachable until
   `shinyctl-api` is back.
@@ -332,13 +502,9 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
   copy counts as ready once R accepts connections.
 - **Copies don't share memory.** Anything a session keeps in R lives in
   its copy.
-- **Upgrading from a version without warm spares starts one for every
-  app.** `status` shows the new copy; `warm-replicas: 0` removes it.
 - **The load balancer is in the path of every request.** If it dies,
   `shinyctl-api` restarts it within about a second, and every app is
-  unreachable until then. Upgrading shinyctl restarts it once, when
-  `shinyctl-api` next starts. The first upgrade to a version with the load
-  balancer also restarts every app once.
+  unreachable until then.
 
 ## Contributing
 
@@ -346,4 +512,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development and releases.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The release archives also carry
+`THIRD_PARTY_NOTICES`, with the licenses of the code shinyctl includes.
