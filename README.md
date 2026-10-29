@@ -15,7 +15,7 @@ port wait instead of failing.
 
 - Linux or macOS
 - R with the `shiny` package, and `Rscript` on your `PATH`
-- Go 1.26.5 or newer to install. There are no prebuilt binaries yet.
+- Go 1.26.10 or newer to install. There are no prebuilt binaries yet.
 
 ## Install
 

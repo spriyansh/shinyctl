@@ -30,9 +30,15 @@ To run the suite on Linux from a Mac, start [colima](https://github.com/abiosoft
 (`colima start`) and run it in a container, with the repo mounted read-only:
 
 ```sh
-docker run --rm --init -v "$PWD":/src:ro -w /src -e GOFLAGS=-buildvcs=false \
+mkdir -p ~/.cache/shinyctl-gomod
+docker run --rm --init -v "$PWD":/src:ro -v ~/.cache/shinyctl-gomod:/go/pkg/mod -w /src \
+  -e GOFLAGS=-buildvcs=false -e GOTOOLCHAIN=auto \
   golang:1.26.5 make check-format vet test-race
 ```
+
+go.mod asks for a newer Go than the image has, and `GOTOOLCHAIN=auto` makes the
+image's Go fetch the one go.mod names (into the mounted cache, so only the first
+run downloads it). Any `golang` image of 1.21 or newer works the same way.
 
 On a Raspberry Pi 5, `test-race` stops before any test runs ("unsupported
 VMA range"): the race detector needs a 48-bit address space, and the Pi 5
