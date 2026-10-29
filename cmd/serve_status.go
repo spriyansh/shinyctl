@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/manifest"
@@ -72,7 +73,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 				PID:        rec.PID,
 				StartedAt:  rec.StartedAt,
 				Alive:      alive[i],
-				CrashCount: rec.CrashCount,
+				CrashCount: reconcile.CrashesNow(rec, alive[i], time.Now()),
 			}
 
 			switch {

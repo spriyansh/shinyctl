@@ -478,3 +478,32 @@ func TestSettingsChanged(t *testing.T) {
 		})
 	}
 }
+
+func TestCrashesNow(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	rec := func(startedAgo time.Duration, crashes int) state.AppState {
+		app := state.AppState{CrashCount: crashes}
+		if startedAgo > 0 {
+			app.StartedAt = now.Add(-startedAgo)
+		}
+		return app
+	}
+	cases := []struct {
+		name  string
+		app   state.AppState
+		alive bool
+		want  int
+	}{
+		{"up for two minutes", rec(2*time.Minute, 3), true, 0},
+		{"up for exactly the window", rec(crashResetWindow, 3), true, 0},
+		{"up for 30 seconds", rec(30*time.Second, 3), true, 3},
+		{"dead", rec(2*time.Minute, 3), false, 3},
+		{"never started", rec(0, 3), true, 3},
+		{"no crashes", rec(2*time.Minute, 0), true, 0},
+	}
+	for _, c := range cases {
+		if got := CrashesNow(c.app, c.alive, now); got != c.want {
+			t.Errorf("%s: CrashesNow = %d, want %d", c.name, got, c.want)
+		}
+	}
+}

@@ -903,3 +903,53 @@ func TestReadyWatcher_StopsWhenThePidIsAnotherUsers(t *testing.T) {
 		t.Error("the watcher's slot was not freed")
 	}
 }
+
+// CRASHES counts crashes in a row: a copy that has stayed up for a minute
+// shows none, though the stored count stays for the next exit to reset.
+func TestHandleStatus_CrashesResetAfterAMinuteUp(t *testing.T) {
+	useFakeRscript(t)
+	spec := copiesSpec(t, "app", 1, 1)
+	cleanupApp(t, spec)
+	one, _ := adoptCopies(t, spec)
+
+	set := func(startedAgo time.Duration) {
+		st, err := state.Load(spec.AppStateFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range st.Apps {
+			st.Apps[i].CrashCount = 3
+			st.Apps[i].StartedAt = time.Now().Add(-startedAgo)
+		}
+		if err := state.Save(spec.AppStateFile, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	crashes := func() []int {
+		var got []int
+		for _, a := range httptestStatus(t).Apps {
+			if a.Name == "app" {
+				for _, c := range a.Copies {
+					if !c.Alive {
+						t.Fatalf("copy %d is not alive: %+v", c.Copy, c)
+					}
+					got = append(got, c.CrashCount)
+				}
+			}
+		}
+		return got
+	}
+
+	set(10 * time.Second)
+	if got := crashes(); !slices.Equal(got, []int{3, 3}) {
+		t.Errorf("crash counts 10 s after the start = %v, want [3 3]", got)
+	}
+	set(2 * time.Minute)
+	if got := crashes(); !slices.Equal(got, []int{0, 0}) {
+		t.Errorf("crash counts 2 minutes after the start = %v, want [0 0]", got)
+	}
+	// The stored count is untouched: it is what the next exit starts from.
+	if rec, _ := loadCopyRecord(spec, one.Copy); rec.CrashCount != 3 || rec.PID != one.PID {
+		t.Errorf("stored record = %+v, want the count of 3 kept", rec)
+	}
+}

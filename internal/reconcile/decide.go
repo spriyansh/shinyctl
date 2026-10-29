@@ -54,6 +54,17 @@ func RecordExit(app state.AppState, exit process.Exit) state.AppState {
 	return app
 }
 
+// CrashesNow is the crash count to show for a copy: none once it has stayed
+// up for crashResetWindow, which is when its next exit would start counting
+// again from one. The stored count is only used for the backoff, so this
+// changes what status says and nothing else.
+func CrashesNow(app state.AppState, alive bool, now time.Time) int {
+	if alive && !app.StartedAt.IsZero() && now.Sub(app.StartedAt) >= crashResetWindow {
+		return 0
+	}
+	return app.CrashCount
+}
+
 // backoffDelay returns how long to wait before the next restart attempt
 // after crashCount consecutive fast crashes.
 func backoffDelay(crashCount int) time.Duration {
