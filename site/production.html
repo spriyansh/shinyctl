@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Running in production · shinyctl</title>
+<meta name="description" content="Put Shiny apps run by shinyctl on the internet: HTTPS with nginx, Cloudflare Tunnel or Tailscale, starting at boot, memory, logs, and uninstalling.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="assets/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <a class="mark" href="index.html">shiny<span>ctl</span></a>
+  <nav class="nav" aria-label="Site">
+    <a href="install.html">Install</a>
+    <a href="how-it-works.html">How it works</a>
+    <a href="staying-up.html">Staying up</a>
+    <a href="production.html" aria-current="page">Production</a>
+    <a href="https://github.com/spriyansh/shinyctl">GitHub</a>
+  </nav>
+</header>
+
+<div class="doc">
+<aside class="side">
+  <p>Docs</p>
+  <ul>
+    <li><a href="install.html">Install</a></li>
+    <li><a href="how-it-works.html">How it works</a></li>
+    <li><a href="staying-up.html">Staying up</a></li>
+    <li><a href="production.html" aria-current="page">Running in production</a></li>
+  </ul>
+  <p>Reference</p>
+  <ul>
+    <li><a href="https://github.com/spriyansh/shinyctl#manifest">Manifest</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#commands">Commands</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#reading-status">Reading status</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#files">Files</a></li>
+  </ul>
+</aside>
+
+<main class="prose">
+<h1>Running in production</h1>
+<p class="lede">shinyctl serves plain HTTP on one machine. To run apps for real users, put HTTPS in front, start shinyctl at boot, and leave room for the copies in memory.</p>
+
+<h2 id="checklist">Checklist</h2>
+<ul>
+  <li>Set <code>host: 127.0.0.1</code> in each manifest, and put <a href="#https">HTTPS</a> in front.</li>
+  <li>On Linux, <a href="#boot">start at boot</a>, and enable lingering so logging out doesn't stop your apps.</li>
+  <li>Check there is <a href="#memory">memory</a> for every copy, plus the extra copy a redeploy runs for a moment.</li>
+  <li>Copy the example's reload script into your app's UI, so open pages recover after a crash or a redeploy (<a href="staying-up.html#crash">why</a>).</li>
+</ul>
+
+<h2 id="https">HTTPS and the internet</h2>
+<p>Set <code>host: 127.0.0.1</code> in the app's manifest, so only this machine can reach its port, and put one of these in front.</p>
+
+<h3 id="nginx">nginx</h3>
+<p>With a certificate from Let's Encrypt, for example through <a href="https://certbot.eff.org/">certbot</a>. Shiny needs the WebSocket upgrade and a long read timeout:</p>
+<pre><code>map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+server {
+    listen 443 ssl;
+    server_name shiny.example.org;
+    ssl_certificate     /etc/letsencrypt/live/shiny.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/shiny.example.org/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_read_timeout 1d;
+        proxy_buffering off;
+    }
+}</code></pre>
+<p>To serve the app under a path, use <code>location /myapp/ { proxy_pass http://127.0.0.1:8080/; ... }</code> with both slashes, so the app sees <code>/</code>, and send the address without the final slash to the one with it:</p>
+<pre><code>location = /myapp { return 301 /myapp/; }</code></pre>
+
+<h3 id="cloudflare">Cloudflare Tunnel</h3>
+<p>Needs no open port. For a quick try:</p>
+<pre><code>cloudflared tunnel --url http://127.0.0.1:8080</code></pre>
+<p>For a permanent address, create a named tunnel (see Cloudflare's <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/">documentation</a>). WebSockets work as they are.</p>
+
+<h3 id="tailscale">Tailscale</h3>
+<p>Serves the app inside your tailnet over HTTPS, or to the internet with Funnel (see <a href="https://tailscale.com/kb/1312/serve">Serve</a> and <a href="https://tailscale.com/kb/1223/funnel">Funnel</a>):</p>
+<pre><code>tailscale serve --bg 8080       <span class="c"># HTTPS inside your tailnet</span>
+tailscale funnel --bg 8080      <span class="c"># public</span></code></pre>
+
+<h3 id="forwarded">What shinyctl does with them</h3>
+<p>A web server on the same machine in front of the port is trusted for <code>X-Forwarded-For</code>, <code>X-Forwarded-Proto</code> and <code>X-Forwarded-Host</code>, so the app sees the visitor's address and that the request was HTTPS. Those headers from anywhere else are replaced. The cookie that keeps a visitor on a copy becomes <code>Secure; SameSite=None</code> when the server in front says the request was <code>https</code>.</p>
+
+<h2 id="boot">Start at boot (Linux)</h2>
+<p>Nothing restarts <code>shinyctl-api</code> after a reboot by itself. <code>shinyctl startup</code> prints a systemd user unit for it, and on standard error the commands to install it:</p>
+<pre><code>mkdir -p ~/.config/systemd/user &amp;&amp; mkdir -p -m 700 ~/.shinyctl
+shinyctl startup &gt; ~/.config/systemd/user/shinyctl.service
+systemctl --user daemon-reload
+pkill -u "$USER" -f '(^|/)shinyctl serve$'
+systemctl --user enable --now shinyctl
+loginctl enable-linger "$USER"</code></pre>
+<ul>
+  <li>The <code>pkill</code> line stops a <code>shinyctl-api</code> you started by hand, which would hold the socket. Its apps and the load balancer keep running, and the service adopts them.</li>
+  <li>The unit uses the <code>PATH</code> of the shell you ran <code>startup</code> in, plus <code>Rscript</code>'s folder. Run <code>startup</code> again after moving <code>shinyctl</code> or R.</li>
+  <li>Lingering keeps your user's services running after you log out. Without it, logging out can stop everything; <code>shinyctl-api</code> warns about it in <code>api.log</code>.</li>
+  <li>On macOS, run <code>shinyctl serve -d</code> after a reboot.</li>
+</ul>
+
+<h2 id="memory">Memory</h2>
+<p>Each copy is a full R process, and with the defaults every app runs two: one active copy and one warm spare. A small app takes about 110 to 140 MB per copy on a Raspberry Pi 5, and the load balancer about 40 MB in all. <code>status</code> shows the total.</p>
+<p>During a redeploy both versions run side by side: for the few seconds R takes to start, the peak is the old copies plus <code>replicas</code> new ones, which is 3 R processes with the defaults. Old copies that still have visitors run until <code>drain-timeout</code>. On a small machine, set <code>warm-replicas: 0</code>, a shorter <code>drain-timeout</code>, or use <code>--now</code>.</p>
+
+<h2 id="logs">Logs</h2>
+<pre><code>shinyctl logs -f shinyctl.yaml             <span class="c"># the last 100 lines of every copy</span>
+shinyctl logs -f shinyctl.yaml --copy 2    <span class="c"># one copy</span>
+shinyctl logs -f shinyctl.yaml --follow    <span class="c"># keep printing until Ctrl-C</span>
+shinyctl logs --api                        <span class="c"># shinyctl-api and the load balancer</span></code></pre>
+<p>The files are under <code>~/.shinyctl/logs/</code>, and rotate at 1 GiB, keeping one previous file.</p>
+
+<h2 id="uninstall">Stopping and uninstalling</h2>
+<p><code>shinyctl-api</code> and the load balancer keep running after you remove the binary, and the load balancer keeps every app's port open. To stop everything, delete the apps, stop the service if you installed one, then stop the two processes:</p>
+<pre><code>shinyctl delete -f shinyctl.yaml                       <span class="c"># for each app</span>
+systemctl --user disable --now shinyctl                <span class="c"># Linux, if you installed the service</span>
+pkill -u "$USER" -f '(^|/)shinyctl (serve|proxy --config .*)$'</code></pre>
+<p>Then remove shinyctl itself:</p>
+<pre><code>rm -f ~/.config/systemd/user/shinyctl.service &amp;&amp; systemctl --user daemon-reload   <span class="c"># Linux, with the service</span>
+rm -f ~/.local/bin/shinyctl
+rm -rf ~/.shinyctl</code></pre>
+
+<h2 id="limits">Limits to know</h2>
+<ul>
+  <li><b>One machine.</b> Copies of an app run on the machine shinyctl runs on.</li>
+  <li><b>Copies don't share memory.</b> Anything a session keeps in R lives in its copy.</li>
+  <li><b>The load balancer is in the path of every request.</b> If it dies, <code>shinyctl-api</code> restarts it within about a second, and the apps are unreachable until then.</li>
+  <li><b>Apps keep running if <code>shinyctl-api</code> dies, but nothing restarts a crashed copy</b> until it is back. Any <code>apply</code>, or <code>shinyctl serve -d</code>, brings it back; on Linux the service restarts it by itself.</li>
+  <li><b><code>stop</code> signals only the main R process.</b> Workers the app started, for example through callr or future, can outlive it.</li>
+  <li><b>A drain ends at <code>drain-timeout</code>.</b> Sessions still open then are cut, and a tab left open counts as a session.</li>
+  <li><b>A new version that starts but fails on its page still takes over:</b> a copy counts as ready once R accepts connections.</li>
+</ul>
+<p>The full list is in the <a href="https://github.com/spriyansh/shinyctl#limitations">README</a>.</p>
+
+<nav class="pager" aria-label="Previous and next page">
+  <a href="staying-up.html"><span>Previous</span><b>Staying up</b></a>
+  <a class="next" href="https://github.com/spriyansh/shinyctl#manifest"><span>Reference</span><b>Manifest and commands</b></a>
+</nav>
+</main>
+</div>
+
+<footer class="foot">
+  <span>shinyctl v0.1.0 · MIT licence</span>
+  <a href="https://github.com/spriyansh/shinyctl">github.com/spriyansh/shinyctl</a>
+</footer>
+</div>
+</body>
+</html>

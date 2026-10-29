@@ -7,6 +7,9 @@ load balancer with a warm spare, keeps each visitor on one copy, and
 redeploys a new version without cutting off the visitors of the old one. It
 is for a lab server, a Raspberry Pi or a small VPS.
 
+The website, with diagrams of how it works, is
+[spriyansh.github.io/shinyctl](https://spriyansh.github.io/shinyctl/).
+
 ## What you get
 
 - **Restarts.** An app that dies comes back, with a backoff when it keeps

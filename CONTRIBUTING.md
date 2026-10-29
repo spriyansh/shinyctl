@@ -107,6 +107,20 @@ Words that mean one thing in the code:
 | stand-in | A warm copy that serves in place of an active one that is down, before the table changes. |
 | successor | The copy that took the place of one that left the table; a visitor pinned to the old one is sent to it. |
 
+## The website
+
+`site/` is the website, published to GitHub Pages by
+`.github/workflows/site.yml` when a change to it reaches `main`. It is plain
+HTML, one stylesheet and one script, with no build step: open
+`site/index.html` in a browser to see it. The header, the footer and the docs
+sidebar are copied into every page, and the tests in `cmd/site_test.go` check
+that they match, that every link between pages resolves, that the install
+command is the README's, and that every version the site names is the release
+the README installs. So a new release means updating the versions on the site
+too; the terminal on the first page replays a real session, so record a new
+one rather than editing the old output. The fonts are in `site/assets/fonts`,
+with their licences.
+
 ## Releasing
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs
