@@ -9,7 +9,7 @@
     "logs": {
       "admin_quiet": {
         "writer": {
-          "output": "stderr"
+          "output": "shinyctl_plain"
         },
         "level": "ERROR",
         "include": [
@@ -18,7 +18,7 @@
       },
       "default": {
         "writer": {
-          "output": "stderr"
+          "output": "shinyctl_plain"
         },
         "level": "WARN",
         "exclude": [

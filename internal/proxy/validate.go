@@ -10,11 +10,13 @@ import (
 // Validate checks cfg the way the load balancer would when loading it —
 // every module found and provisioned — without starting anything or
 // touching the running one. It catches a config shinyctl rendered wrongly
-// before it is sent.
+// before it is sent. The engine says in JSON, on standard error, that it has
+// redirected its log when it provisions the logging of cfg; plainStderr makes
+// that a plain line (or nothing) in api.log.
 func Validate(cfg []byte) error {
 	var c caddy.Config
 	if err := json.Unmarshal(cfg, &c); err != nil {
 		return fmt.Errorf("parsing settings: %w", err)
 	}
-	return caddy.Validate(&c)
+	return plainStderr(func() error { return caddy.Validate(&c) })
 }

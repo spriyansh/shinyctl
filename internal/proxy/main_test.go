@@ -23,6 +23,21 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
+	// `validate <file>` stands in for shinyctl-api checking settings: it
+	// validates the file and exits, so a test can read what it wrote to
+	// standard error.
+	if len(os.Args) == 3 && os.Args[1] == "validate" {
+		cfg, err := os.ReadFile(os.Args[2])
+		if err == nil {
+			err = Validate(cfg)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	home, err := os.MkdirTemp("", "pt")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -61,7 +61,7 @@ func Run(configPath string) error {
 	} else if cfg, err = withOwnSettings(cfg, dir); err != nil {
 		loadErr = err
 	} else {
-		loadErr = caddy.Load(cfg, true)
+		loadErr = plainStderr(func() error { return caddy.Load(cfg, true) })
 	}
 	if loadErr != nil {
 		log.Printf("proxy: could not load %s: %s; serving no apps until shinyctl-api sends new settings", configPath, describeLoadError(loadErr))
@@ -69,7 +69,7 @@ func Run(configPath string) error {
 		if err != nil {
 			return fmt.Errorf("proxy: %w", err)
 		}
-		if err := caddy.Load(boot, true); err != nil {
+		if err := plainStderr(func() error { return caddy.Load(boot, true) }); err != nil {
 			return fmt.Errorf("proxy: starting without apps: %w", err)
 		}
 	}

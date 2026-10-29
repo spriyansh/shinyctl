@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -331,5 +332,72 @@ func TestRun_UnusableCopiesFileServesNoCopies(t *testing.T) {
 	}
 	if status, body, _ := get(t, appURL(app)); status != 200 || body != "up" {
 		t.Errorf("after the push: %d %q", status, body)
+	}
+}
+
+// What the engine logs reaches api.log as plain lines, not as JSON.
+func TestRun_EngineLogIsPlain(t *testing.T) {
+	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		io.WriteString(w, "partial")
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler) // the copy dies in the middle of the response
+	}))
+	app := servedApp(t, "a", freePort(t), up)
+	home, _, s := proxyHome(t, app)
+	p := startSubproxyAt(t, s.ConfigPath, home)
+	p.waitAnswering(t, Admin{Socket: s.AdminSocket})
+
+	resp, err := http.Get(appURL(app) + "some/page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body) // fails half way, as it should
+	resp.Body.Close()
+
+	want := fmt.Sprintf("proxy: the copy at %s stopped in the middle of a response (GET /some/page)", up)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(p.stderr.String(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("stderr has no line starting %q:\n%s", want, p.stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, line := range strings.Split(p.stderr.String(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "{") {
+			t.Errorf("a line of the engine's JSON reached the log: %s", line)
+		}
+		if strings.Contains(strings.ToLower(line), "caddy") {
+			t.Errorf("the engine is named in the log: %s", line)
+		}
+	}
+}
+
+// Checking settings, as shinyctl-api does before it sends them, leaves no line
+// of the engine's JSON in api.log either.
+func TestValidate_EngineLogIsPlain(t *testing.T) {
+	dir := shortDir(t)
+	cfg, err := Render(settingsFor(dir), []App{plainApp("a", freePort(t))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "check.json")
+	if err := os.WriteFile(path, cfg, 0600); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "validate", path)
+	cmd.Env = append(os.Environ(), "HOME="+dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("validate: %v\n%s", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "{") {
+			t.Errorf("a line of the engine's JSON reached the log: %s", line)
+		}
 	}
 }

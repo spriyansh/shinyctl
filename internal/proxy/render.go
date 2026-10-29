@@ -344,8 +344,8 @@ func Render(s Settings, apps []App) ([]byte, error) {
 			Config: adminPersist{Persist: false},
 		},
 		Logging: loggingConfig{Logs: map[string]logConfig{
-			"admin_quiet": {Writer: logWriter{"stderr"}, Level: "ERROR", Include: []string{"admin"}},
-			"default":     {Writer: logWriter{"stderr"}, Level: "WARN", Exclude: []string{"admin"}},
+			"admin_quiet": {Writer: logWriter{plainLogWriterName}, Level: "ERROR", Include: []string{"admin"}},
+			"default":     {Writer: logWriter{plainLogWriterName}, Level: "WARN", Exclude: []string{"admin"}},
 		}},
 		Storage: storageConfig{Module: "file_system", Root: s.StorageDir},
 	}
