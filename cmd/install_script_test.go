@@ -95,7 +95,9 @@ func TestInstallScript_InstallsTheLatestRelease(t *testing.T) {
 	if want := "Installed shinyctl v9.8.7 to " + bin; !strings.Contains(out, want) {
 		t.Errorf("output does not say %q:\n%s", want, out)
 	}
-	if !strings.Contains(out, "is not on your PATH") {
+	// Only the advice about the folder says "yet": the note about a missing
+	// Rscript also names PATH.
+	if !strings.Contains(out, "is not on your PATH yet") {
 		t.Errorf("output does not say the folder is not on PATH:\n%s", out)
 	}
 	if *latest != 1 {
@@ -131,7 +133,7 @@ func TestInstallScript_GivenVersionAndFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("install.sh over an installed shinyctl: %v\n%s", err, b)
 	}
-	if strings.Contains(string(b), "PATH") {
+	if strings.Contains(string(b), "is not on your PATH yet") {
 		t.Errorf("output has advice about PATH although the folder is on it:\n%s", b)
 	}
 }
