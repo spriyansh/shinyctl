@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Staying up · shinyctl</title>
+<meta name="description" content="What shinyctl does when a copy of a Shiny app dies, during a redeploy, when the number of copies changes, and when shinyctl itself is upgraded.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="assets/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <a class="mark" href="index.html">shiny<span>ctl</span></a>
+  <nav class="nav" aria-label="Site">
+    <a href="install.html">Install</a>
+    <a href="how-it-works.html">How it works</a>
+    <a href="staying-up.html" aria-current="page">Staying up</a>
+    <a href="production.html">Production</a>
+    <a href="https://github.com/spriyansh/shinyctl">GitHub</a>
+  </nav>
+</header>
+
+<div class="doc">
+<aside class="side">
+  <p>Docs</p>
+  <ul>
+    <li><a href="install.html">Install</a></li>
+    <li><a href="how-it-works.html">How it works</a></li>
+    <li><a href="staying-up.html" aria-current="page">Staying up</a></li>
+    <li><a href="production.html">Running in production</a></li>
+  </ul>
+  <p>Reference</p>
+  <ul>
+    <li><a href="https://github.com/spriyansh/shinyctl#manifest">Manifest</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#commands">Commands</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#reading-status">Reading status</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#files">Files</a></li>
+  </ul>
+</aside>
+
+<main class="prose">
+<h1>Staying up</h1>
+<p class="lede">What shinyctl does when a copy dies, when you deploy a new version, when you change the number of copies, and when you upgrade shinyctl itself.</p>
+<div class="legend" aria-label="Colours in the timelines">
+  <span><i style="background:var(--accent)"></i>active</span>
+  <span><i style="background:var(--warm)"></i>warm</span>
+  <span><i style="background:var(--drain)"></i>draining</span>
+  <span><i style="background:var(--muted);opacity:.35"></i>starting</span>
+  <span><i style="background:var(--down);opacity:.45"></i>down</span>
+  <span><i style="background:var(--ok)"></i>load balancer serving</span>
+</div>
+
+<h2 id="crash">When a copy dies</h2>
+<figure class="diagram">
+  <p class="hint">Scroll sideways to see the whole timeline.</p>
+  <svg class="timeline" viewBox="0 0 900 245" role="img" aria-labelledby="crash-title crash-desc">
+    <title id="crash-title">A copy dies and the spare takes over</title>
+    <desc id="crash-desc">Copy 1 is active and copy 2 is warm. Copy 1 is killed; the next request goes to copy 2, which becomes active. Copy 1 waits out its backoff, starts again, and becomes the new warm spare. Every request is answered throughout.</desc>
+    <line class="d-mark" x1="400" y1="34" x2="400" y2="200"/>
+    <text class="d-strong" x="400" y="24" text-anchor="middle">copy 1 killed</text>
+    <line class="d-mark" x1="600" y1="34" x2="600" y2="200"/>
+    <text class="d-strong" x="600" y="24" text-anchor="middle">copy 1 ready again</text>
+
+    <text class="d-lane" x="20" y="74">copy 1</text>
+    <text class="d-lane-sub" x="20" y="89">first active</text>
+    <rect class="r-active" x="190" y="66" width="210" height="20" rx="3"/>
+    <text class="bar-label" x="198" y="80">active</text>
+    <rect class="r-down r-fade" x="400" y="66" width="90" height="20"/>
+    <text class="bar-label on-light" x="408" y="80">backoff</text>
+    <rect class="r-start" x="490" y="66" width="110" height="20"/>
+    <text class="bar-label on-light" x="498" y="80">starting</text>
+    <rect class="r-warm" x="600" y="66" width="280" height="20" rx="3"/>
+    <text class="bar-label" x="608" y="80">warm · the new spare</text>
+
+    <text class="d-lane" x="20" y="124">copy 2</text>
+    <text class="d-lane-sub" x="20" y="139">first the spare</text>
+    <rect class="r-warm" x="190" y="116" width="210" height="20" rx="3"/>
+    <text class="bar-label" x="198" y="130">warm</text>
+    <rect class="r-active" x="400" y="116" width="480" height="20" rx="3"/>
+    <text class="bar-label" x="408" y="130">active · takes copy 1's visitors</text>
+
+    <text class="d-lane" x="20" y="174">requests</text>
+    <path class="d-tick" d="M198,162 V178 M220,162 V178 M242,162 V178 M264,162 V178 M286,162 V178 M308,162 V178 M330,162 V178 M352,162 V178 M374,162 V178 M396,162 V178 M418,162 V178 M440,162 V178 M462,162 V178 M484,162 V178 M506,162 V178 M528,162 V178 M550,162 V178 M572,162 V178 M594,162 V178 M616,162 V178 M638,162 V178 M660,162 V178 M682,162 V178 M704,162 V178 M726,162 V178 M748,162 V178 M770,162 V178 M792,162 V178 M814,162 V178 M836,162 V178 M858,162 V178"/>
+    <text class="d-label" x="404" y="198">every request answered: the spare took over in 0.04 s on a Pi 5</text>
+    <line class="d-axis" x1="190" y1="214" x2="880" y2="214"/>
+    <text class="d-label" x="880" y="232" text-anchor="end">time →</text>
+    <text class="d-label" x="190" y="232">a few seconds in all</text>
+  </svg>
+</figure>
+<ul>
+  <li><b>The spare takes over at once.</b> The load balancer sends the dead copy's visitors to a warm copy, and <code>shinyctl-api</code> makes that copy active within milliseconds. The visitors stay on it.</li>
+  <li><b>The dead copy comes back as the spare.</b> It restarts after its backoff and is the newest copy, so it becomes the warm spare: roles don't swap back.</li>
+  <li><b>Backoff:</b> crashes are counted for each copy, and restarts wait 2 seconds, doubling up to 1 minute. <code>status</code> shows the copy as <code>crash-looping</code> until it is up again; its crash count goes back to <code>-</code> once it has stayed up for a minute.</li>
+  <li><b><code>restart-policy</code></b> decides whether it comes back: <code>always</code> (the default) after any exit, <code>on-failure</code> only after a non-zero exit, <code>never</code> not at all. A copy left down on purpose shows as <code>exited</code>, with a line under the table saying why.</li>
+  <li><b>Without a spare</b> (<code>warm-replicas: 0</code>), a request waits up to 15 seconds for the app to come back; after that the visitor gets a page saying the app is restarting, which reloads itself every few seconds.</li>
+  <li><b>If <code>shinyctl-api</code> is down</b>, the load balancer still puts the spare in, but nothing restarts the dead copy until <code>shinyctl-api</code> is back.</li>
+</ul>
+<div class="note">
+  <p>After its copy changes, an open Shiny page greys out until it is reloaded. The example app reloads by itself once the app answers again: copy its <code>tags$script</code> into your app's UI. Shiny's own <code>session$allowReconnect("force")</code> is no substitute: with shiny 1.14, a page reconnected to a new R process keeps its old outputs, and its downloads stop working.</p>
+</div>
+
+<h2 id="redeploy">Redeploys</h2>
+<p><code>restart</code> starts new copies from the manifest as it is now, so new code in <code>app.R</code> takes effect. An <code>apply</code> does the same when it changes how the app starts: <code>env</code>, <code>working-dir</code>, <code>app-group</code>, <code>app-name</code> or <code>entrypoint-file</code>. Both return at once.</p>
+<figure class="diagram">
+  <p class="hint">Scroll sideways to see the whole timeline.</p>
+  <svg class="timeline" viewBox="0 0 900 290" role="img" aria-labelledby="deploy-title deploy-desc">
+    <title id="deploy-title">A redeploy that drains</title>
+    <desc id="deploy-desc">On restart, new copy 3 starts while the old copies serve. At the switch, new visitors go to copy 3, old copy 2 drains and old spare copy 1 stops. The new spare, copy 4, starts after the switch. Copy 2 stops when its last visitor leaves, or at drain-timeout.</desc>
+    <line class="d-mark" x1="300" y1="50" x2="300" y2="248"/>
+    <text class="d-strong" x="300" y="22" text-anchor="middle">restart</text>
+    <line class="d-mark" x1="440" y1="50" x2="440" y2="248"/>
+    <text class="d-strong" x="444" y="40">switch: new visitors go to copy 3</text>
+    <line class="d-mark" x1="760" y1="50" x2="760" y2="248"/>
+    <text class="d-strong" x="756" y="22" text-anchor="end">last visitor leaves, or drain-timeout</text>
+
+    <text class="d-lane" x="20" y="78">copy 2</text>
+    <text class="d-lane-sub" x="20" y="93">old version</text>
+    <rect class="r-active" x="190" y="70" width="250" height="20" rx="3"/>
+    <text class="bar-label" x="198" y="84">active</text>
+    <rect class="r-drain" x="440" y="70" width="320" height="20" rx="3"/>
+    <text class="bar-label" x="448" y="84">draining · keeps its visitors</text>
+    <text class="d-label" x="768" y="84">stops</text>
+
+    <text class="d-lane" x="20" y="126">copy 1</text>
+    <text class="d-lane-sub" x="20" y="141">old spare</text>
+    <rect class="r-warm" x="190" y="118" width="250" height="20" rx="3"/>
+    <text class="bar-label" x="198" y="132">warm</text>
+    <text class="d-label" x="448" y="132">no visitors: stops at the switch</text>
+
+    <text class="d-lane" x="20" y="174">copy 3</text>
+    <text class="d-lane-sub" x="20" y="189">new version</text>
+    <rect class="r-start" x="300" y="166" width="140" height="20"/>
+    <text class="bar-label on-light" x="308" y="180">starting</text>
+    <rect class="r-active" x="440" y="166" width="440" height="20" rx="3"/>
+    <text class="bar-label" x="448" y="180">active · new visitors</text>
+
+    <text class="d-lane" x="20" y="222">copy 4</text>
+    <text class="d-lane-sub" x="20" y="237">new spare</text>
+    <rect class="r-start" x="440" y="214" width="100" height="20"/>
+    <text class="bar-label on-light" x="448" y="228">starting</text>
+    <rect class="r-warm" x="540" y="214" width="340" height="20" rx="3"/>
+    <text class="bar-label" x="548" y="228">warm</text>
+
+    <line class="d-axis" x1="190" y1="258" x2="880" y2="258"/>
+    <text class="d-label" x="880" y="278" text-anchor="end">time →</text>
+    <text class="d-label" x="440" y="278">draining lasts until the visitors leave, 15m at most</text>
+  </svg>
+</figure>
+<ul>
+  <li><b>New copies first.</b> <code>replicas</code> new copies start next to the running ones. The spares start once those have taken over, so at most one extra R process runs with the defaults.</li>
+  <li><b>The switch.</b> Once the new copies that serve are ready, new visitors go to them, and the old copies drain: they keep the visitors they have until those sessions end or <code>drain-timeout</code> (15 minutes by default) passes. An old spare with no visitors stops right away, and an old copy with no sessions stops within about 15 seconds.</li>
+  <li><b>Old pages keep working.</b> A page left open on an old copy keeps working on the old version, and reloading it brings the new one. When an old copy stops at the timeout, pages with the example's script reload onto the new version by themselves.</li>
+  <li><b>A broken version never takes over.</b> If the new copies don't start, the old ones keep serving, and <code>status</code> says which copy doesn't start and where to look.</li>
+  <li><b><code>--now</code></b> stops the old copies as soon as the new ones are ready, without waiting for their visitors.</li>
+  <li><b>A redeploy during another</b> goes straight to the newest version.</li>
+</ul>
+<p>While it goes on, <code>status</code> shows the draining copies and how long they have left:</p>
+<pre><code>NAME   COPY  ROLE      PORT  PID    STATUS  READY  MEM   SESSIONS  CRASHES  STARTED
+hello  1     draining  8765  61429  alive   ready  142M  2         -        2026-10-27T10:00:01+02:00
+hello  3     active    8765  61501  alive   ready  140M  1         -        2026-10-27T11:30:05+02:00
+hello  4     warm      8765  61502  alive   ready  138M  0         -        2026-10-27T11:30:05+02:00
+
+Memory: 420M in 3 R processes (1 warm, 1 draining), plus 41M for the load balancer.
+
+hello: copy 1 is draining with 2 sessions; it stops when they end, or in 15m at the latest.</code></pre>
+<p>Both versions run side by side until the drain ends, so a change to shared data, such as a database schema or files, must suit both.</p>
+
+<h2 id="scaling">Scaling</h2>
+<p>Changing <code>replicas</code> or <code>warm-replicas</code> and applying starts copies, or drains the ones it removes the same way: they get no new visitors, and stop when their sessions end or at <code>drain-timeout</code>. Copies that are starting or dead stop at once, and <code>--now</code> stops them all at once. Copies leave in this order: those with no process, those still starting, then ready ones with the fewest open sessions, a warm copy before an active one when they tie.</p>
+<p>Changing <code>port</code>, <code>host</code>, <code>lb-policy</code>, <code>drain-timeout</code> or <code>restart-policy</code> takes effect without restarting the app's processes.</p>
+
+<h2 id="upgrade">Upgrading shinyctl</h2>
+<p>Install the new binary (running the installer again does it), then restart <code>shinyctl-api</code>:</p>
+<pre><code>systemctl --user restart shinyctl                 <span class="c"># if you installed the service</span>
+<span class="c"># or, if you started it by hand:</span>
+pkill -u "$USER" -f '(^|/)shinyctl serve$' &amp;&amp; shinyctl serve -d</code></pre>
+<figure class="diagram">
+  <p class="hint">Scroll sideways to see the whole timeline.</p>
+  <svg class="timeline" viewBox="0 0 900 335" role="img" aria-labelledby="up-title up-desc">
+    <title id="up-title">Upgrading shinyctl without a gap</title>
+    <desc id="up-desc">You restart shinyctl-api. The new one starts a new load balancer that serves next to the old one; a quarter of a second later the old one is stopped, finishes the requests it is answering, and exits, and the new one takes over its lock. The R copies keep running throughout and are adopted, and every request is answered.</desc>
+    <line class="d-mark" x1="300" y1="72" x2="300" y2="292"/>
+    <text class="d-strong" x="304" y="18">1 · you restart shinyctl-api</text>
+    <line class="d-mark" x1="370" y1="72" x2="370" y2="292"/>
+    <text class="d-strong" x="374" y="34">2 · new load balancer serves next to the old one</text>
+    <line class="d-mark" x1="440" y1="72" x2="440" y2="292"/>
+    <text class="d-strong" x="444" y="50">3 · a quarter second later, the old one is stopped</text>
+    <line class="d-mark" x1="560" y1="72" x2="560" y2="292"/>
+    <text class="d-strong" x="564" y="66">4 · it exits; the new one takes over</text>
+
+    <text class="d-lane" x="20" y="104">shinyctl-api</text>
+    <rect class="r-api" x="190" y="96" width="106" height="20" rx="3"/>
+    <text class="bar-label" x="198" y="110">old</text>
+    <rect class="r-api" x="304" y="96" width="576" height="20" rx="3"/>
+    <text class="bar-label" x="312" y="110">new · adopts the copies and the load balancer</text>
+
+    <text class="d-lane" x="20" y="150">load balancer</text>
+    <text class="d-lane-sub" x="20" y="165">old build</text>
+    <rect class="r-lb" x="190" y="142" width="250" height="20" rx="3"/>
+    <text class="bar-label" x="198" y="156">serving</text>
+    <rect class="r-lb r-fade" x="440" y="142" width="120" height="20"/>
+    <text class="bar-label on-light" x="448" y="156">finishing requests</text>
+
+    <text class="d-lane" x="20" y="198">load balancer</text>
+    <text class="d-lane-sub" x="20" y="213">new build</text>
+    <rect class="r-start" x="304" y="190" width="66" height="20"/>
+    <rect class="r-lb" x="370" y="190" width="510" height="20" rx="3"/>
+    <text class="bar-label" x="378" y="204">serving · same ports, so nothing is refused</text>
+
+    <text class="d-lane" x="20" y="246">R copies</text>
+    <rect class="r-active" x="190" y="238" width="690" height="20" rx="3"/>
+    <text class="bar-label" x="198" y="252">keep running: the same processes, adopted</text>
+
+    <text class="d-lane" x="20" y="286">requests</text>
+    <path class="d-tick" d="M198,274 V290 M220,274 V290 M242,274 V290 M264,274 V290 M286,274 V290 M308,274 V290 M330,274 V290 M352,274 V290 M374,274 V290 M396,274 V290 M418,274 V290 M440,274 V290 M462,274 V290 M484,274 V290 M506,274 V290 M528,274 V290 M550,274 V290 M572,274 V290 M594,274 V290 M616,274 V290 M638,274 V290 M660,274 V290 M682,274 V290 M704,274 V290 M726,274 V290 M748,274 V290 M770,274 V290 M792,274 V290 M814,274 V290 M836,274 V290 M858,274 V290"/>
+    <line class="d-axis" x1="190" y1="306" x2="880" y2="306"/>
+    <text class="d-label" x="880" y="326" text-anchor="end">time →</text>
+    <text class="d-label" x="190" y="326">the old one finishes its requests for up to 5 s</text>
+  </svg>
+</figure>
+<p>Your apps keep running: the new <code>shinyctl-api</code> adopts them. When the new version comes with a new load balancer, it starts next to the old one, on the same ports, and takes over without refusing a connection. The old one answers the requests it is in the middle of, for up to five seconds, and then stops.</p>
+<p>Connections that were open on the old one end, and a Shiny session is one, so a page open at that moment reconnects or reloads once. On Linux, a request that reaches the old one in the very instant it closes can fail once. In the release test on a Raspberry Pi 5, two upgrades under load lost 0 of 473 and 0 of 470 requests.</p>
+
+<nav class="pager" aria-label="Previous and next page">
+  <a href="how-it-works.html"><span>Previous</span><b>How it works</b></a>
+  <a class="next" href="production.html"><span>Next</span><b>Running in production</b></a>
+</nav>
+</main>
+</div>
+
+<footer class="foot">
+  <span>shinyctl v0.1.0 · MIT licence</span>
+  <a href="https://github.com/spriyansh/shinyctl">github.com/spriyansh/shinyctl</a>
+</footer>
+</div>
+</body>
+</html>

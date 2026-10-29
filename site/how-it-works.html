@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How it works · shinyctl</title>
+<meta name="description" content="How shinyctl is put together: the shinyctl command, shinyctl-api, the built-in load balancer, the cycle, and the roles of an app's copies.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="assets/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <a class="mark" href="index.html">shiny<span>ctl</span></a>
+  <nav class="nav" aria-label="Site">
+    <a href="install.html">Install</a>
+    <a href="how-it-works.html" aria-current="page">How it works</a>
+    <a href="staying-up.html">Staying up</a>
+    <a href="production.html">Production</a>
+    <a href="https://github.com/spriyansh/shinyctl">GitHub</a>
+  </nav>
+</header>
+
+<div class="doc">
+<aside class="side">
+  <p>Docs</p>
+  <ul>
+    <li><a href="install.html">Install</a></li>
+    <li><a href="how-it-works.html" aria-current="page">How it works</a></li>
+    <li><a href="staying-up.html">Staying up</a></li>
+    <li><a href="production.html">Running in production</a></li>
+  </ul>
+  <p>Reference</p>
+  <ul>
+    <li><a href="https://github.com/spriyansh/shinyctl#manifest">Manifest</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#commands">Commands</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#reading-status">Reading status</a></li>
+    <li><a href="https://github.com/spriyansh/shinyctl#files">Files</a></li>
+  </ul>
+</aside>
+
+<main class="prose">
+<h1>How it works</h1>
+<p class="lede">One binary runs as three processes. A cycle in the middle one keeps every app's copies where they should be.</p>
+
+<h2 id="processes">Three processes</h2>
+<ul>
+  <li><b>The <code>shinyctl</code> command</b> reads a manifest and asks <code>shinyctl-api</code> to act, over the socket <code>~/.shinyctl/api.sock</code>. The first <code>apply</code> starts <code>shinyctl-api</code> if it isn't running.</li>
+  <li><b><code>shinyctl-api</code></b> is a background process, one per user. It owns every app's state, starts the copies, restarts them, and tells the load balancer where they are.</li>
+  <li><b>The load balancer</b>, a process of its own, listens on every app's port and sends each request to one of that app's copies. It keeps the list of copies in memory, and <code>shinyctl-api</code> replaces that list without a reload, so no connection is dropped when it changes.</li>
+</ul>
+<p>The apps and the load balancer keep running if <code>shinyctl-api</code> stops. A new <code>shinyctl-api</code> adopts them, with the same process IDs.</p>
+
+<figure class="diagram">
+  <svg class="arch-wide" viewBox="0 0 960 440" role="img" aria-labelledby="arch-title arch-desc">
+    <title id="arch-title">How shinyctl is put together</title>
+    <desc id="arch-desc">Visitors reach the load balancer on the app's port, which sends each request to one of the app's R copies. You talk to shinyctl-api over a socket; it records state in state.json, pushes the copies table to the load balancer, and starts and stops the copies.</desc>
+    <defs>
+      <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow" d="M0,0 L10,5 L0,10 z"/></marker>
+    </defs>
+    <rect class="d-box" x="20" y="40" width="170" height="64" rx="8"/>
+    <text class="d-title" x="38" y="68">Visitors</text>
+    <text class="d-sub" x="38" y="88">browsers, on :8765</text>
+    <path class="d-wire" d="M190,72 H294" marker-end="url(#ar)"/>
+    <text class="d-label" x="206" y="62">requests</text>
+    <rect class="d-box key" x="300" y="28" width="300" height="88" rx="8"/>
+    <text class="d-title" x="320" y="56">Load balancer</text>
+    <text class="d-sub" x="320" y="78">one public port per app</text>
+    <text class="d-sub" x="320" y="98">sticky cookie lb_8765 · WebSockets</text>
+    <text class="d-label" x="690" y="18">R copies · 127.0.0.1:20000–29999</text>
+    <rect class="d-box" x="690" y="30" width="250" height="54" rx="8"/>
+    <circle class="r-active" cx="708" cy="51" r="4.5"/>
+    <text class="d-title" x="720" y="56">copy 3</text>
+    <text class="d-label r-active" x="924" y="56" text-anchor="end">active</text>
+    <text class="d-sub" x="720" y="74">takes new visitors</text>
+    <rect class="d-box" x="690" y="94" width="250" height="54" rx="8"/>
+    <circle class="r-warm" cx="708" cy="115" r="4.5"/>
+    <text class="d-title" x="720" y="120">copy 4</text>
+    <text class="d-label r-warm" x="924" y="120" text-anchor="end">warm</text>
+    <text class="d-sub" x="720" y="138">ready spare, takes over at once</text>
+    <rect class="d-box" x="690" y="158" width="250" height="54" rx="8"/>
+    <circle class="r-drain" cx="708" cy="179" r="4.5"/>
+    <text class="d-title" x="720" y="184">copy 2</text>
+    <text class="d-label r-drain" x="924" y="184" text-anchor="end">draining</text>
+    <text class="d-sub" x="720" y="202">keeps its visitors, then stops</text>
+    <path class="d-wire" d="M600,64 C640,64 650,57 686,57" marker-end="url(#ar)"/>
+    <path class="d-wire dash" d="M600,80 C640,80 650,121 686,121" marker-end="url(#ar)"/>
+    <path class="d-wire dash" d="M600,96 C640,96 650,185 686,185" marker-end="url(#ar)"/>
+    <rect class="d-box key" x="300" y="250" width="300" height="88" rx="8"/>
+    <text class="d-title" x="320" y="278">shinyctl-api</text>
+    <text class="d-sub" x="320" y="300">runs the cycle every 5 s</text>
+    <text class="d-sub" x="320" y="320">and on every request or exit</text>
+    <path class="d-wire" d="M450,250 V120" marker-end="url(#ar)"/>
+    <text class="d-label" x="462" y="182">copies table,</text>
+    <text class="d-label" x="462" y="198">swapped in memory</text>
+    <path class="d-wire" d="M600,294 H815 V216" marker-end="url(#ar)"/>
+    <text class="d-label" x="626" y="284">starts, stops, watches exits</text>
+    <rect class="d-box" x="20" y="262" width="170" height="64" rx="8"/>
+    <text class="d-title" x="38" y="290">You</text>
+    <text class="d-sub" x="38" y="310">apply · status · restart</text>
+    <path class="d-wire" d="M190,294 H294" marker-end="url(#ar)"/>
+    <text class="d-label" x="206" y="284">api.sock</text>
+    <path class="d-wire" d="M450,338 V366" marker-end="url(#ar)"/>
+    <text class="d-label" x="462" y="357">records</text>
+    <rect class="d-box" x="300" y="372" width="300" height="56" rx="8"/>
+    <text class="d-title" x="320" y="396">state.json</text>
+    <text class="d-sub" x="320" y="416">processes, start times, crash counts</text>
+  </svg>
+  <svg class="arch-narrow" viewBox="0 0 360 660" role="img" aria-labelledby="archn-title archn-desc">
+    <title id="archn-title">How shinyctl is put together</title>
+    <desc id="archn-desc">Visitors reach the load balancer, which sends each request to one of the app's R copies. You talk to shinyctl-api, which records state in state.json, pushes the copies table to the load balancer, and starts and stops the copies.</desc>
+    <defs>
+      <marker id="arn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow" d="M0,0 L10,5 L0,10 z"/></marker>
+    </defs>
+    <rect class="d-box" x="20" y="12" width="270" height="52" rx="8"/>
+    <text class="d-title" x="36" y="36">Visitors</text>
+    <text class="d-sub" x="36" y="54">browsers, on :8765</text>
+    <path class="d-wire" d="M155,64 V92" marker-end="url(#arn)"/>
+    <text class="d-label" x="163" y="82">requests</text>
+    <rect class="d-box key" x="20" y="96" width="270" height="78" rx="8"/>
+    <text class="d-title" x="36" y="120">Load balancer</text>
+    <text class="d-sub" x="36" y="140">one public port per app</text>
+    <text class="d-sub" x="36" y="158">sticky cookie lb_8765 · WebSockets</text>
+    <path class="d-wire" d="M155,174 V200" marker-end="url(#arn)"/>
+    <text class="d-label" x="163" y="191">to one copy</text>
+    <text class="d-label" x="20" y="222">R copies · 127.0.0.1:20000–29999</text>
+    <rect class="d-box" x="20" y="232" width="270" height="48" rx="8"/>
+    <circle class="r-active" cx="36" cy="252" r="4.5"/>
+    <text class="d-title" x="48" y="257">copy 3</text>
+    <text class="d-label r-active" x="278" y="257" text-anchor="end">active</text>
+    <text class="d-sub" x="48" y="273">takes new visitors</text>
+    <rect class="d-box" x="20" y="288" width="270" height="48" rx="8"/>
+    <circle class="r-warm" cx="36" cy="308" r="4.5"/>
+    <text class="d-title" x="48" y="313">copy 4</text>
+    <text class="d-label r-warm" x="278" y="313" text-anchor="end">warm</text>
+    <text class="d-sub" x="48" y="329">ready spare</text>
+    <rect class="d-box" x="20" y="344" width="270" height="48" rx="8"/>
+    <circle class="r-drain" cx="36" cy="364" r="4.5"/>
+    <text class="d-title" x="48" y="369">copy 2</text>
+    <text class="d-label r-drain" x="278" y="369" text-anchor="end">draining</text>
+    <text class="d-sub" x="48" y="385">keeps its visitors, then stops</text>
+    <rect class="d-box" x="20" y="410" width="270" height="48" rx="8"/>
+    <text class="d-title" x="36" y="432">You</text>
+    <text class="d-sub" x="36" y="449">apply · status · restart</text>
+    <path class="d-wire" d="M155,458 V486" marker-end="url(#arn)"/>
+    <text class="d-label" x="163" y="476">api.sock</text>
+    <rect class="d-box key" x="20" y="490" width="270" height="72" rx="8"/>
+    <text class="d-title" x="36" y="514">shinyctl-api</text>
+    <text class="d-sub" x="36" y="534">runs the cycle every 5 s</text>
+    <text class="d-sub" x="36" y="552">and on every request or exit</text>
+    <path class="d-wire" d="M155,562 V590" marker-end="url(#arn)"/>
+    <text class="d-label" x="163" y="580">records</text>
+    <rect class="d-box" x="20" y="594" width="270" height="52" rx="8"/>
+    <text class="d-title" x="36" y="616">state.json</text>
+    <text class="d-sub" x="36" y="634">processes, start times, crash counts</text>
+    <path class="d-wire" d="M290,512 H318 V312 H294" marker-end="url(#arn)"/>
+    <text class="d-label" transform="rotate(-90 333 410)" x="333" y="410" text-anchor="middle">starts and stops</text>
+    <path class="d-wire" d="M290,540 H342 V135 H294" marker-end="url(#arn)"/>
+    <text class="d-label" transform="rotate(-90 354 330)" x="354" y="330" text-anchor="middle">copies table, swapped in memory</text>
+  </svg>
+  <figcaption class="wide-only">Solid line: new visitors. Dashed: visitors a copy already has, or the spare standing in when an active copy is down.</figcaption>
+</figure>
+
+<h2 id="cycle">The cycle</h2>
+<p><code>shinyctl-api</code> runs the same five steps for each app every 5 seconds, and at once whenever something happens: a command from you, or a copy that exits. An exit is noticed the moment it happens; the 5-second check catches anything else.</p>
+<ol class="cycle" aria-label="The cycle">
+  <li><b>Observe</b><span>Which copies are alive and ready, and how many sessions each holds.</span></li>
+  <li><b>Decide</b><span>Each copy's role (active, warm or draining) and what to start or stop.</span></li>
+  <li><b>Record</b><span>Write the decision to the app's <code>state.json</code>.</span></li>
+  <li><b>Push</b><span>Send the copies table to the load balancer, which swaps it without a reload.</span></li>
+  <li><b>Act</b><span>Start and stop R processes, and watch them for exits.</span></li>
+</ol>
+<p>What is stored is what happened: processes, start times, crash counts, and when a copy began to drain. What should happen (roles, what to start, what to stop) is worked out again on every cycle, so nothing about a role can go stale on disk.</p>
+
+<h2 id="roles">Copies and roles</h2>
+<p>A copy is one R process running your app, numbered from 1. Of the copies that are running and ready:</p>
+<ul>
+  <li><b>active</b>: the oldest <code>replicas</code> copies. They take new visitors.</li>
+  <li><b>warm</b>: the rest. They are running and ready, and get no new visitors while every active copy is up. When an active copy fails, a warm copy takes its visitors at once.</li>
+  <li><b>draining</b>: a copy being replaced. It keeps the visitors it has, gets no new ones, and stops when they are gone or <code>drain-timeout</code> passes.</li>
+</ul>
+<p>A copy that is starting has no role yet; <code>status</code> shows <code>-</code> until it is ready.</p>
+
+<h2 id="sticky">Sticky sessions</h2>
+<p>Copies don't share memory, so a Shiny session has to stay with its R process. The load balancer sets a cookie named <code>lb_&lt;port&gt;</code> (for example <code>lb_8080</code>) that keeps each visitor on one copy for as long as it runs. This needs the browser to keep the cookie: it doesn't hold for an app embedded in another site's frame, or in Safari with third-party cookies blocked.</p>
+<p>A visitor without a copy yet gets one of the active copies, picked by <code>lb-policy</code>:</p>
+<table>
+  <thead><tr><th>lb-policy</th><th>Picks</th></tr></thead>
+  <tbody>
+    <tr><td><code>least-conn</code></td><td>The copy with the fewest open connections. The default.</td></tr>
+    <tr><td><code>round-robin</code></td><td>Each active copy in turn.</td></tr>
+    <tr><td><code>random</code></td><td>Any active copy.</td></tr>
+    <tr><td><code>first</code></td><td>Always the oldest active copy.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="ports">Ports</h2>
+<p>The load balancer listens on the <code>port</code> in your manifest. Each copy runs on a port of its own between 20000 and 29999, on 127.0.0.1 only, which is why an app's <code>port</code> can't be in that range. Before sending visitors to a copy, <code>shinyctl-api</code> checks that the socket on its port belongs to that copy; if another program took the port, the copy moves to another one.</p>
+<p>Your app sees requests coming from 127.0.0.1. The visitor's address is the first entry of the <code>X-Forwarded-For</code> header.</p>
+
+<h2 id="files">Files</h2>
+<p>Everything shinyctl keeps is under <code>~/.shinyctl/</code>, except each app's <code>state.json</code>, which lives where its manifest says.</p>
+<table>
+  <thead><tr><th>Path</th><th>Contents</th></tr></thead>
+  <tbody>
+    <tr><td><code>api.log</code></td><td>The log of <code>shinyctl-api</code> and of the load balancer.</td></tr>
+    <tr><td><code>logs/&lt;app-group&gt;-&lt;app-name&gt;.log</code></td><td>Copy 1's output; copy N's is in <code>…@N.log</code>. Logs rotate at 1 GiB.</td></tr>
+    <tr><td><code>registry.json</code></td><td>Every app <code>shinyctl-api</code> manages.</td></tr>
+    <tr><td><code>api.sock</code></td><td>The socket the command talks to.</td></tr>
+    <tr><td><code>proxy/</code></td><td>The load balancer's settings, copies table, cookie key, lock and socket.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="words">Words</h2>
+<table>
+  <thead><tr><th>Word</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>copy</td><td>One R process of an app, numbered from 1.</td></tr>
+    <tr><td>role</td><td><code>active</code>, <code>warm</code> or <code>draining</code>: how the load balancer treats a copy.</td></tr>
+    <tr><td>outdated</td><td>A copy running an older version than the manifest: another revision or other settings.</td></tr>
+    <tr><td>revision</td><td>A number in <code>state.json</code> that <code>restart</code> raises, so copies started before it are outdated.</td></tr>
+    <tr><td>switch</td><td>The moment a redeploy hands new visitors to the new copies; the old ones then drain.</td></tr>
+    <tr><td>settle</td><td>The 10 seconds a draining copy is kept even with no sessions, for a page that opens its WebSocket just after.</td></tr>
+    <tr><td>stand-in</td><td>A warm copy that serves in place of an active one that is down, before the table changes.</td></tr>
+  </tbody>
+</table>
+
+<nav class="pager" aria-label="Previous and next page">
+  <a href="install.html"><span>Previous</span><b>Install</b></a>
+  <a class="next" href="staying-up.html"><span>Next</span><b>Staying up</b></a>
+</nav>
+</main>
+</div>
+
+<footer class="foot">
+  <span>shinyctl v0.1.0 · MIT licence</span>
+  <a href="https://github.com/spriyansh/shinyctl">github.com/spriyansh/shinyctl</a>
+</footer>
+</div>
+</body>
+</html>
