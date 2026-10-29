@@ -269,7 +269,7 @@ func TestProvision(t *testing.T) {
 
 // The tests below cover the last-resort rule and the table's isolation.
 
-func TestRule3_LoneCopyMarkedDown(t *testing.T) {
+func TestLastResort_LoneCopyMarkedDown(t *testing.T) {
 	p := pool("a:1")
 	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1"}, nil, nil, "a:1")
 	u, c := selectFor(s, p, "", false)
@@ -278,7 +278,7 @@ func TestRule3_LoneCopyMarkedDown(t *testing.T) {
 	}
 }
 
-func TestRule3_PinnedMarkedDown(t *testing.T) {
+func TestLastResort_PinnedMarkedDown(t *testing.T) {
 	p := pool("a:1", "b:2")
 	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1", "b:2"}, nil, nil, "a:1", "b:2")
 	u, c := selectFor(s, p, token(testSecret, "b:2"), false)
@@ -287,7 +287,7 @@ func TestRule3_PinnedMarkedDown(t *testing.T) {
 	}
 }
 
-func TestRule2_BeatsRule3(t *testing.T) {
+func TestCandidates_BeatTheLastResort(t *testing.T) {
 	p := pool("a:1", "w:2")
 	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1"}, []string{"w:2"}, nil, "a:1")
 	u, c := selectFor(s, p, token(testSecret, "a:1"), false)
@@ -296,7 +296,7 @@ func TestRule2_BeatsRule3(t *testing.T) {
 	}
 }
 
-func TestRule3_FirstListedWhenNothingIsPinned(t *testing.T) {
+func TestLastResort_FirstListedWhenNothingIsPinned(t *testing.T) {
 	p := pool("w:2", "a:1")
 	s := newSticky(t, reverseproxy.FirstSelection{}, []string{"a:1"}, []string{"w:2"}, nil, "a:1", "w:2")
 	if u, _ := selectFor(s, p, "", false); dialOf(u) != "a:1" {
@@ -378,7 +378,7 @@ func TestTableChangeTakesEffectNextSelect(t *testing.T) {
 	}
 }
 
-// The spare stands in for an active copy that is down (rule 2).
+// The spare stands in for an active copy that is down (the candidates rule in Select).
 
 func fallbacks() map[string]func() reverseproxy.Selector {
 	return map[string]func() reverseproxy.Selector{

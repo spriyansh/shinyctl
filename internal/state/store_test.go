@@ -303,7 +303,7 @@ func TestState_CopiesIsASortedCopy(t *testing.T) {
 }
 
 // A file written before there were several copies is copy 1 at revision 0.
-func TestLoad_PhaseOneFileIsOneCopy(t *testing.T) {
+func TestLoad_FileBeforeSeveralCopiesIsOneCopy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	old := `{"app-group":"g","apps":[{"name":"a","pid":5,"port":20000,"copy":1,"entrypoint-file":"/srv/app.R","started-at":"2026-10-01T00:00:00Z","crash-count":0,"last-exit-at":"0001-01-01T00:00:00Z","last-exit-failed":false}]}`
 	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {

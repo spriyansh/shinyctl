@@ -530,10 +530,10 @@ func TestStopAndDelete_AllCopies(t *testing.T) {
 	}
 }
 
-// TestUpgrade_Phase1RecordGainsAWarmCopy: an app recorded by the previous
+// TestUpgrade_RecordBeforeWarmSparesGainsAWarmCopy: an app recorded by the previous
 // version has one copy and a manifest without warm-replicas, which now means
 // one spare. The running copy is left alone and a second one starts.
-func TestUpgrade_Phase1RecordGainsAWarmCopy(t *testing.T) {
+func TestUpgrade_RecordBeforeWarmSparesGainsAWarmCopy(t *testing.T) {
 	useFakeRscript(t)
 	spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
 	spec.WarmReplicas = nil

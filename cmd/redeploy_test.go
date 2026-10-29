@@ -595,9 +595,9 @@ func TestRedeploy_AfterARebootDrainingCopiesStayGone(t *testing.T) {
 	}
 }
 
-// 15: a rollout from a phase-2 build caught half done (copy 1 at the old
-// revision, copy 2 at the new) switches at once: copy 1 drains.
-func TestRedeploy_UpgradeFromAPhase2RolloutHalfDone(t *testing.T) {
+// 15: a rollout that a build before draining redeploys left half done (copy 1
+// at the old revision, copy 2 at the new) switches at once: copy 1 drains.
+func TestRedeploy_UpgradeFromARolloutHalfDone(t *testing.T) {
 	useFakeRscript(t)
 	spec := copiesSpec(t, "app", 1, 1)
 	cleanupApp(t, spec)

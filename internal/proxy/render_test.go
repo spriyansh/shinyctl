@@ -346,7 +346,7 @@ func TestRender_CookieUniquePerPort(t *testing.T) {
 // A config written by the previous version lists the copies itself; it is
 // read like any other, and then replaced because it differs from what Render
 // makes.
-func TestParse_AcceptsPhase1Shape(t *testing.T) {
+func TestParse_AcceptsAConfigThatListsTheCopies(t *testing.T) {
 	cfg := `{"apps":{"http":{"servers":{"/x/a/state.json":{
 		"listen":["tcp4/0.0.0.0:8765"],
 		"routes":[{"handle":[

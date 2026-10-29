@@ -58,6 +58,52 @@ they reset the table with `lb.Set(nil)` in a cleanup.
 Every behavior change comes with a test. Its commit message says what
 changed for users and why.
 
+## How it fits together
+
+One binary is the command line, `shinyctl-api` (`shinyctl serve`, a background
+process) and the load balancer (the hidden `shinyctl proxy`, a process of its
+own).
+
+- The CLI reads `shinyctl.yaml` and asks `shinyctl-api` to do things over
+  `~/.shinyctl/api.sock` (package `internal/api`).
+- `shinyctl-api` owns every app's `state.json` and runs the **cycle**, on a
+  5 second tick and whenever something happens (a request, an exit): observe
+  the copies (`cmd/reconcile.go`), ask `reconcile.DecideCopies` what to do,
+  record it in `state.json`, push the **copies table** to the load balancer,
+  then start and stop processes. `DecideCopies` is pure: it reads and writes
+  nothing, so its tests are tables.
+- The load balancer listens on every app's public port and sends each
+  request to a copy by the copies table, which it keeps in memory and which
+  `shinyctl-api` replaces over the load balancer's control socket without a
+  reload (package `internal/proxy/lb`). Each app's table has three roles:
+  `active`, `warm` and `draining`. The settings it starts from are
+  `proxy/config.json`; the last table is `proxy/copies.json`.
+- The copies run on internal ports (20000-29999) on 127.0.0.1. Three kinds of
+  watcher keep the picture current: an exit-watcher per process, a
+  readiness check per new copy, and watchers on the processes adopted from an
+  earlier `shinyctl-api` (`cmd/reconcile_watch.go`).
+- What is **stored** is what happened (processes, start times, crash counts,
+  the time a copy began to drain). What is **derived** on every cycle is
+  what should happen: roles, what to start, what to stop. Nothing about a role
+  is stored.
+
+Words that mean one thing in the code:
+
+| Word | Meaning |
+|---|---|
+| copy | One R process of an app, numbered from 1. |
+| role | `active`, `warm` or `draining`: how the load balancer treats a copy. |
+| active | Takes new visitors. There are `replicas` of them. |
+| warm | A ready spare. It takes the visitors of an active copy that dies. |
+| draining | Keeps the visitors it has, gets no new ones, and stops when they are gone or `drain-timeout` passes. |
+| outdated | A copy that runs an older version than the manifest (another revision or other settings). |
+| revision | A number in `state.json` that a restart raises, so copies started before it are outdated. |
+| switch | The moment a redeploy hands new visitors to the new copies; the old ones then drain. |
+| settle | The 10 seconds a draining copy is kept even with no sessions, for a page that opens its WebSocket just after. |
+| skip-drain | A mark `--now` puts on a copy: it stops instead of draining. |
+| stand-in | A warm copy that serves in place of an active one that is down, before the table changes. |
+| successor | The copy that took the place of one that left the table; a visitor pinned to the old one is sent to it. |
+
 ## Releasing
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs

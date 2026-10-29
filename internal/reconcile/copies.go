@@ -131,53 +131,66 @@ type item struct {
 // spec wants and what was observed of each recorded copy, it says what to do,
 // never does it itself.
 //
-// The rules, in order:
-//  1. A live record without a copy number is a process from before the load
-//     balancer, holding the app's port itself. It is stopped and the app
-//     starts again behind the load balancer, with every copy.
-//  2. Each copy is draining (it has draining-since), old (alive, not draining,
-//     and started from an older revision or another manifest), or current
-//     (anything else: up to date, starting, dead or pending).
-//  3. A draining copy is never started again and never gets a role but
-//     draining. It stops when it has no process, when it must not drain
-//     (--now, drain-timeout 0), when drain-timeout has passed since it began,
-//     or when the load balancer says it has no sessions and it has drained
-//     for at least the settle time.
-//  4. An old copy that is not ready, and has no sessions by the load
-//     balancer's count, is stopped: it never served and never will.
-//  5. Current copies are kept at replicas + warm-replicas: the surplus goes in
-//     stopCompare's order, a ready one by draining (or stopping, when it must
-//     not drain), the others stopped; missing ones start under the lowest copy
-//     numbers no record has; a dead one starts again in place after its
-//     backoff, unless the restart policy has given up on it. While old copies
-//     still serve (before the switch) only replicas current copies are
-//     wanted: the new version starts with the copies that serve, its spares
-//     start once it has taken over, so a restart runs few processes at once.
-//  6. Old copies beyond replicas + warm-replicas drain too (a scale-down in
-//     the middle of a rollout, or a restart that overtakes a rollout whose new
-//     copy is ready but has not switched yet); one that is an idle spare stops
-//     at once instead, as at the switch.
-//  7. The switch: once replicas current copies are ready, every old copy
-//     drains (or stops, when it must not drain). An old spare that has no
-//     sessions by the load balancer's count stops at once instead: it takes no
-//     visitors unless it stands in for a dead active copy, and then it has
-//     sessions, so only the active copies wait out the settle time. Until the
-//     switch the old copies keep serving and the rollout waits; a new version
-//     that never gets ready leaves them serving.
-//  8. Roles. Before the switch the old ready copies come first, then the
-//     current ready ones, each by started-at: the first replicas are active,
-//     the rest warm. Otherwise the current ready copies by started-at. A
-//     restarted copy is the newest, so it comes back as a spare and roles
-//     never swap back on their own.
-//  9. At most replicas + warm-replicas copies with visitors drain at once:
-//     beyond that, the ones draining longest stop.
+// It works in these parts, in this order (the comments in the code carry the
+// same names):
+//
+// Upgrade. A live record without a copy number is a process from before the
+// load balancer, holding the app's port itself. It is stopped and the app
+// starts again behind the load balancer, with every copy.
+//
+// Classes. Each copy is draining (it has draining-since), old (alive, not
+// draining, and started from an older revision or another manifest), or
+// current (anything else: up to date, starting, dead or pending).
+//
+// Draining copies. A draining copy is never started again and never gets a
+// role but draining. It stops when it has no process, when it must not drain
+// (--now, drain-timeout 0), when drain-timeout has passed since it began, or
+// when the load balancer says it has no sessions and it has drained for at
+// least the settle time.
+//
+// Old copies that never served. An old copy that is not ready, and has no
+// sessions by the load balancer's count, is stopped: it never served and
+// never will.
+//
+// Current copies. They are kept at replicas + warm-replicas: the surplus
+// goes in stopCompare's order, a ready one by draining (or stopping, when it
+// must not drain), the others stopped.
+//
+// Old copies over the number. Old copies beyond replicas + warm-replicas
+// drain too (a scale-down in the middle of a rollout, or a restart that
+// overtakes a rollout whose new copy is ready but has not switched yet); one
+// that is an idle spare stops at once instead, as at the switch.
+//
+// The switch. Once replicas current copies are ready, every old copy drains
+// (or stops, when it must not drain). An old spare that has no sessions by the
+// load balancer's count stops at once instead: it takes no visitors unless it
+// stands in for a dead active copy, and then it has sessions, so only the
+// active copies wait out the settle time. Until the switch the old copies keep
+// serving and the rollout waits; a new version that never gets ready leaves
+// them serving.
+//
+// The starts. Missing current copies start under the lowest copy numbers no
+// record has; a dead one starts again in place after its backoff, unless the
+// restart policy has given up on it. They are worked out after the switch
+// because, while old copies still serve, only replicas current copies are
+// wanted: the new version starts with the copies that serve, and its spares
+// start once it has taken over, so a restart runs few processes at once.
+//
+// Roles. Before the switch the old ready copies come first, then the current
+// ready ones, each by started-at: the first replicas are active, the rest
+// warm. Otherwise the current ready copies by started-at. A restarted copy is
+// the newest, so it comes back as a spare and roles never swap back on their
+// own.
+//
+// The drain limit. At most replicas + warm-replicas copies with visitors
+// drain at once: beyond that, the ones draining longest stop.
 func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 	total := spec.CopyCount()
 	replicas := spec.EffectiveReplicas()
 	timeout := spec.EffectiveDrainTimeout()
 	now := in.Now
 
-	// Rule 1.
+	// Upgrade.
 	for _, c := range in.Copies {
 		if c.App.Copy == 0 && c.Alive {
 			steps := []Step{
@@ -226,7 +239,7 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 		drained = append(drained, it)
 	}
 
-	// Rule 2.
+	// Classes.
 	var draining, old, current []item
 	for _, v := range views {
 		it := item{CopyView: v}
@@ -257,7 +270,7 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 		}
 	}
 
-	// Rule 3.
+	// Draining copies.
 	var stillDraining []item
 	for _, d := range draining {
 		age := now.Sub(d.App.DrainingSince)
@@ -275,7 +288,7 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 		}
 	}
 
-	// Rule 4.
+	// Old copies that never served.
 	var oldLive []item
 	for _, o := range old {
 		if !o.Ready && o.SessionsKnown && o.Sessions == 0 {
@@ -290,7 +303,7 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 	}
 	plan.Changed = OrderFields(dedupe(plan.Changed))
 
-	// Rule 5.
+	// Current copies.
 	markActive(current, replicas)
 	kept := current
 	if len(current) > total {
@@ -313,7 +326,7 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 		}
 	}
 
-	// Rule 6.
+	// Old copies over the number.
 	var oldServing, oldWaiting []item
 	for _, o := range oldLive {
 		if o.class == 2 {
@@ -338,7 +351,7 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 		oldServing = slices.DeleteFunc(oldServing, func(it item) bool { return extra[it.App.Copy] })
 	}
 
-	// Rule 7.
+	// The switch.
 	var currentReady []CopyView
 	for _, it := range kept {
 		if it.Alive && it.Ready {
@@ -359,8 +372,9 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 	}
 	rolling := len(oldServing)+len(oldWaiting) > 0
 
-	// Rule 5, the starts. While old copies still serve, only replicas copies
-	// of the new version are wanted; its spares start once it has taken over.
+	// The starts. While old copies still serve, only replicas copies of the
+	// new version are wanted; its spares start once it has taken over, which
+	// is why this comes after the switch.
 	want := total
 	if rolling {
 		want = replicas
@@ -385,7 +399,7 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 		}
 	}
 
-	// Rule 8.
+	// Roles.
 	if rolling {
 		plan.Rolling = true
 		ranked := slices.Concat(byStart(views0(oldServing)), byStart(currentReady))
@@ -414,8 +428,8 @@ func DecideCopies(spec manifest.AppSpec, in Input) Plan {
 		plan.Active, plan.Warm = rankRoles(currentReady, replicas)
 	}
 
-	// Rule 9, and the draining list: the copies still draining, then the ones
-	// that start now, longest draining first.
+	// The drain limit, and the draining list: the copies still draining, then
+	// the ones that start now, longest draining first.
 	type drainer struct {
 		item
 		since time.Time

@@ -70,28 +70,29 @@ func token(secret, dial string) string {
 
 // Select chooses the copy for req from pool, which is the table's list for
 // the app. A copy is listed when it has a role, and up when the passive
-// health checks have not marked it down.
+// health checks have not marked it down. Four rules, tried in this order.
 //
-//  1. The visitor's own copy, while it is listed and up: no new cookie. Unless
-//     it is draining and req is a page load (see pageLoad): a visitor who
-//     reloads during a redeploy gets the new version, by the rules below.
-//  2. Otherwise, if the cookie names a copy that has left the table, the copy
-//     that took its place, while that is listed and up (see Set).
-//  3. Otherwise the candidates are the active copies that are up, then, for
-//     each active copy that is down, one warm copy that is up (the spare
-//     standing in for it, in the order the pool lists them). The visitor
-//     whose own copy is an active one that is down gets the spare standing
-//     in for that copy; any other visitor gets the fallback policy's choice
-//     among the candidates. The visitor gets a cookie for the one chosen. So
-//     an active copy that fails is replaced by a spare at once, here, before
-//     and without the table being changed, and new visitors never land on a
-//     spare while every active copy is up. Only the warm copies not standing
-//     in form the warm tier, tried when no candidate is up, and then the
-//     draining copies; a draining copy gets no new visitor otherwise.
-//  4. Otherwise nothing is up: the visitor's own copy if it is listed, else
-//     the first listed one. A copy marked down is dialled anyway, so a lone
-//     copy that restarts is served as soon as R is back, not after the
-//     marks expire.
+// Own copy. The visitor stays on the copy its cookie names while that copy is
+// listed and up, with no new cookie. The one exception is a page load (see
+// pageLoad) of a copy that is draining: a visitor who reloads during a
+// redeploy gets the new version, by the rules below.
+//
+// Successor. If the cookie names a copy that has left the table, the copy that
+// took its place serves the visitor while that is listed and up (see Set).
+//
+// Candidates. Any other visitor gets a copy chosen now, and a cookie for it.
+//   - Who is a candidate: the active copies that are up.
+//   - Who stands in: for each active copy that is down, one warm copy that is
+//     up, in pool order. A visitor whose own copy is an active one that is
+//     down gets the spare standing in for it.
+//   - How the fallback picks: its policy chooses among the candidates and the
+//     stand-ins. Only when none is up does it choose among the other warm
+//     copies, then among the draining ones; a draining copy gets no new
+//     visitor otherwise.
+//
+// Last resort. Nothing is up: the visitor's own copy if it is listed, else the
+// first listed one. A copy marked down is dialled anyway, so a lone copy that
+// restarts is served as soon as R is back, not after the marks expire.
 func (s *Sticky) Select(pool reverseproxy.UpstreamPool, req *http.Request, w http.ResponseWriter) *reverseproxy.Upstream {
 	snap := load()
 	roles := snap.roles[s.App]
@@ -106,13 +107,14 @@ func (s *Sticky) Select(pool reverseproxy.UpstreamPool, req *http.Request, w htt
 			}
 		}
 	}
+	// Own copy.
 	if pinned != nil && s.avail(pinned) && !(roles[pinned.Dial] == roleDraining && pageLoad(req)) {
 		return pinned
 	}
 
-	// A cookie that names a copy that has left the table: the daemon's update
-	// can land while the request waits to retry. The copy that took its place
-	// serves the visitor, if it is listed and up.
+	// Successor: a cookie that names a copy that has left the table (the
+	// daemon's update can land while the request waits to retry). The copy
+	// that took its place serves the visitor, if it is listed and up.
 	if pinned == nil {
 		if c, err := req.Cookie(s.Cookie); err == nil {
 			if u := s.successorOf(pool, c.Value, snap); u != nil {
@@ -122,8 +124,9 @@ func (s *Sticky) Select(pool reverseproxy.UpstreamPool, req *http.Request, w htt
 		}
 	}
 
-	// The active copies that are up, the ones that are down, the warm copies
-	// that are up, and the draining copies that are up, each in pool order.
+	// Candidates. The active copies that are up, the ones that are down, the
+	// warm copies that are up, and the draining copies that are up, each in
+	// pool order.
 	var activeUp, activeDown, warmUp, drainUp reverseproxy.UpstreamPool
 	for _, u := range pool {
 		switch roles[u.Dial] {
@@ -168,6 +171,7 @@ func (s *Sticky) Select(pool reverseproxy.UpstreamPool, req *http.Request, w htt
 		}
 	}
 
+	// Last resort.
 	if pinned != nil {
 		return pinned
 	}

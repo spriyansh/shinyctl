@@ -126,7 +126,7 @@ func TestDecideCopies(t *testing.T) {
 		rolling   bool
 		switched  bool
 	}{
-		// Unchanged from phase 2.
+		// Unchanged from the builds that replaced copies in place.
 		{name: "1 no records, 1 copy and a spare", spec: s11,
 			steps: []string{"start 1", "start 2"}},
 		{name: "2 no records, 2 copies", spec: s20,
@@ -183,7 +183,7 @@ func TestDecideCopies(t *testing.T) {
 		{name: "28 no warm-replicas key means one spare", spec: manifest.AppSpec{AppName: "app", EntrypointFile: "/srv/app.R"},
 			steps: []string{"start 1", "start 2"}},
 
-		// Scale-down drains (changed from phase 2, where these copies stopped).
+		// Scale-down drains (builds that replaced copies in place stopped these copies).
 		{name: "12 scale down: the spare drains", spec: s11,
 			copies: []CopyView{ready(s21, 1, 0), ready(s21, 2, time.Second), ready(s21, 3, 2*time.Second)},
 			drain:  []int{3}, active: []int{1}, warm: []int{2}, draining: []int{3}},
@@ -332,7 +332,7 @@ func TestDecideCopies(t *testing.T) {
 		{name: "35 a new copy dies after the switch: an ordinary takeover", spec: s11, revision: 1,
 			copies: []CopyView{withSessions(drainingSince(ready(s11, 1, 0), time.Minute), 1), withRevision(dead(s11, 3, exited(base, 1)), 1), withRevision(ready(s11, 4, time.Minute), 1)},
 			steps:  []string{"start 3"}, active: []int{4}, draining: []int{1}},
-		{name: "40 a rollout from phase 2 half done: the switch at once", spec: s11, revision: 1,
+		{name: "40 a rollout of a build before draining, half done: the switch at once", spec: s11, revision: 1,
 			copies: []CopyView{ready(s11, 1, 0), withRevision(ready(s11, 2, time.Minute), 1)},
 			steps:  []string{"start 3"}, drain: []int{1}, active: []int{2}, draining: []int{1}, switched: true},
 		{name: "31c with the sessions unknown and drains that began together, the cap stops a spare, not the old active copy", spec: s11, revision: 2,
@@ -434,8 +434,8 @@ func TestDescribe(t *testing.T) {
 	}
 }
 
-// Every plan the decision function makes describes itself as a plan of this
-// phase would, end to end: the message from DecideCopies' own plan.
+// Every plan the decision function makes describes itself as the plan would,
+// end to end: the message from DecideCopies' own plan.
 func TestDescribe_FromDecideCopies(t *testing.T) {
 	s := copySpec(1, 1)
 	views := []CopyView{ready(s, 1, 0), ready(s, 2, time.Second)}

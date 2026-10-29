@@ -55,11 +55,11 @@ type AppState struct {
 
 // State is the on-disk shape of one app's state.json.
 //
-// Apps holds one record per copy of the app, sorted by copy number. A
-// phase-1 file (one record, copy 1, no revision) reads as copy 1 at
-// revision 0 under a state at revision 0, so nothing needs migrating. A
-// record with copy 0 is from before the load balancer, and is only ever the
-// sole record.
+// Apps holds one record per copy of the app, sorted by copy number. A file
+// from a build before several copies (one record, copy 1, no revision) reads
+// as copy 1 at revision 0 under a state at revision 0, so nothing needs
+// migrating. A record with copy 0 is from before the load balancer, and is
+// only ever the sole record.
 //
 // A record without draining-since or skip-drain is a copy that is not
 // draining and has no mark, which is every record written before them.
