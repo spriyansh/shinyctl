@@ -53,15 +53,16 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			// state: after a stop, state.json is cleared, so a record's name
 			// and port would otherwise render as a blank row identifying
 			// nothing.
-			Name:         spec.AppName,
-			Host:         spec.EffectiveHost(),
-			Port:         spec.Port,
-			Stopped:      appRegistry.IsStopped(spec.AppStateFile),
-			Replicas:     spec.EffectiveReplicas(),
-			WarmReplicas: spec.EffectiveWarm(),
-			Copies:       []api.CopyStatus{},
-			NotServed:    gateway.NotServed(spec.AppStateFile),
-			NotStarted:   notStartedReason(spec.AppStateFile),
+			Name:          spec.AppName,
+			Host:          spec.EffectiveHost(),
+			Port:          spec.Port,
+			Stopped:       appRegistry.IsStopped(spec.AppStateFile),
+			Replicas:      spec.EffectiveReplicas(),
+			WarmReplicas:  spec.EffectiveWarm(),
+			Copies:        []api.CopyStatus{},
+			RestartPolicy: string(spec.RestartPolicy.Effective()),
+			NotServed:     gateway.NotServed(spec.AppStateFile),
+			NotStarted:    notStartedReason(spec.AppStateFile),
 		}
 
 		for i, rec := range recs {

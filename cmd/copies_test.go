@@ -469,6 +469,16 @@ func TestNeverPolicy_PerCopy(t *testing.T) {
 	if !process.IsReady(spec.Host, spec.Port) {
 		t.Error("the port closed while a copy is still running")
 	}
+	// The table says exited, and under it why.
+	var out bytes.Buffer
+	if err := writeStatus(&out, httptestStatus(t)); err != nil {
+		t.Fatal(err)
+	}
+	row := regexp.MustCompile(fmt.Sprintf(`(?m)^app\s+%d\s.*\sexited\s`, active.Copy))
+	note := fmt.Sprintf("app: copy %d exited and restart-policy never leaves it down; apply or restart starts it again.\n", active.Copy)
+	if !row.MatchString(out.String()) || !strings.Contains(out.String(), note) {
+		t.Errorf("status =\n%s\nwant copy %d as exited, and the line %q", out.String(), active.Copy, note)
+	}
 
 	if err := syscall.Kill(warm.PID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)

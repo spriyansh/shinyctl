@@ -93,6 +93,9 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 				if c.Ready {
 					ready = "ready"
 				}
+			case c.GaveUp:
+				// The process is gone and the restart policy leaves it so.
+				status = "exited"
 			case c.CrashCount > 0:
 				status = "crash-looping"
 			}
@@ -142,6 +145,11 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 	}
 	for _, app := range resp.Apps {
 		if note := rolloutNote(app); note != "" {
+			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
+		}
+	}
+	for _, app := range resp.Apps {
+		if note := exitedNote(app); note != "" {
 			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
 		}
 	}
@@ -214,6 +222,50 @@ func rolloutNote(app api.AppStatus) string {
 	}
 	return fmt.Sprintf("new version starting in %s; %s %s serving the previous version until it is ready, then %s",
 		reconcile.ListCopies(waiting), reconcile.ListCopies(old), plural(old, "keeps", "keep"), then)
+}
+
+// exitedNote says why copies are down that the restart policy leaves down,
+// and what brings them back. A copy that a note about a redeploy already
+// names is left to that note. It is empty when no copy has exited that way.
+func exitedNote(app api.AppStatus) string {
+	if rolloutNote(app) != "" {
+		return ""
+	}
+	var exited []int
+	all := len(app.Copies) > 0
+	for _, c := range app.Copies {
+		if c.GaveUp && !c.Alive {
+			exited = append(exited, c.Copy)
+		} else {
+			all = false
+		}
+	}
+	if len(exited) == 0 {
+		return ""
+	}
+	var policy string
+	switch app.RestartPolicy {
+	case "never":
+		policy = "restart-policy never leaves"
+	case "on-failure":
+		policy = "restart-policy on-failure leaves"
+	default:
+		policy = "the restart policy leaves"
+	}
+	verb := "it"
+	if len(exited) > 1 {
+		verb = "them"
+	}
+	how := "exited"
+	if app.RestartPolicy == "on-failure" {
+		how = "exited without an error"
+	}
+	note := fmt.Sprintf("%s %s and %s %s down; apply or restart starts %s again.",
+		reconcile.ListCopies(exited), how, policy, verb, verb)
+	if all {
+		note += " Its port is closed."
+	}
+	return note
 }
 
 // spareNote says that the app has no spare for the seconds between the new

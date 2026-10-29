@@ -63,6 +63,13 @@ func TestWriteStatus(t *testing.T) {
 				{Copy: 3, Role: "active", PID: 23, Alive: true, Ready: true, Sessions: &two},
 				{Copy: 4, PID: 24, Alive: true},
 			}},
+			{Name: "oneshot", Port: 8087, RestartPolicy: "never", Replicas: 2, Copies: []api.CopyStatus{
+				{Copy: 1, Role: "active", PID: 31, Alive: true, Ready: true},
+				{Copy: 2, PID: 32, GaveUp: true, StartedAt: started},
+			}},
+			{Name: "finished", Port: 8088, RestartPolicy: "on-failure", Copies: []api.CopyStatus{
+				{Copy: 1, PID: 41, GaveUp: true, StartedAt: started},
+			}},
 		},
 	}
 
@@ -85,14 +92,21 @@ draining  1     draining  8086  21     alive          ready     -     2         
 draining  2     draining  8086  22     alive          ready     -     0         -        -
 draining  3     active    8086  23     alive          ready     -     2         -        -
 draining  4     -         8086  24     alive          starting  -     -         -        -
+oneshot   1     active    8087  31     alive          ready     -     -         -        -
+oneshot   2     -         8087  32     exited         -         -     -         -        2026-10-11T18:20:21Z
+finished  1     -         8088  41     exited         -         -     -         -        2026-10-11T18:20:21Z
 
-Memory: 281M in 10 R processes (2 warm, 2 draining), plus 41M for the load balancer.
+Memory: 281M in 11 R processes (2 warm, 2 draining), plus 41M for the load balancer.
 
 blocked: its port is not served: 127.0.0.1:8083 is not available (taken) — pick a different port
 
 taken: not started: 127.0.0.1:8084 is not available (taken) — pick a different port
 
 rolling: new version starting in copy 3; copies 1 and 2 keep serving the previous version until it is ready, then drain
+
+oneshot: copy 2 exited and restart-policy never leaves it down; apply or restart starts it again.
+
+finished: copy 1 exited without an error and restart-policy on-failure leaves it down; apply or restart starts it again. Its port is closed.
 
 draining: copy 4, the new spare, is starting; until it is ready the app has no spare.
 
@@ -234,6 +248,38 @@ func TestMemoryLine_Draining(t *testing.T) {
 	} {
 		if got := memoryLine(api.StatusResponse{Apps: []api.AppStatus{{Name: "a", Copies: tc.copies}}}); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestExitedNote(t *testing.T) {
+	gone := func(n int) api.CopyStatus { return api.CopyStatus{Copy: n, GaveUp: true} }
+	up := func(n int) api.CopyStatus { return api.CopyStatus{Copy: n, Alive: true, Ready: true, Role: "active"} }
+	cases := []struct {
+		name string
+		app  api.AppStatus
+		want string
+	}{
+		{"never, one copy of several", api.AppStatus{RestartPolicy: "never", Copies: []api.CopyStatus{up(1), gone(2)}},
+			"copy 2 exited and restart-policy never leaves it down; apply or restart starts it again."},
+		{"never, two copies", api.AppStatus{RestartPolicy: "never", Copies: []api.CopyStatus{up(1), gone(2), gone(3)}},
+			"copies 2 and 3 exited and restart-policy never leaves them down; apply or restart starts them again."},
+		{"on-failure, a clean exit", api.AppStatus{RestartPolicy: "on-failure", Copies: []api.CopyStatus{up(1), gone(2)}},
+			"copy 2 exited without an error and restart-policy on-failure leaves it down; apply or restart starts it again."},
+		{"on-failure, two clean exits", api.AppStatus{RestartPolicy: "on-failure", Copies: []api.CopyStatus{up(1), gone(2), gone(3)}},
+			"copies 2 and 3 exited without an error and restart-policy on-failure leaves them down; apply or restart starts them again."},
+		{"every copy exited", api.AppStatus{RestartPolicy: "never", Copies: []api.CopyStatus{gone(1), gone(2)}},
+			"copies 1 and 2 exited and restart-policy never leaves them down; apply or restart starts them again. Its port is closed."},
+		{"a daemon that doesn't send the policy", api.AppStatus{Copies: []api.CopyStatus{gone(1)}},
+			"copy 1 exited and the restart policy leaves it down; apply or restart starts it again. Its port is closed."},
+		{"nothing exited", api.AppStatus{RestartPolicy: "never", Copies: []api.CopyStatus{up(1)}}, ""},
+		{"a crash-looping copy is not an exit", api.AppStatus{RestartPolicy: "always", Copies: []api.CopyStatus{up(1), {Copy: 2, CrashCount: 3}}}, ""},
+		{"a rollout note names it already", api.AppStatus{RestartPolicy: "never", Copies: []api.CopyStatus{
+			{Copy: 1, Alive: true, Ready: true, Outdated: true, Role: "active"}, gone(2)}}, ""},
+	}
+	for _, c := range cases {
+		if got := exitedNote(c.app); got != c.want {
+			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
 		}
 	}
 }

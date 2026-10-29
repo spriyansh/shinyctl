@@ -63,6 +63,10 @@ type AppStatus struct {
 	WarmReplicas int          `json:"warm-replicas"`
 	Copies       []CopyStatus `json:"copies"`
 
+	// RestartPolicy is the app's restart-policy as it applies (always,
+	// on-failure or never), so a copy the policy leaves down can be explained.
+	RestartPolicy string `json:"restart-policy,omitempty"`
+
 	// NotServed is why the load balancer leaves the app's port unserved (it
 	// is taken by another program or another app), or empty. The copies may
 	// be running fine behind it.
