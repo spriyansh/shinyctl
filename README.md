@@ -31,6 +31,20 @@ is for a lab server, a Raspberry Pi or a small VPS.
 
 ## Install
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/spriyansh/shinyctl/main/install.sh | sh
+```
+
+[install.sh](install.sh) picks the build for your system (Linux or macOS, amd64
+or arm64), checks it against the release's `checksums.txt`, and copies the one
+`shinyctl` binary into `~/.local/bin`. It needs no root, and says if that
+folder is not on your `PATH` yet. `SHINYCTL_VERSION=v0.1.0` installs a given
+release and `SHINYCTL_INSTALL_DIR` another folder, for example
+`curl -fsSL .../install.sh | SHINYCTL_VERSION=v0.1.0 sh`. Run it again to
+upgrade.
+
+### By hand
+
 Download the archive for your system and `checksums.txt` from the
 [releases page](https://github.com/spriyansh/shinyctl/releases), check the
 download, unpack it and put `shinyctl` on your `PATH`. For Linux on arm64
