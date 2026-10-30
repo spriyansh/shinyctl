@@ -87,17 +87,17 @@ func TestHandleStatus_ReportsMemory(t *testing.T) {
 		byName[s.Name] = s
 	}
 
-	if s := byName["running"]; len(s.Copies) != 1 || !s.Copies[0].Alive || s.Copies[0].RSSBytes <= 0 {
-		t.Errorf("running = %+v, want one alive copy with a positive RSSBytes", s)
+	if s := byName["running"]; len(s.Copies) != 1 || !s.Copies[0].Alive || s.Copies[0].MemoryBytes <= 0 {
+		t.Errorf("running = %+v, want one alive copy with a positive MemoryBytes", s)
 	}
 	if s := byName["stopped"]; len(s.Copies) != 0 {
 		t.Errorf("stopped = %+v, want no copies", s)
 	}
-	if s := byName["reused"]; len(s.Copies) != 1 || s.Copies[0].Alive || s.Copies[0].RSSBytes != 0 {
-		t.Errorf("reused = %+v, want one copy, not alive and RSSBytes 0 (the stranger %d is not ours)", s, strangerPID)
+	if s := byName["reused"]; len(s.Copies) != 1 || s.Copies[0].Alive || s.Copies[0].MemoryBytes != 0 {
+		t.Errorf("reused = %+v, want one copy, not alive and MemoryBytes 0 (the stranger %d is not ours)", s, strangerPID)
 	}
-	if resp.BalancerRSS <= 0 {
-		t.Errorf("BalancerRSS = %d, want the load balancer's memory", resp.BalancerRSS)
+	if resp.BalancerMemory <= 0 {
+		t.Errorf("BalancerMemory = %d, want the load balancer's memory", resp.BalancerMemory)
 	}
 }
 

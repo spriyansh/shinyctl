@@ -118,7 +118,7 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 			}
 
 			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				app.Name, number, role, app.Port, c.PID, status, ready, formatMem(c.RSSBytes), sessions, crashes, started)
+				app.Name, number, role, app.Port, c.PID, status, ready, formatMem(c.MemoryBytes), sessions, crashes, started)
 		}
 	}
 
@@ -377,7 +377,7 @@ func memoryLine(resp api.StatusResponse) string {
 				continue
 			}
 			running++
-			total += c.RSSBytes
+			total += c.MemoryBytes
 			switch c.Role {
 			case "warm":
 				warm++
@@ -403,8 +403,8 @@ func memoryLine(resp api.StatusResponse) string {
 	case draining > 0:
 		line += fmt.Sprintf(" (%d draining)", draining)
 	}
-	if resp.BalancerRSS > 0 {
-		line += fmt.Sprintf(", plus %s for the load balancer", formatMem(resp.BalancerRSS))
+	if resp.BalancerMemory > 0 {
+		line += fmt.Sprintf(", plus %s for the load balancer", formatMem(resp.BalancerMemory))
 	}
 	return line + "."
 }

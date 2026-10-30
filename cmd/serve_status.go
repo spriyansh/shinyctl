@@ -124,15 +124,15 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	if balancer > 0 {
 		alivePIDs = append(alivePIDs, balancer)
 	}
-	rss := process.RSS(alivePIDs)
+	memory := process.RSS(alivePIDs)
 	for i := range resp.Apps {
 		for j := range resp.Apps[i].Copies {
 			if c := &resp.Apps[i].Copies[j]; c.Alive {
-				c.RSSBytes = rss[c.PID]
+				c.MemoryBytes = memory[c.PID]
 			}
 		}
 	}
-	resp.BalancerRSS = rss[balancer]
+	resp.BalancerMemory = memory[balancer]
 	resp.BalancerStarting = gateway.Starting()
 
 	w.Header().Set("Content-Type", "application/json")

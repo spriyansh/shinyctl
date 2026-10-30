@@ -44,9 +44,12 @@ type CopyStatus struct {
 	// (--now).
 	SkipDrain bool `json:"skip-drain,omitempty"`
 
-	// RSSBytes is the resident memory of the copy's main process; zero when
-	// it isn't running or couldn't be measured.
-	RSSBytes int64 `json:"rss-bytes,omitempty"`
+	// MemoryBytes is the memory of the copy's main process; zero when it
+	// isn't running or couldn't be measured. The wire name is historical: it
+	// was once the resident size, and is kept because the CLI and
+	// shinyctl-api of different builds are common between replacing the
+	// binary and restarting shinyctl-api.
+	MemoryBytes int64 `json:"rss-bytes,omitempty"`
 
 	// Sessions is the number of requests open to the copy through the load
 	// balancer (a Shiny session is one open WebSocket); nil when unknown.
@@ -83,9 +86,10 @@ type AppStatus struct {
 type StatusResponse struct {
 	Apps []AppStatus `json:"apps"`
 
-	// BalancerRSS is the resident memory of the load balancer's process;
-	// zero when it couldn't be measured.
-	BalancerRSS int64 `json:"balancer-rss-bytes,omitempty"`
+	// BalancerMemory is the memory of the load balancer's process; zero when
+	// it couldn't be measured. The wire name is historical, as for
+	// CopyStatus.MemoryBytes.
+	BalancerMemory int64 `json:"balancer-rss-bytes,omitempty"`
 
 	// BalancerStarting says the load balancer is being started or replaced by
 	// one of another build, and does not answer for the moment.

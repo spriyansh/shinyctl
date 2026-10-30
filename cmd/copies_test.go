@@ -672,12 +672,12 @@ func TestHandleStatus_PerCopy(t *testing.T) {
 		if dial == warmDial {
 			wantRole, wantSessions = "warm", 0
 		}
-		if c.Role != wantRole || !c.Alive || !c.Ready || c.RSSBytes <= 0 || c.Sessions == nil || *c.Sessions != wantSessions || c.Outdated {
+		if c.Role != wantRole || !c.Alive || !c.Ready || c.MemoryBytes <= 0 || c.Sessions == nil || *c.Sessions != wantSessions || c.Outdated {
 			t.Errorf("copy %d = %+v, want role %s, alive, ready, memory, %d session(s)", c.Copy, c, wantRole, wantSessions)
 		}
 	}
-	if resp.BalancerRSS <= 0 {
-		t.Errorf("BalancerRSS = %d", resp.BalancerRSS)
+	if resp.BalancerMemory <= 0 {
+		t.Errorf("BalancerMemory = %d", resp.BalancerMemory)
 	}
 
 	var out bytes.Buffer
