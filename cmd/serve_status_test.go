@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -98,6 +99,48 @@ func TestHandleStatus_ReportsMemory(t *testing.T) {
 	}
 	if resp.BalancerMemory <= 0 {
 		t.Errorf("BalancerMemory = %d, want the load balancer's memory", resp.BalancerMemory)
+	}
+}
+
+// TestHandleStatus_LogsUnmeasuredMemoryOncePerSpell: memory that can't be
+// measured is logged on the first status that finds out, not on every one
+// after it, and again once a status measured everything and a later one
+// fails anew.
+func TestHandleStatus_LogsUnmeasuredMemoryOncePerSpell(t *testing.T) {
+	orig := memoryOf
+	t.Cleanup(func() { memoryOf = orig; memoryWarned.Store(false) })
+	memoryWarned.Store(false)
+	buf := captureLog(t)
+
+	fail := true
+	memoryOf = func(pids []int) (map[int]int64, error) {
+		if fail {
+			return nil, errors.New("footprint is not installed")
+		}
+		return nil, nil
+	}
+	status := func() {
+		rec := httptest.NewRecorder()
+		handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	}
+	lines := func() int { return strings.Count(buf.String(), "memory: footprint is not installed") }
+
+	status()
+	status()
+	if got := lines(); got != 1 {
+		t.Errorf("two failing statuses logged %d lines, want 1", got)
+	}
+
+	fail = false
+	status()
+	fail = true
+	status()
+	status()
+	if got := lines(); got != 2 {
+		t.Errorf("a second spell: %d lines in all, want 2", got)
 	}
 }
 
