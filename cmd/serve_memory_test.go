@@ -498,8 +498,19 @@ func TestMemory_AKillDuringAPlannedStopIsNoCrash(t *testing.T) {
 		return !still
 	})
 	time.Sleep(200 * time.Millisecond)
-	if copies := loadCopies(t, spec); len(copies) != 1 || copies[0].PID != keep.PID || copies[0].CrashCount != 0 {
-		t.Errorf("copies = %+v, want only copy %d, with no crash recorded", copies, keep.Copy)
+
+	// A reconcile queued behind the lock, by a ready-watcher, may start copy 2
+	// again once it is released; that is no crash. What matters is that the
+	// kill left no exit to count against any copy, and the other copy is
+	// untouched.
+	copies := loadCopies(t, spec)
+	for _, rec := range copies {
+		if rec.CrashCount != 0 || rec.LastExitReason != "" {
+			t.Errorf("copy %d = %+v, want no crash and no reason recorded", rec.Copy, rec)
+		}
+	}
+	if rec, ok := loadCopyRecord(spec, keep.Copy); !ok || rec.PID != keep.PID || !process.IsAlive(spec, rec) {
+		t.Errorf("copy %d = %+v, want it untouched and running", keep.Copy, rec)
 	}
 }
 
