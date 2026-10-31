@@ -92,6 +92,27 @@ type AppStatus struct {
 	NotStarted string `json:"not-started,omitempty"`
 }
 
+// MachineMemory is the memory of the whole machine as shinyctl-api last read
+// it, for the note that it is low. Pressure is set on macOS only; there,
+// AvailableBytes is derived from the kernel's free percentage, and the swap
+// total is the size of the swap files, which macOS adds as needed.
+type MachineMemory struct {
+	Low            bool  `json:"low,omitempty"`
+	TotalBytes     int64 `json:"total-bytes"`
+	AvailableBytes int64 `json:"available-bytes"`
+	SwapTotalBytes int64 `json:"swap-total-bytes,omitempty"`
+	SwapUsedBytes  int64 `json:"swap-used-bytes,omitempty"`
+
+	// StallPercent is how much of the last minute a process was waiting
+	// for memory, from the kernel's pressure stall information, as a whole
+	// percent, truncated; 0 under one percent and where the kernel does
+	// not provide it. Linux only.
+	StallPercent int `json:"stall-percent,omitempty"`
+
+	// Pressure is the kernel's level on macOS: normal, warning or critical.
+	Pressure string `json:"pressure,omitempty"`
+}
+
 // StatusResponse is shinyctl-api's response to a GET /status request:
 // every app in its registry — applied at some point and not deleted
 // since, across shinyctl-api's own restarts.

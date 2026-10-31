@@ -130,6 +130,10 @@ var serveCmd = &cobra.Command{
 
 		server := &http.Server{Handler: mux}
 
+		// The listener already accepts, so the first request could come
+		// before the loop's first reading; take one now.
+		machine.observe(process.ReadMachineMemory())
+
 		go func() {
 			if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 				log.Printf("http server error: %v", err)
@@ -138,6 +142,7 @@ var serveCmd = &cobra.Command{
 
 		go runReconcileLoop(loopCtx)
 		go runMemoryLoop(loopCtx, memoryInterval, process.ExactMemory)
+		go runMachineLoop(loopCtx, machineInterval, process.ReadMachineMemory, &machine)
 
 		log.Printf("listening on %s, reconciling every %s", socketPath, reconcileInterval)
 
