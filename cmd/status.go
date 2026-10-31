@@ -130,6 +130,9 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 	if line := memoryLine(resp); line != "" {
 		fmt.Fprintf(out, "\n%s\n", line)
 	}
+	if line := machineLine(resp); line != "" {
+		fmt.Fprintf(out, "\n%s\n", line)
+	}
 	if resp.BalancerStarting {
 		fmt.Fprintf(out, "\nThe load balancer is starting or being replaced: copies show as starting until it is done, usually in under a second.\n")
 	}
@@ -458,6 +461,42 @@ func memoryLine(resp api.StatusResponse) string {
 		line += fmt.Sprintf(", plus %s for the load balancer", formatMem(resp.BalancerMemory))
 	}
 	return line + "."
+}
+
+// machineLine says the machine is low on memory, as one paragraph with a
+// way out. It is empty when the machine is healthy, or when shinyctl-api sent
+// no reading (an older build, or none could be read). The verdict is the
+// daemon's.
+func machineLine(resp api.StatusResponse) string {
+	m := resp.MachineMemory
+	if m == nil || !m.Low {
+		return ""
+	}
+	said := describeMachine(*m)
+	line := strings.ToUpper(said[:1]) + said[1:] + "."
+
+	// The advice looks at what is running, not at what was measured: copies
+	// that are alive but measured at 0 bytes still hold memory.
+	var running, unlimited, warm bool
+	for _, app := range resp.Apps {
+		for _, c := range app.Copies {
+			if !c.Alive {
+				continue
+			}
+			running = true
+			unlimited = unlimited || app.MaxMemoryBytes == 0
+			warm = warm || c.Role == "warm"
+		}
+	}
+	switch {
+	case !running:
+		return line + " None of shinyctl's apps is running; other programs hold the memory."
+	case unlimited:
+		return line + " Stop an app, or set max-memory so a copy that grows is killed before the machine is out of memory."
+	case warm:
+		return line + " Stop an app, or lower warm-replicas."
+	}
+	return line + " Stop an app."
 }
 
 // formatMem renders a byte count in the shortest readable form: K under a

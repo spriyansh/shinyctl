@@ -355,3 +355,93 @@ func TestWarnIfLimitIgnored(t *testing.T) {
 		}
 	}
 }
+
+func TestMachineLine(t *testing.T) {
+	const g, m = 1 << 30, 1 << 20
+	gb := func(n float64) int64 { return int64(n * g) }
+	copyOf := func(role string, alive bool, mem int64) api.CopyStatus {
+		return api.CopyStatus{Copy: 1, Role: role, Alive: alive, MemoryBytes: mem}
+	}
+	unlimited := api.AppStatus{Name: "a", Copies: []api.CopyStatus{copyOf("active", true, 100*m)}}
+	limited := api.AppStatus{Name: "b", MaxMemoryBytes: 512 * m, Copies: []api.CopyStatus{copyOf("active", true, 100*m)}}
+	limitedWarm := api.AppStatus{Name: "b", MaxMemoryBytes: 512 * m, Copies: []api.CopyStatus{
+		copyOf("active", true, 100*m), copyOf("warm", true, 100*m)}}
+	atZero := api.AppStatus{Name: "c", MaxMemoryBytes: 512 * m, Copies: []api.CopyStatus{copyOf("active", true, 0)}}
+	stopped := api.AppStatus{Name: "d", Stopped: true, Copies: []api.CopyStatus{copyOf("", false, 0)}}
+
+	const setMax = " Stop an app, or set max-memory so a copy that grows is killed before the machine is out of memory."
+	linuxSwap := &api.MachineMemory{Low: true, TotalBytes: gb(3.9), AvailableBytes: 312 * m, SwapTotalBytes: gb(2), SwapUsedBytes: gb(1.8)}
+	noSwap := &api.MachineMemory{Low: true, TotalBytes: gb(1.9)}
+
+	for _, tc := range []struct {
+		name string
+		mem  *api.MachineMemory
+		apps []api.AppStatus
+		want string
+	}{
+		{"linux with swap and an unlimited app", linuxSwap, []api.AppStatus{unlimited, limited},
+			"This machine is low on memory: 312M of 3.9G available, swap 1.8G of 2.0G used." + setMax},
+		{"no swap, every app limited, a warm copy", noSwap, []api.AppStatus{limitedWarm},
+			"This machine is low on memory: 0 of 1.9G available and no swap. Stop an app, or lower warm-replicas."},
+		{"every app limited, no warm copy", noSwap, []api.AppStatus{limited},
+			"This machine is low on memory: 0 of 1.9G available and no swap. Stop an app."},
+		{"unused swap", &api.MachineMemory{Low: true, TotalBytes: gb(4), AvailableBytes: 300 * m, SwapTotalBytes: gb(2)}, []api.AppStatus{unlimited},
+			"This machine is low on memory: 300M of 4.0G available, swap 0 of 2.0G used." + setMax},
+		{"stall alone, with swap", &api.MachineMemory{Low: true, TotalBytes: gb(3.9), AvailableBytes: 780 * m, SwapTotalBytes: gb(2), SwapUsedBytes: gb(1.9), StallPercent: 23}, []api.AppStatus{unlimited},
+			"This machine is low on memory: 780M of 3.9G available, swap 1.9G of 2.0G used, a process was waiting for memory 23% of the last minute." + setMax},
+		{"both signals", &api.MachineMemory{Low: true, TotalBytes: gb(3.9), AvailableBytes: 312 * m, SwapTotalBytes: gb(2), SwapUsedBytes: gb(1.8), StallPercent: 41}, []api.AppStatus{unlimited},
+			"This machine is low on memory: 312M of 3.9G available, swap 1.8G of 2.0G used, a process was waiting for memory 41% of the last minute." + setMax},
+		{"stall alone, no swap", &api.MachineMemory{Low: true, TotalBytes: gb(1.9), AvailableBytes: 380 * m, StallPercent: 23}, []api.AppStatus{limitedWarm},
+			"This machine is low on memory: 380M of 1.9G available and no swap, a process was waiting for memory 23% of the last minute. Stop an app, or lower warm-replicas."},
+		{"stall under 10", &api.MachineMemory{Low: true, TotalBytes: gb(1.9), AvailableBytes: 100 * m, StallPercent: 9}, []api.AppStatus{limited},
+			"This machine is low on memory: 100M of 1.9G available and no swap. Stop an app."},
+		{"macOS warning", &api.MachineMemory{Low: true, TotalBytes: gb(32), AvailableBytes: gb(2.88), SwapUsedBytes: gb(12.4), Pressure: "warning"}, []api.AppStatus{unlimited},
+			"This machine is low on memory (memory pressure: warning): 9% of 32.0G free, swap 12.4G used." + setMax},
+		{"macOS critical without level or swap", &api.MachineMemory{Low: true, TotalBytes: gb(32), Pressure: "critical"}, []api.AppStatus{limited},
+			"This machine is low on memory (memory pressure: critical). Stop an app."},
+		{"alive copies at 0 bytes still run", &api.MachineMemory{Low: true, TotalBytes: gb(32), Pressure: "warning"}, []api.AppStatus{atZero},
+			"This machine is low on memory (memory pressure: warning). Stop an app."},
+		{"no alive copy", linuxSwap, []api.AppStatus{stopped},
+			"This machine is low on memory: 312M of 3.9G available, swap 1.8G of 2.0G used. None of shinyctl's apps is running; other programs hold the memory."},
+		{"no app at all", linuxSwap, nil,
+			"This machine is low on memory: 312M of 3.9G available, swap 1.8G of 2.0G used. None of shinyctl's apps is running; other programs hold the memory."},
+		{"healthy", &api.MachineMemory{TotalBytes: gb(4), AvailableBytes: gb(3)}, []api.AppStatus{unlimited}, ""},
+		{"no reading", nil, []api.AppStatus{unlimited}, ""},
+	} {
+		got := machineLine(api.StatusResponse{Apps: tc.apps, MachineMemory: tc.mem})
+		if got != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The line sits right under Memory:, as its own paragraph.
+func TestWriteStatus_MachineLow(t *testing.T) {
+	now := time.Date(2026, 10, 11, 19, 0, 0, 0, time.UTC)
+	t.Cleanup(func() { statusNow = time.Now })
+	statusNow = func() time.Time { return now }
+	resp := api.StatusResponse{
+		BalancerMemory: 41 << 20,
+		MachineMemory:  &api.MachineMemory{Low: true, TotalBytes: 2000 << 20, AvailableBytes: 120 << 20},
+		Apps: []api.AppStatus{
+			{Name: "my-app", Port: 8080, Replicas: 1, Copies: []api.CopyStatus{
+				{Copy: 1, Role: "active", PID: 61429, Alive: true, Ready: true, MemoryBytes: 142 << 20},
+			}},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := writeStatus(&out, resp); err != nil {
+		t.Fatal(err)
+	}
+	want := `NAME    COPY  ROLE    PORT  PID    STATUS  READY  MEM   SESSIONS  CRASHES  STARTED
+my-app  1     active  8080  61429  alive   ready  142M  -         -        -
+
+Memory: 142M in 1 R process, plus 41M for the load balancer.
+
+This machine is low on memory: 120M of 2.0G available and no swap. Stop an app, or set max-memory so a copy that grows is killed before the machine is out of memory.
+`
+	if out.String() != want {
+		t.Errorf("table =\n%s\nwant\n%s", out.String(), want)
+	}
+}
