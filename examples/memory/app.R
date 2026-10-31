@@ -6,7 +6,9 @@
 # until MAX_MB (set in the manifest's env), free it all, or crash the
 # process. Nothing grows on start. The memory belongs to the R process, not to
 # the browser tab: closing the tab stops the growth but keeps what is held,
-# until "Free it" or a restart.
+# until "Free it" or a restart. The manifest's max-memory kills the process
+# once it holds more than that, which is what "Grow until stopped" is for: the
+# page drops, reloads on the warm copy, and starts again from 0 MB.
 #
 # "Compressible" is repeated values, which the macOS compressor packs well.
 # "Incompressible" is random numbers, which is what forces real swap.
