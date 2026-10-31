@@ -316,8 +316,13 @@ The columns:
     crash, and the next check tries again.
 - `READY` turns from `starting` to `ready` once the copy's R process accepts
   connections and the load balancer lists it.
-- `MEM` is the resident memory of the copy's main R process; worker
-  processes it started aren't counted.
+- `MEM` is the memory the copy's main R process takes, counting what the
+  system has compressed or swapped out: on macOS the number Activity Monitor
+  shows, on Linux resident plus swapped memory (`VmRSS` + `VmSwap`). On an
+  idle Mac it can be lower than `ps` shows, and under memory pressure much
+  higher. Worker processes the copy started aren't counted. When the number
+  can't be read, `MEM` falls back to resident memory from `ps`, or shows `-`,
+  and `api.log` says why.
 - `SESSIONS` is the number of requests open to the copy, a Shiny session
   being one open WebSocket.
 - `CRASHES` counts crashes in a row: it goes back to `-` once the copy has
@@ -325,8 +330,9 @@ The columns:
 
 Under the table, `status` says what the table can't:
 
-- a `Memory:` line with the total of the running copies, plus about 40 MB for
-  the load balancer, which isn't counted in any copy;
+- a `Memory:` line with the total of the running copies, plus the load
+  balancer, which isn't counted in any copy (about 40 MB on Linux, 12 MB on a
+  Mac);
 - an app's port that is not served, and why;
 - an app that was not started, and why;
 - a redeploy that has not taken over yet: which copy is starting, and, if the
