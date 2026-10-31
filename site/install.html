@@ -84,7 +84,7 @@ curl -LO https://github.com/spriyansh/shinyctl/releases/download/v0.1.0/checksum
 sha256sum --ignore-missing -c checksums.txt     <span class="c"># macOS: shasum -a 256 --ignore-missing -c checksums.txt</span>
 tar -xzf shinyctl_0.1.0_linux_arm64.tar.gz
 mkdir -p ~/.local/bin &amp;&amp; cp shinyctl_0.1.0_linux_arm64/shinyctl ~/.local/bin/</code></pre>
-<p>The other archives are <code>linux_amd64</code>, <code>darwin_arm64</code> (Apple silicon) and <code>darwin_amd64</code>. Each unpacks into a folder of its own with <code>shinyctl</code>, the README, the licence and notices, and the example app in <code>examples/hello</code>.</p>
+<p>The other archives are <code>linux_amd64</code>, <code>darwin_arm64</code> (Apple silicon) and <code>darwin_amd64</code>. Each unpacks into a folder of its own with <code>shinyctl</code>, the README, the licence and notices, and the example apps in <code>examples/hello</code> and <code>examples/memory</code>.</p>
 <p>A file downloaded with a browser on macOS is quarantined. <code>curl</code> doesn't do that, and <code>xattr -d com.apple.quarantine shinyctl</code> lifts it.</p>
 
 <h2 id="go">With Go</h2>
@@ -109,12 +109,15 @@ hello  2     warm    8765  77714  alive   ready  97M  0         -        2026-10
 Memory: 195M in 2 R processes (1 warm), plus 37M for the load balancer.</code></pre>
 <p>Open the port from your manifest, for example <code>http://127.0.0.1:8080</code>. Every field of the manifest is in the <a href="https://github.com/spriyansh/shinyctl#manifest">reference</a>.</p>
 
-<h2 id="example">Try the example</h2>
-<p>The example app is in the archive and in the repository, in <code>examples/hello</code>. From the unpacked archive folder:</p>
+<h2 id="example">Try the examples</h2>
+<p>The example apps are in the archive and in the repository, in <code>examples/</code>. From the unpacked archive folder:</p>
 <pre><code>shinyctl apply -f examples/hello/shinyctl.yaml</code></pre>
 <p>Open <code>http://127.0.0.1:8765</code> and click <b>Crash this app</b>. The page moves to the other copy within about a second: it reloads by itself and shows that copy's process ID. The crashed copy restarts a few seconds later and becomes the spare, so the roles in <code>status</code> have swapped. To see what both copies printed, including the crash:</p>
 <pre><code>shinyctl logs -f examples/hello/shinyctl.yaml</code></pre>
 <p>Remove the app with <code>shinyctl delete -f examples/hello/shinyctl.yaml</code>. If something else already uses port 8765, <code>apply</code> says so and <code>status</code> shows <code>port-in-use</code>: change <code>port</code> in the example's manifest and apply again.</p>
+<p><code>examples/memory</code> is an app whose memory grows when you ask it to, for watching the <code>MEM</code> column of <code>status</code>:</p>
+<pre><code>shinyctl apply -f examples/memory/shinyctl.yaml</code></pre>
+<p>Open <code>http://127.0.0.1:8766</code> and click <b>Add 1 GB</b>: the copy serving the page grows by about 1 GB, while the other copy stays as it was. <b>Grow until stopped</b> adds 100 MB a second, up to <code>MAX_MB</code> in the example's manifest (1024 MB), and <b>Free it</b> gives the memory back. Keep <code>MAX_MB</code> below the machine's free memory.</p>
 
 <nav class="pager" aria-label="Next page">
   <a class="next" href="how-it-works.html"><span>Next</span><b>How it works</b></a>
