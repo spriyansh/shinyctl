@@ -398,13 +398,14 @@ func TestMemory_AnAdoptedCopyIsCountedAsOOM(t *testing.T) {
 			}
 
 			// Without a watcher the run hands the kill back, for the loop to
-			// reconcile. With one it need not: the watcher may already have
-			// seen the exit and dropped itself by the time the run looks, and
-			// then a second reconcile is harmless.
+			// reconcile; with one registered before the run it does not.
 			_, watching := adoptedWatched.Load(a.PID)
 			stub := &memoryStub{sizes: map[int]int64{a.PID: 200 * mib}}
 			pending := runOnce(t, stub)
-			if !watching && (len(pending) != 1 || pending[0].stateFile != spec.AppStateFile || pending[0].app.PID != a.PID) {
+			switch {
+			case watching && len(pending) != 0:
+				t.Errorf("the run handed back %+v, but a watcher was on the copy", pending)
+			case !watching && (len(pending) != 1 || pending[0].stateFile != spec.AppStateFile || pending[0].app.PID != a.PID):
 				t.Errorf("the run handed back %+v, want the unwatched copy %d of this app", pending, a.PID)
 			}
 			waitGone(t, a)

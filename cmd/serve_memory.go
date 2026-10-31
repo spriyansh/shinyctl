@@ -255,6 +255,13 @@ func killOverLimit(ctx context.Context, c memoryCopy, size int64) (unwatchedKill
 		return unwatchedKill{}, false
 	}
 
+	// Whether a watcher is on the process is read before the signal. A watcher
+	// that exists now is sure to see the exit, but it removes itself once it
+	// has, which can be before this function looks again; asked after the kill,
+	// the answer would depend on that race.
+	_, adopted := adoptedWatched.Load(c.rec.PID)
+	watching := isWatched(c.rec.PID) || adopted
+
 	key := killKeyOf(c.rec)
 	killed.Store(key, time.Now())
 	signaled, err := process.Kill(c.rec, func() {
@@ -292,8 +299,7 @@ func killOverLimit(ctx context.Context, c memoryCopy, size int64) (unwatchedKill
 
 	markKilled(c, size)
 
-	_, adopted := adoptedWatched.Load(c.rec.PID)
-	if isWatched(c.rec.PID) || adopted {
+	if watching {
 		return unwatchedKill{}, false
 	}
 	return unwatchedKill{stateFile, c.rec}, true
