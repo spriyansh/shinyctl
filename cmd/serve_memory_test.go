@@ -564,3 +564,125 @@ func TestMemory_ReplyCarriesTheLimitInBytes(t *testing.T) {
 		t.Errorf("apply without a limit: max-memory-bytes = %d, want 0", got)
 	}
 }
+
+// holding is a Measure hook that says the given copies hold size each.
+func holding(size int64, recs ...state.AppState) measureFunc {
+	return func(pids []int) (map[int]int64, error) {
+		out := map[int]int64{}
+		for _, rec := range recs {
+			if slices.Contains(pids, rec.PID) {
+				out[rec.PID] = size
+			}
+		}
+		return out, nil
+	}
+}
+
+func TestMemory_ApplyNamesTheCopiesANewLimitWillKill(t *testing.T) {
+	useFakeRscript(t)
+	resetMemoryState(t)
+	spec := copiesSpec(t, "app", 2, 0)
+	cleanupApp(t, spec)
+	applyOK(t, spec)
+	recs := waitCopies(t, spec, 2)
+	useHooks(t, hooks{Measure: holding(100*mib, recs...)})
+
+	// A limit the copies are under names nothing.
+	spec.MaxMemory = "128M"
+	if got := applyResponse(t, spec).Message; strings.Contains(got, "will be killed") {
+		t.Errorf("an apply with a limit the copies are under said %q", got)
+	}
+
+	// New, and lower: each names both copies.
+	spec.MaxMemory = "64M"
+	want := `Updated "app" without a restart (manifest changed: max-memory); copies 1 and 2 already hold more than 64M and will be killed`
+	if got := applyResponse(t, spec).Message; got != want {
+		t.Errorf("a lower limit: %q, want %q", got, want)
+	}
+
+	// The same, and higher: nothing new to say.
+	if got := applyResponse(t, spec).Message; strings.Contains(got, "will be killed") {
+		t.Errorf("an apply that changed nothing said %q", got)
+	}
+	spec.MaxMemory = "96M"
+	if got := applyResponse(t, spec).Message; strings.Contains(got, "will be killed") {
+		t.Errorf("a higher limit said %q", got)
+	}
+
+	// Restart tells nothing of the kind.
+	spec.MaxMemory = "64M"
+	if got := restartResponse(t, spec).Message; strings.Contains(got, "will be killed") {
+		t.Errorf("restart said %q", got)
+	}
+}
+
+func TestMemory_ApplyNamesOnlyTheCopiesThatAreOver(t *testing.T) {
+	useFakeRscript(t)
+	resetMemoryState(t)
+	spec := copiesSpec(t, "app", 2, 0)
+	cleanupApp(t, spec)
+	applyOK(t, spec)
+	recs := waitCopies(t, spec, 2)
+	useHooks(t, hooks{Measure: holding(100*mib, recs[1])})
+
+	spec.MaxMemory = "64M"
+	want := `Updated "app" without a restart (manifest changed: max-memory); copy 2 already holds more than 64M and will be killed`
+	if got := applyResponse(t, spec).Message; got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+}
+
+func TestMemory_ApplyOmitsACopyTheCycleReplaced(t *testing.T) {
+	useFakeRscript(t)
+	resetMemoryState(t)
+	spec := copiesSpec(t, "app", 1, 0)
+	cleanupApp(t, spec)
+	a := applyOK(t, spec)
+	waitServed(t, spec, a.PID)
+
+	// The record the measure saw is not the one that is there when the reply
+	// is made: a copy under a record of another start time.
+	heavy := []heavyCopy{{copy: 1, key: killKey{pid: a.PID, startedNs: a.StartedAt.UnixNano() + 1}}}
+	spec.MaxMemory = "64M"
+	if got := killClause(spec, heavy); got != "" {
+		t.Errorf("killClause = %q for a copy that was replaced, want none", got)
+	}
+	heavy[0].key = killKeyOf(a)
+	if got := killClause(spec, heavy); got != "; copy 1 already holds more than 64M and will be killed" {
+		t.Errorf("killClause = %q", got)
+	}
+}
+
+// waitCopies waits until the app has n copies recorded and alive, and returns
+// them.
+func waitCopies(t *testing.T, spec manifest.AppSpec, n int) []state.AppState {
+	t.Helper()
+	var recs []state.AppState
+	waitUntil(t, fmt.Sprintf("%d copies to run", n), 10*time.Second, func() bool {
+		recs = loadCopiesNow(spec)
+		return len(recs) == n && !slices.ContainsFunc(recs, func(r state.AppState) bool { return !process.IsAlive(spec, r) })
+	})
+	return recs
+}
+
+func loadCopiesNow(spec manifest.AppSpec) []state.AppState {
+	st, err := state.Load(spec.AppStateFile)
+	if err != nil {
+		return nil
+	}
+	return st.Copies()
+}
+
+func TestMemory_AFirstApplyMeasuresNothing(t *testing.T) {
+	useFakeRscript(t)
+	resetMemoryState(t)
+	useHooks(t, hooks{Measure: func([]int) (map[int]int64, error) {
+		t.Error("an apply of an app nobody knew measured its copies")
+		return nil, nil
+	}})
+	spec := limitedSpec(t, "app", 1, 0)
+	cleanupApp(t, spec)
+	if got := applyResponse(t, spec).Message; strings.Contains(got, "will be killed") {
+		t.Errorf("a first apply said %q", got)
+	}
+}

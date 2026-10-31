@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -156,6 +157,11 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
 		}
 	}
+	for _, app := range resp.Apps {
+		if note := memoryNote(app); note != "" {
+			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
+		}
+	}
 	now := statusNow()
 	for _, app := range resp.Apps {
 		for _, note := range []string{spareNote(app), drainNote(app, now)} {
@@ -269,6 +275,51 @@ func exitedNote(app api.AppStatus) string {
 		note += " Its port is closed."
 	}
 	return note
+}
+
+// memoryNote says that copies were killed for going over max-memory, while
+// the kill is what their crash count shows: that they start again after their
+// backoff, or are back, or (when the restart policy ends their story, which
+// exitedNote explains) that they stay down. It is not hidden by a rollout, as
+// exitedNote is: a redeploy does not say why a copy died. The size named is the
+// app's limit now. It is the one the copy was killed over, because an apply or
+// restart clears the exit history, and a live change of the limit does not.
+// It is empty when there is nothing of the kind.
+func memoryNote(app api.AppStatus) string {
+	var waiting, back, gaveUp []int
+	for _, c := range app.Copies {
+		if c.LastExitReason != string(process.ExitOOM) || (c.CrashCount == 0 && !c.GaveUp) {
+			continue
+		}
+		switch {
+		case c.Alive:
+			back = append(back, c.Copy)
+		case c.GaveUp:
+			gaveUp = append(gaveUp, c.Copy)
+		default:
+			waiting = append(waiting, c.Copy)
+		}
+	}
+
+	over := "going over max-memory"
+	if app.MaxMemoryBytes > 0 {
+		over += fmt.Sprintf(" (%s)", formatMem(app.MaxMemoryBytes))
+	}
+	was := func(list []int) string {
+		return fmt.Sprintf("%s %s killed for %s", reconcile.ListCopies(list), plural(list, "was", "were"), over)
+	}
+
+	var sentences []string
+	if len(waiting) > 0 {
+		sentences = append(sentences, fmt.Sprintf("%s; %s again after %s backoff.", was(waiting), plural(waiting, "it starts", "they start"), plural(waiting, "its", "their")))
+	}
+	if len(back) > 0 {
+		sentences = append(sentences, fmt.Sprintf("%s and %s back.", was(back), plural(back, "is", "are")))
+	}
+	if len(gaveUp) > 0 {
+		sentences = append(sentences, was(gaveUp)+".")
+	}
+	return strings.Join(sentences, " ")
 }
 
 // spareNote says that the app has no spare for the seconds between the new

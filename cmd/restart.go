@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spriyansh/shinyctl/internal/api"
@@ -49,6 +50,7 @@ var restartCmd = &cobra.Command{
 		}
 
 		fmt.Println(resp.Message)
+		warnIfLimitIgnored(os.Stderr, spec, resp)
 		return nil
 	},
 }

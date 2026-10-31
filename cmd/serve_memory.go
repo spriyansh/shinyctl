@@ -154,16 +154,7 @@ func enforceMemoryOnce(ctx context.Context, measure measureFunc) []unwatchedKill
 			continue
 		}
 		recs := st.Copies()
-		for _, rec := range recs {
-			// A record whose exit is recorded is not running, whatever is at
-			// its PID now. This takes the clock not to have stepped back, as
-			// observe does.
-			if rec.Copy < 1 || !rec.LastExitAt.Before(rec.StartedAt) || !process.PIDRunning(rec) {
-				continue
-			}
-			if _, dying := killed.Load(killKeyOf(rec)); dying {
-				continue
-			}
+		for _, rec := range runningCopies(recs) {
 			copies = append(copies, memoryCopy{spec, limit, rec, recs})
 			pids = append(pids, rec.PID)
 		}
@@ -207,6 +198,25 @@ func enforceMemoryOnce(ctx context.Context, measure measureFunc) []unwatchedKill
 		}
 	}
 	return pending
+}
+
+// runningCopies picks from recs the copies whose memory is worth measuring:
+// those that are running and that nobody has killed yet.
+func runningCopies(recs []state.AppState) []state.AppState {
+	var running []state.AppState
+	for _, rec := range recs {
+		// A record whose exit is recorded is not running, whatever is at its
+		// PID now. This takes the clock not to have stepped back, as observe
+		// does.
+		if rec.Copy < 1 || !rec.LastExitAt.Before(rec.StartedAt) || !process.PIDRunning(rec) {
+			continue
+		}
+		if _, dying := killed.Load(killKeyOf(rec)); dying {
+			continue
+		}
+		running = append(running, rec)
+	}
+	return running
 }
 
 // noteUnparsable says, once per app and value, that a limit in the registry is

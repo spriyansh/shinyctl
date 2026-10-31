@@ -5,6 +5,8 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spriyansh/shinyctl/internal/api"
@@ -53,8 +55,18 @@ var applyCmd = &cobra.Command{
 		}
 
 		fmt.Println(resp.Message)
+		warnIfLimitIgnored(os.Stderr, spec, resp)
 		return nil
 	},
+}
+
+// warnIfLimitIgnored says so when the manifest has a max-memory and the reply
+// does not carry it: a shinyctl-api of an older build drops the field and
+// enforces nothing, until it is restarted.
+func warnIfLimitIgnored(w io.Writer, spec manifest.AppSpec, resp api.ApplyResponse) {
+	if spec.EffectiveMaxMemory() > 0 && resp.MaxMemoryBytes == 0 {
+		fmt.Fprintln(w, "warning: shinyctl-api is an older build and ignores max-memory; restart it and apply again")
+	}
 }
 
 func init() {

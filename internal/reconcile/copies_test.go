@@ -63,6 +63,14 @@ func exited(at time.Time, crashes int) func(*state.AppState) {
 	}
 }
 
+// exitedFor is exit with a reason.
+func exitedFor(reason string, exit func(*state.AppState)) func(*state.AppState) {
+	return func(a *state.AppState) {
+		exit(a)
+		a.LastExitReason = reason
+	}
+}
+
 func withRevision(v CopyView, rev int) CopyView { v.App.Revision = rev; return v }
 func withSessions(v CopyView, n int) CopyView   { v.Sessions = n; return v }
 func unknownSessions(v CopyView) CopyView       { v.Sessions, v.SessionsKnown = 0, false; return v }
@@ -424,6 +432,10 @@ func TestDescribe(t *testing.T) {
 			`Updated "app" (starting copy 2 again)`},
 		{"backoff, a copy", s11, []CopyView{ready(s11, 1, 0), dead(s11, 2, exited(base, 3))}, Plan{Steps: []Step{step(ActionBackoff, 2)}}, nil,
 			`Backing off restart of "app" copy 2 after 3 crash(es)`},
+		{"backoff after a kill for memory, a copy", s11, []CopyView{ready(s11, 1, 0), dead(s11, 2, exitedFor("oom", exited(base, 1)))}, Plan{Steps: []Step{step(ActionBackoff, 2)}}, nil,
+			`Backing off restart of "app" copy 2 after 1 crash(es), the last for going over max-memory`},
+		{"backoff after a kill for memory, the only copy", s10, []CopyView{dead(s10, 1, exitedFor("oom", exited(base, 2)))}, Plan{Steps: []Step{step(ActionBackoff, 1)}}, nil,
+			`Backing off restart of "app" after 2 crash(es), the last for going over max-memory`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
