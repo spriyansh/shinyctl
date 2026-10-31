@@ -118,19 +118,22 @@ If something else on the machine already uses port 8765, `apply` says so and
 `status` shows `port-in-use`. Change `port` in `examples/hello/shinyctl.yaml`
 and apply again.
 
-`examples/memory` is an app whose memory grows when you ask it to, for
-watching the `MEM` column:
+`examples/memory` is an app whose memory grows when you ask it to, with
+`max-memory: 512M`, for watching a copy go over its limit:
 
 ```sh
 shinyctl apply -f examples/memory/shinyctl.yaml
 ```
 
-Open http://127.0.0.1:8766 and click **Add 1 GB**: `shinyctl status` shows
-the copy serving the page about 1 GB bigger, while the other copy stays as it
-was. **Grow until stopped** adds 100 MB a second, up to `MAX_MB` in the
-example's manifest (1024 MB), and **Free it** gives the memory back. The
-memory belongs to the R process, so closing the page keeps it. Keep `MAX_MB`
-below the machine's free memory.
+Open http://127.0.0.1:8766 and click **Grow until stopped**: the copy
+serving the page grows by 100 MB a second, and `shinyctl status` shows its
+`MEM` go up while the other copy stays as it was. Once it holds more than
+512M, shinyctl kills it. The page reloads on the warm copy, holding 0 MB;
+`status` says the copy was killed for going over `max-memory`, and it comes
+back as the new spare after its backoff. **Add 1 GB** goes over in one step.
+`MAX_MB` in the example's manifest (1024 MB) is where the app stops growing
+by itself if you raise or remove `max-memory`; keep it below the machine's
+free memory.
 
 ## How it works
 
