@@ -27,6 +27,15 @@ func macMachine(pressure string) process.MachineMemory {
 	return process.MachineMemory{TotalBytes: 32 << 30, AvailableBytes: 3 << 30, Pressure: pressure}
 }
 
+// resetMachine empties the global watch for a handler test and again when the
+// test ends. The test then sets a reading with machine.set, in the test's own
+// goroutine; see the note in main_test.go.
+func resetMachine(t *testing.T) {
+	t.Helper()
+	machine.clear()
+	t.Cleanup(machine.clear)
+}
+
 func machineLow(w *machineWatch) bool {
 	got, ok := w.current()
 	return ok && got.Low

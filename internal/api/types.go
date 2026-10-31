@@ -127,4 +127,8 @@ type StatusResponse struct {
 	// BalancerStarting says the load balancer is being started or replaced by
 	// one of another build, and does not answer for the moment.
 	BalancerStarting bool `json:"balancer-starting,omitempty"`
+
+	// MachineMemory is the memory of the whole machine, healthy or low; nil
+	// when shinyctl-api has no reading, or is an older build.
+	MachineMemory *MachineMemory `json:"machine-memory,omitempty"`
 }

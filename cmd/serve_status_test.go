@@ -282,3 +282,49 @@ func TestHandleStatus_ReportsTheLimitAndWhyACopyExited(t *testing.T) {
 		t.Errorf("max-memory-bytes = %d after the limit was removed, want 0", got.MaxMemoryBytes)
 	}
 }
+
+// TestHandleStatus_CarriesTheMachinesMemory: a healthy reading is carried
+// too, a low one with the verdict and the numbers, and with no reading the
+// body has no such key.
+func TestHandleStatus_CarriesTheMachinesMemory(t *testing.T) {
+	resetMachine(t)
+
+	body := func() string {
+		rec := newStatusRecorder()
+		handleStatus(rec, newStatusRequest())
+		return rec.Body.String()
+	}
+
+	if got := body(); strings.Contains(got, "machine-memory") {
+		t.Errorf("no reading, but the body has the key: %s", got)
+	}
+
+	healthy := process.MachineMemory{TotalBytes: 4 << 30, AvailableBytes: 3 << 30, SwapTotalBytes: 2 << 30}
+	machine.set(healthy, false)
+	rec := newStatusRecorder()
+	handleStatus(rec, newStatusRequest())
+	got := decodeStatus(t, rec).MachineMemory
+	if got == nil || got.Low || got.TotalBytes != 4<<30 || got.AvailableBytes != 3<<30 || got.SwapTotalBytes != 2<<30 {
+		t.Errorf("healthy: machine-memory = %+v", got)
+	}
+
+	low := process.MachineMemory{TotalBytes: 4 << 30, AvailableBytes: 300 << 20, SwapTotalBytes: 2 << 30,
+		SwapUsedBytes: 1 << 30, StallPercent: 23.9, StallKnown: true}
+	machine.set(low, true)
+	rec = newStatusRecorder()
+	handleStatus(rec, newStatusRequest())
+	got = decodeStatus(t, rec).MachineMemory
+	if got == nil || !got.Low || got.AvailableBytes != 300<<20 || got.SwapUsedBytes != 1<<30 || got.StallPercent != 23 {
+		t.Errorf("low: machine-memory = %+v", got)
+	}
+
+	machine.set(process.MachineMemory{TotalBytes: 4 << 30, AvailableBytes: 3 << 30, StallPercent: 0.9, StallKnown: true}, false)
+	if got := body(); strings.Contains(got, "stall-percent") {
+		t.Errorf("a stall under one percent is in the body: %s", got)
+	}
+
+	machine.clear()
+	if got := body(); strings.Contains(got, "machine-memory") {
+		t.Errorf("cleared, but the body has the key: %s", got)
+	}
+}
