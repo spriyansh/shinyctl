@@ -24,12 +24,5 @@ env:
   # The most one copy will hold, in MB, before the app stops growing by
   # itself. It is above max-memory on purpose: the app never stops first, so
   # shinyctl is what ends it. Keep it below the machine's free memory: 1024 is
-  # safe on a 4 GB Raspberry Pi and on a small VPS. Raise it to watch
-  # compression (macOS) or swap, and raise max-memory with it.
+  # safe on a 4 GB Raspberry Pi and on a small VPS.
   MAX_MB: "1024"
-  # macOS keeps freed large blocks inside the process, so MEM would not go
-  # down after "Free it". This undocumented libmalloc setting makes it give
-  # them back; measured on macOS 26, a future allocator may ignore it, and
-  # real apps should not set it (every new large vector then maps fresh
-  # pages). Linux ignores it.
-  MallocLargeCache: "0"

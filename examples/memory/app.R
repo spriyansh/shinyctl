@@ -1,17 +1,14 @@
-# A Shiny app whose memory grows when you ask it to, for watching the MEM
-# column of `shinyctl status`.
+# A Shiny app whose memory grows when you ask it to, for watching a copy go
+# over the manifest's max-memory.
 #
-# The page shows which R process is serving it and how much it holds. The
-# buttons add 100 MB or 1 GB, grow by 100 MB per second until stopped or
-# until MAX_MB (set in the manifest's env), free it all, or crash the
-# process. Nothing grows on start. The memory belongs to the R process, not to
-# the browser tab: closing the tab stops the growth but keeps what is held,
-# until "Free it" or a restart. The manifest's max-memory kills the process
-# once it holds more than that, which is what "Grow until stopped" is for: the
-# page drops, reloads on the warm copy, and starts again from 0 MB.
-#
-# "Compressible" is repeated values, which the macOS compressor packs well.
-# "Incompressible" is random numbers, which is what forces real swap.
+# The page shows which R process is serving it and how much it holds. "Add
+# 1 GB" adds 1 GB at once; "Grow until stopped" adds 100 MB per second.
+# Nothing grows on start. Once the copy holds more than the manifest's
+# max-memory, shinyctl kills it: the page drops, reloads on the warm copy,
+# and starts again from 0 MB. MAX_MB (set in the manifest's env) is a safety
+# stop, so the app never takes the whole machine if max-memory is raised or
+# removed. The memory belongs to the R process, not to the browser tab:
+# closing the tab stops the growth but keeps what is held, until a restart.
 
 library(shiny)
 
@@ -26,13 +23,13 @@ heap <- new.env()
 heap$chunks <- list()
 heap$mb <- 0
 
-# allocate adds mb MB of touched memory: rep() writes every element and
-# runif() every random draw, so the pages are really dirtied; neither is a
-# compact ALTREP sequence like 1:n, which takes no memory at all.
-allocate <- function(mb, kind) {
+# allocate adds mb MB of touched memory: runif() writes every element, so
+# the memory is really used, unlike a compact ALTREP sequence like 1:n,
+# which takes no memory at all.
+allocate <- function(mb) {
   if (heap$mb + mb > max_mb) return(FALSE)
   n <- mb * 1024^2 / 8
-  x <- if (kind == "rand") runif(n) else rep(c(1, 2), length.out = n)
+  x <- runif(n)
   heap$chunks[[length(heap$chunks) + 1]] <- x
   heap$mb <- heap$mb + mb
   message(sprintf("holding %d MB", heap$mb))
@@ -57,19 +54,13 @@ ui <- fluidPage(
   titlePanel("shinyctl memory example"),
   p(textOutput("process")),
   h4(textOutput("held")),
-  radioButtons(
-    "kind", NULL,
-    c("Compressible (repeated values)" = "comp",
-      "Incompressible (random numbers)" = "rand"),
-    inline = TRUE
-  ),
-  actionButton("add100", "Add 100 MB"),
   actionButton("add1g", "Add 1 GB"),
   actionButton("grow", "Grow until stopped"),
-  actionButton("free", "Free it"),
-  actionButton("crash", "Crash this app", class = "btn-danger"),
-  p("Growth stops at MAX_MB, set in the manifest's env. What is held belongs",
-    "to this R process: closing the tab stops the growth but frees nothing.")
+  p("The memory grows until this copy holds more than the manifest's",
+    "max-memory. Then shinyctl kills it and the page reloads on the warm",
+    "copy, holding 0 MB. MAX_MB, set in the manifest's env, is a safety stop.",
+    "What is held belongs to this R process: closing the tab stops the",
+    "growth but keeps what is held.")
 )
 
 server <- function(input, output, session) {
@@ -81,14 +72,13 @@ server <- function(input, output, session) {
   # Every tab shows the copy's real total, so it refreshes on its own.
   output$held <- renderText({
     invalidateLater(1000)
-    sprintf("Holding %d MB of %d MB (R reports %.0f MB in use).",
-            heap$mb, max_mb, gc()[2, 2])
+    sprintf("Holding %d MB.", heap$mb)
   })
 
   # An allocation that fails ("cannot allocate vector") must not end the
   # session, and must not also report the ceiling.
-  add <- function(mb, kind) {
-    ok <- tryCatch(allocate(mb, kind), error = function(e) {
+  add <- function(mb) {
+    ok <- tryCatch(allocate(mb), error = function(e) {
       showNotification(conditionMessage(e), type = "error")
       NA
     })
@@ -97,9 +87,8 @@ server <- function(input, output, session) {
     ok
   }
 
-  observeEvent(input$add100, add(step_mb, input$kind))
   observeEvent(input$add1g, {
-    for (i in 1:10) if (!add(step_mb, input$kind)) break
+    for (i in 1:10) if (!add(step_mb)) break
   })
 
   # Owned by the session, so closing the tab stops it.
@@ -111,25 +100,12 @@ server <- function(input, output, session) {
   })
   observe({
     if (!growing()) return()
-    # isolate: picking another kind must not run an extra step.
-    if (add(step_mb, isolate(input$kind))) {
+    if (add(step_mb)) {
       invalidateLater(1000)
     } else {
       growing(FALSE)
       updateActionButton(session, "grow", label = "Grow until stopped")
     }
-  })
-
-  observeEvent(input$free, {
-    heap$chunks <- list()
-    heap$mb <- 0
-    invisible(gc(full = TRUE))
-    message("freed")
-  })
-
-  observeEvent(input$crash, {
-    message("Crash button clicked, exiting with status 1")
-    quit(save = "no", status = 1)
   })
 }
 
