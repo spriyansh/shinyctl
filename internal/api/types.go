@@ -12,6 +12,11 @@ import (
 type ApplyResponse struct {
 	Action  reconcile.ActionType `json:"action"`
 	Message string               `json:"message"`
+
+	// MaxMemoryBytes is the max-memory limit the daemon applied, 0 for none.
+	// A daemon from before the limit leaves it out, which is how the CLI tells
+	// that it ignores a limit it was asked to apply.
+	MaxMemoryBytes int64 `json:"max-memory-bytes,omitempty"`
 }
 
 // CopyStatus is one copy of an app: what state.json recorded about its

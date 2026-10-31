@@ -89,6 +89,8 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp.MaxMemoryBytes = spec.EffectiveMaxMemory()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }

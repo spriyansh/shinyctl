@@ -70,6 +70,11 @@ const (
 	MaxDrainTimeout     = 24 * time.Hour
 )
 
+// MinMaxMemory is the smallest max-memory Validate accepts. An R process needs
+// more than this to start, so a smaller limit, most likely a typo, would kill
+// every copy as soon as it was running.
+const MinMaxMemory = 64 << 20
+
 type AppSpec struct {
 	AppGroup       string            `yaml:"app-group" json:"app-group"`
 	AppName        string            `yaml:"app-name" json:"app-name"`
@@ -80,6 +85,7 @@ type AppSpec struct {
 	WarmReplicas   *int              `yaml:"warm-replicas" json:"warm-replicas,omitempty"`
 	LBPolicy       string            `yaml:"lb-policy" json:"lb-policy,omitempty"`
 	DrainTimeout   string            `yaml:"drain-timeout" json:"drain-timeout,omitempty"`
+	MaxMemory      string            `yaml:"max-memory" json:"max-memory,omitempty"`
 	AppStateFile   string            `yaml:"app-state-file" json:"app-state-file"`
 	RestartPolicy  RestartPolicy     `yaml:"restart-policy" json:"restart-policy"`
 	WorkingDir     string            `yaml:"working-dir" json:"working-dir"`
@@ -139,6 +145,22 @@ func (s AppSpec) EffectiveDrainTimeout() time.Duration {
 		return DefaultDrainTimeout
 	}
 	return min(d, MaxDrainTimeout)
+}
+
+// EffectiveMaxMemory is the most memory, in bytes, a copy may hold before it
+// is killed: max-memory as a size ("512M", "2G"), 0 when unset, which means no
+// limit. Validate refuses a value that doesn't parse; one that slipped past it
+// (a registry written by hand) reads as no limit, and the loop that enforces
+// the limit says so in the log.
+func (s AppSpec) EffectiveMaxMemory() int64 {
+	if s.MaxMemory == "" {
+		return 0
+	}
+	n, err := ParseSize(s.MaxMemory)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // CopyCount is how many processes the app runs: the copies that serve

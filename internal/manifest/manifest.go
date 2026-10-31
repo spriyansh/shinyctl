@@ -175,6 +175,18 @@ func Validate(spec AppSpec) error {
 		}
 	}
 
+	if spec.MaxMemory != "" {
+		n, err := ParseSize(spec.MaxMemory)
+		switch {
+		case err != nil:
+			return fmt.Errorf("max-memory must be a size with a unit, such as 512M or 2G (got %q)", spec.MaxMemory)
+		case n == 0:
+			return fmt.Errorf("max-memory must be more than 0 (got %q); remove max-memory for no limit", spec.MaxMemory)
+		case n < MinMaxMemory:
+			return fmt.Errorf("max-memory must be at least 64M: an R process needs more than that to start (got %q)", spec.MaxMemory)
+		}
+	}
+
 	switch spec.RestartPolicy {
 	case "", RestartAlways, RestartOnFailure, RestartNever:
 	default:
