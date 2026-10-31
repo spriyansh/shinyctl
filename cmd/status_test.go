@@ -464,6 +464,7 @@ func TestWarnIfMachineLow(t *testing.T) {
 		{"backoff", api.ApplyResponse{Action: reconcile.ActionBackoff, MachineMemory: low}, said + "\n"},
 		{"with the stall", api.ApplyResponse{Action: reconcile.ActionStart, MachineMemory: stall},
 			"warning: this machine is low on memory: 780M of 3.8G available, swap 1.9G of 2.0G used, a process was waiting for memory 23% of the last minute" + clause},
+		{"not low", api.ApplyResponse{Action: reconcile.ActionStart, MachineMemory: &api.MachineMemory{TotalBytes: 3900 << 20, AvailableBytes: 3000 << 20}}, ""},
 		{"no reading", api.ApplyResponse{Action: reconcile.ActionStart}, ""},
 	} {
 		var out bytes.Buffer

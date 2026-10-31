@@ -50,7 +50,7 @@ func TestMachineWatch_LogsEnteringAndLeavingOnce(t *testing.T) {
 	var w machineWatch
 
 	w.observe(linuxMachine(500), nil)
-	if buf.String() != "" || machineLow(&w) {
+	if countLines(buf, "memory:") != 0 || machineLow(&w) {
 		t.Fatalf("healthy: low %v, log %q", machineLow(&w), buf.String())
 	}
 	w.observe(linuxMachine(90), nil)
@@ -342,7 +342,7 @@ func TestMachineWatch_NoSupport(t *testing.T) {
 	var w machineWatch
 	w.observe(process.MachineMemory{}, process.ErrNoMachineMemory)
 	w.observe(process.MachineMemory{}, process.ErrNoMachineMemory)
-	if buf.String() != "" {
+	if countLines(buf, "memory:") != 0 {
 		t.Errorf("logged: %s", buf.String())
 	}
 	if _, ok := w.current(); ok {

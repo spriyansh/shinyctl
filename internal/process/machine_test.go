@@ -8,18 +8,49 @@ import (
 	"testing"
 )
 
-// A Raspberry Pi 5 with 4 GB and zram swap.
-const piMeminfo = `MemTotal:        4141808 kB
-MemFree:          516544 kB
-MemAvailable:    3358832 kB
-Buffers:          207104 kB
-Cached:          2805024 kB
-SwapCached:        11216 kB
-Active:           946096 kB
-Inactive:        2243632 kB
+// The /proc/meminfo of a Raspberry Pi 5 with 4 GB and zram swap.
+const piMeminfo = `MemTotal:        4146240 kB
+MemFree:         1475008 kB
+MemAvailable:    3239984 kB
+Buffers:           93888 kB
+Cached:          1598768 kB
+SwapCached:            0 kB
+Active:           383168 kB
+Inactive:        1952496 kB
+Active(anon):     158864 kB
+Inactive(anon):   496624 kB
+Active(file):     224304 kB
+Inactive(file):  1455872 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
 SwapTotal:       2097136 kB
-SwapFree:        1844464 kB
-Dirty:               304 kB
+SwapFree:        2097088 kB
+Zswap:                 0 kB
+Zswapped:              0 kB
+Dirty:               112 kB
+Writeback:             0 kB
+AnonPages:        644096 kB
+Mapped:            91440 kB
+Shmem:             12768 kB
+KReclaimable:     158128 kB
+Slab:             228736 kB
+SReclaimable:     158128 kB
+SUnreclaim:        70608 kB
+KernelStack:        3440 kB
+PageTables:         4768 kB
+SecPageTables:       112 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:     4170256 kB
+Committed_AS:    2090080 kB
+VmallocTotal:   68447887360 kB
+VmallocUsed:       44944 kB
+VmallocChunk:          0 kB
+Percpu:             3840 kB
+CmaTotal:          65536 kB
+CmaFree:            6464 kB
+Balloon:               0 kB
 `
 
 func TestParseMeminfo(t *testing.T) {
@@ -28,10 +59,10 @@ func TestParseMeminfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := MachineMemory{
-		TotalBytes:     4141808 * 1024,
-		AvailableBytes: 3358832 * 1024,
+		TotalBytes:     4146240 * 1024,
+		AvailableBytes: 3239984 * 1024,
 		SwapTotalBytes: 2097136 * 1024,
-		SwapUsedBytes:  (2097136 - 1844464) * 1024,
+		SwapUsedBytes:  (2097136 - 2097088) * 1024,
 	}
 	if m != want {
 		t.Errorf("got %+v, want %+v", m, want)
@@ -94,7 +125,7 @@ func TestReadMachineFromProc(t *testing.T) {
 		dir := t.TempDir()
 		write(t, dir, "meminfo", piMeminfo)
 		m, err := readMachineFromProc(dir)
-		if err != nil || m.StallKnown || m.TotalBytes != 4141808*1024 {
+		if err != nil || m.StallKnown || m.TotalBytes != 4146240*1024 {
 			t.Errorf("got %+v, %v", m, err)
 		}
 	})
@@ -114,7 +145,7 @@ func TestReadMachineFromProc(t *testing.T) {
 			t.Fatal(err)
 		}
 		m, err := readMachineFromProc(dir)
-		if err != nil || m.StallKnown || m.AvailableBytes != 3358832*1024 {
+		if err != nil || m.StallKnown || m.AvailableBytes != 3239984*1024 {
 			t.Errorf("got %+v, %v", m, err)
 		}
 	})
