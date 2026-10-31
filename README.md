@@ -231,6 +231,22 @@ below the machine's free memory.
   if a second restart comes within about 15 seconds of the previous one's
   switch. On a small machine, set `warm-replicas: 0`, a shorter
   `drain-timeout`, or use `--now`. `status` shows the total.
+- **Memory limit.** With `max-memory` set, `shinyctl-api` measures each of
+  the app's copies about once a second, the same number `MEM` shows, and
+  kills a copy that holds more at once, with SIGKILL and no drain: a process
+  that keeps growing could take the machine down before a drain ended.
+  - The kill counts as a crash. The load balancer sends the copy's visitors
+    to a warm copy at once, and `restart-policy` and the backoff decide when
+    the copy comes back. A draining copy is not restarted.
+  - The visitors on the killed copy lose their session; a page with the
+    example's script reloads by itself onto the warm copy. If every copy
+    goes over, visitors get the restarting page until one is back.
+  - `status`, `api.log` and the copy's log say the copy was killed for going
+    over `max-memory`.
+  - Apps without a limit are not measured. On Linux measuring costs next to
+    nothing; on macOS it takes a few percent of a core for an app with one
+    copy and a spare, and about a third of a core with 16 copies and a
+    spare.
 
 ## Manifest
 
@@ -249,6 +265,7 @@ replicas: 2                     # copies that serve visitors; default 1; 1-16
 warm-replicas: 1                # ready spares that take over at once; default 1; 0-16; 0 turns them off
 lb-policy: least-conn           # how a new visitor picks a copy: least-conn (default), round-robin, random, first
 drain-timeout: 15m              # how long replaced copies keep their visitors; default 15m; 0 to 24h; 0 stops them at once
+max-memory: 2G                  # a copy that holds more is killed and restarted; default no limit; at least 128M
 ```
 
 | Field | Required / default | Meaning and limits |
@@ -266,6 +283,7 @@ drain-timeout: 15m              # how long replaced copies keep their visitors; 
 | `warm-replicas` | 1 | Ready spares, 0 to 16. Each is an R process. |
 | `lb-policy` | `least-conn` | `least-conn`, `round-robin`, `random` or `first`. |
 | `drain-timeout` | `15m` | A duration such as `90s`, `15m` or `1h`, from `0` to `24h`; a number alone is refused. `0` stops replaced copies at once. |
+| `max-memory` | no limit | The most memory one copy may hold, such as `512M`, `1.5G` or `2Gi`: K, M, G or T, in powers of 1024 as `MEM` shows them. At least `128M`; a number alone is refused. A copy that holds more is killed at once (see Memory limit). |
 
 - **Relative paths resolve from the manifest's folder**, so commands work
   from any directory. `~` is not expanded.
@@ -301,10 +319,11 @@ drain-timeout: 15m              # how long replaced copies keep their visitors; 
 `apply` replaces the copies of a running app, as `restart` does, when a
 manifest field that shapes its process changed: `app-group`, `app-name`,
 `entrypoint-file`, `working-dir` or `env`. A changed `port`, `host`,
-`replicas`, `warm-replicas`, `lb-policy`, `drain-timeout` or
-`restart-policy` takes effect without restarting the app's processes
-(copies are started, or drained, as needed). `apply` never looks at `app.R`
-or other app files: run `restart` for code changes.
+`replicas`, `warm-replicas`, `lb-policy`, `drain-timeout`,
+`restart-policy` or `max-memory` takes effect without restarting the app's
+processes (copies are started, or drained, as needed). A `max-memory` below
+what a copy already holds kills that copy, and `apply` says which. `apply`
+never looks at `app.R` or other app files: run `restart` for code changes.
 
 `stop`, `restart`, `delete` and a re-apply signal a process only if its
 command line contains the app's `entrypoint-file`. If the recorded process
@@ -355,6 +374,7 @@ Under the table, `status` says what the table can't:
 - draining copies: how many sessions are left and when `drain-timeout` ends
   them at the latest;
 - copies that `exited`, and why;
+- copies killed for going over `max-memory`, and whether they are back;
 - an app without a spare for the seconds between a switch and its new spare
   being ready.
 
@@ -522,6 +542,21 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
   `shinyctl-api` writes a warning to `api.log` when lingering is off.
 - **`stop` signals only the main R process.** Worker processes the app
   started, for example through callr or future, can outlive it.
+- **`max-memory` measures and kills only the main R process.** Workers it
+  started aren't counted, and they outlive the kill.
+- **`max-memory` is checked about once a second, not enforced by the
+  system.** A copy can hold more for a second or so before it is killed,
+  and a spike faster than that can use up the machine's memory first. When
+  measuring is slow, the gap between checks grows to four times what it
+  took. While memory can't be measured, nothing is killed, and `api.log`
+  says why.
+- **A copy killed for going over `max-memory` leaves its R temporary folder
+  behind**, uploads included: SIGKILL gives R no chance to clean up.
+- **On Linux, `MEM` counts the files and libraries a copy has mapped too**,
+  which the system can reclaim, so leave `max-memory` some room above what
+  the app needs.
+- **A copy the Linux kernel kills for lack of memory** is a crash like any
+  other: `status` doesn't say it was memory.
 - **A drain ends at `drain-timeout`.** Sessions still open then are cut;
   pages with the example's script reload onto the new version.
 - **A tab left open is a session**, and so is a visitor whose connection
