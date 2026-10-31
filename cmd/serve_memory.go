@@ -223,8 +223,8 @@ func runningCopies(recs []state.AppState) []state.AppState {
 // not a size and so is not enforced. Validate refuses one, so this is a
 // registry written by hand.
 func noteUnparsable(spec manifest.AppSpec) {
-	if spec.MaxMemory == "" {
-		return
+	if _, err := manifest.ParseSize(spec.MaxMemory); spec.MaxMemory == "" || err == nil {
+		return // unset or 0 is no limit, and says so by itself
 	}
 	id := spec.AppStateFile + "\x00" + spec.MaxMemory
 	memorySpells.Lock()

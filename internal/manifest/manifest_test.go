@@ -259,9 +259,9 @@ func TestValidate(t *testing.T) {
 		{"the engine's spelling least_conn rejected", func(s AppSpec) AppSpec { s.LBPolicy = "least_conn"; return s }, true},
 		{"unknown lb-policy rejected", func(s AppSpec) AppSpec { s.LBPolicy = "ip-hash"; return s }, true},
 		{"max-memory of 512M accepted", func(s AppSpec) AppSpec { s.MaxMemory = "512M"; return s }, false},
-		{"max-memory of 64M accepted", func(s AppSpec) AppSpec { s.MaxMemory = "64M"; return s }, false},
+		{"max-memory of 128M accepted", func(s AppSpec) AppSpec { s.MaxMemory = "128M"; return s }, false},
 		{"max-memory of 1.5Gi accepted", func(s AppSpec) AppSpec { s.MaxMemory = "1.5Gi"; return s }, false},
-		{"max-memory of 63M rejected", func(s AppSpec) AppSpec { s.MaxMemory = "63M"; return s }, true},
+		{"max-memory of 127M rejected", func(s AppSpec) AppSpec { s.MaxMemory = "127M"; return s }, true},
 		{"max-memory without a unit rejected", func(s AppSpec) AppSpec { s.MaxMemory = "512"; return s }, true},
 		{"max-memory of 0 rejected", func(s AppSpec) AppSpec { s.MaxMemory = "0"; return s }, true},
 		{"max-memory of 0M rejected", func(s AppSpec) AppSpec { s.MaxMemory = "0M"; return s }, true},
@@ -481,8 +481,9 @@ func TestValidate_MaxMemory(t *testing.T) {
 		{"lots", `max-memory must be a size with a unit, such as 512M or 2G (got "lots")`},
 		{"0", "remove max-memory for no limit"},
 		{"0.0000000001M", "remove max-memory for no limit"},
-		{"63M", "max-memory must be at least 64M: an R process needs more than that to start"},
-		{"0.0001M", "max-memory must be at least 64M"},
+		{"127M", "max-memory must be at least 128M: an idle Shiny copy already holds about 70-100M"},
+		{"99999999999T", `max-memory is too large (got "99999999999T")`},
+		{"0.0001M", "max-memory must be at least 128M"},
 	} {
 		spec := AppSpec{AppGroup: "g", AppName: "n", EntrypointFile: entrypoint, Port: 8881, Replicas: 1, MaxMemory: c.in}
 		err := Validate(spec)

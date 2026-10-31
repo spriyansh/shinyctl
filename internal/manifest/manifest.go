@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -178,12 +179,14 @@ func Validate(spec AppSpec) error {
 	if spec.MaxMemory != "" {
 		n, err := ParseSize(spec.MaxMemory)
 		switch {
+		case errors.Is(err, ErrSizeTooLarge):
+			return fmt.Errorf("max-memory is too large (got %q)", spec.MaxMemory)
 		case err != nil:
 			return fmt.Errorf("max-memory must be a size with a unit, such as 512M or 2G (got %q)", spec.MaxMemory)
 		case n == 0:
 			return fmt.Errorf("max-memory must be more than 0 (got %q); remove max-memory for no limit", spec.MaxMemory)
 		case n < MinMaxMemory:
-			return fmt.Errorf("max-memory must be at least 64M: an R process needs more than that to start (got %q)", spec.MaxMemory)
+			return fmt.Errorf("max-memory must be at least 128M: an idle Shiny copy already holds about 70-100M (got %q)", spec.MaxMemory)
 		}
 	}
 

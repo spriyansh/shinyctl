@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -12,6 +13,10 @@ import (
 // "512M", "512MB", "512Mi", "512MiB", "1.5g". A number without a unit is not a
 // size, because it does not say whether it is bytes or megabytes.
 var sizePattern = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)([kmgt])(i?b?)$`)
+
+// ErrSizeTooLarge is what ParseSize wraps for a size that does not fit in an
+// int64 number of bytes.
+var ErrSizeTooLarge = errors.New("too large a size")
 
 // ParseSize reads a size such as "512M" or "1.5Gi" as a number of bytes. The
 // unit is K, M, G or T in either case, optionally followed by B, i or iB, and
@@ -36,7 +41,7 @@ func ParseSize(s string) (int64, error) {
 	unit := int64(1) << (10 * (1 + strings.Index("kmgt", m[2])))
 	bytes := math.Round(n * float64(unit))
 	if bytes >= math.MaxInt64 { // as a float, MaxInt64 is 2^63, which is already too big
-		return 0, fmt.Errorf("%q is too large a size", s)
+		return 0, fmt.Errorf("%q: %w", s, ErrSizeTooLarge)
 	}
 	return int64(bytes), nil
 }

@@ -70,10 +70,10 @@ const (
 	MaxDrainTimeout     = 24 * time.Hour
 )
 
-// MinMaxMemory is the smallest max-memory Validate accepts. An R process needs
-// more than this to start, so a smaller limit, most likely a typo, would kill
-// every copy as soon as it was running.
-const MinMaxMemory = 64 << 20
+// MinMaxMemory is the smallest max-memory Validate accepts. An idle Shiny copy
+// holds about 70M on macOS and 95M on Linux, so a smaller limit, most likely a
+// typo, would kill every copy as soon as it was running.
+const MinMaxMemory = 128 << 20
 
 type AppSpec struct {
 	AppGroup       string            `yaml:"app-group" json:"app-group"`

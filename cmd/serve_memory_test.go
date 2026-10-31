@@ -23,7 +23,7 @@ import (
 
 const (
 	mib     = 1 << 20
-	limitMB = 64 // the limit of limitedSpec, the least Validate accepts
+	limitMB = 128 // the limit of limitedSpec, the least Validate accepts
 )
 
 // limitedSpec is copiesSpec with a max-memory of limitMB.
@@ -112,7 +112,7 @@ func TestMemory_OverTheLimitIsKilledAndTheWarmCopyTakesOver(t *testing.T) {
 	active, warm := copyByDial(t, spec, pool.Active[0]), copyByDial(t, spec, pool.Warm[0])
 	_, cookie := visit(t, spec, nil)
 
-	stub := &memoryStub{sizes: map[int]int64{active.PID: 100 * mib, warm.PID: 10 * mib}}
+	stub := &memoryStub{sizes: map[int]int64{active.PID: 200 * mib, warm.PID: 10 * mib}}
 	if pending := runOnce(t, stub); len(pending) != 0 {
 		t.Errorf("the run asks for a reconcile of %+v, but the copy is watched", pending)
 	}
@@ -142,7 +142,7 @@ func TestMemory_OverTheLimitIsKilledAndTheWarmCopyTakesOver(t *testing.T) {
 	if marker := fmt.Sprintf("--- shinyctl: killed copy %d at ", active.Copy); !strings.Contains(readCopyLog(t, spec, active.Copy), marker) {
 		t.Errorf("the copy's log has no %q line:\n%s", marker, readCopyLog(t, spec, active.Copy))
 	}
-	want := fmt.Sprintf(`memory: "app": copy %d (pid %d) holds 100M, over max-memory 64M; killed it; copy %d serves visitors`, active.Copy, active.PID, warm.Copy)
+	want := fmt.Sprintf(`memory: "app": copy %d (pid %d) holds 200M, over max-memory 128M; killed it; copy %d serves visitors`, active.Copy, active.PID, warm.Copy)
 	if !strings.Contains(logs.String(), want) {
 		t.Errorf("log = %q, want it to contain %q", logs.String(), want)
 	}
@@ -258,7 +258,7 @@ func TestMemory_AProcessStillDyingIsNotKilledAgain(t *testing.T) {
 	// The entry a kill leaves, with the process still there: what the next run
 	// finds of a process that takes a moment to go.
 	killed.Store(killKeyOf(a), time.Now())
-	stub := &memoryStub{sizes: map[int]int64{a.PID: 100 * mib}}
+	stub := &memoryStub{sizes: map[int]int64{a.PID: 200 * mib}}
 	runOnce(t, stub)
 
 	if stub.calls() != 0 || !process.IsAlive(spec, a) || strings.Contains(logs.String(), "killed it") {
@@ -323,7 +323,7 @@ func TestMemory_ARecordWhoseExitIsRecordedIsNotMeasured(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stub := &memoryStub{sizes: map[int]int64{a.PID: 100 * mib}}
+	stub := &memoryStub{sizes: map[int]int64{a.PID: 200 * mib}}
 	runOnce(t, stub)
 	if stub.calls() != 0 || !process.IsAlive(spec, a) {
 		t.Errorf("a record with its exit recorded was measured (%d calls) or its PID killed", stub.calls())
@@ -340,7 +340,7 @@ func TestMemory_AStoppedAppIsNotMeasured(t *testing.T) {
 	if err := appRegistry.Stop(spec.AppStateFile); err != nil {
 		t.Fatal(err)
 	}
-	stub := &memoryStub{sizes: map[int]int64{a.PID: 100 * mib}}
+	stub := &memoryStub{sizes: map[int]int64{a.PID: 200 * mib}}
 	runOnce(t, stub)
 	if stub.calls() != 0 || !process.IsAlive(spec, a) {
 		t.Errorf("a stopped app was measured (%d calls) or killed", stub.calls())
@@ -361,6 +361,18 @@ func TestMemory_ALimitThatIsNotASizeIsLoggedOnce(t *testing.T) {
 	stub := &memoryStub{}
 	runOnce(t, stub)
 	runOnce(t, stub)
+
+	// A 0 is no limit and says so by itself: nothing to log.
+	zero := copiesSpec(t, "zero", 1, 0)
+	zero.MaxMemory = "0"
+	cleanupApp(t, zero)
+	if err := appRegistry.Remember(zero); err != nil {
+		t.Fatal(err)
+	}
+	runOnce(t, stub)
+	if strings.Contains(logs.String(), `"zero"`) {
+		t.Errorf("a max-memory of 0 was logged:\n%s", logs.String())
+	}
 	if got := strings.Count(logs.String(), `memory: "app": max-memory "plenty" is not a size; no limit is enforced`); got != 1 {
 		t.Errorf("the log has the line %d times, want 1:\n%s", got, logs.String())
 	}
@@ -384,7 +396,7 @@ func TestMemory_AnAdoptedCopyIsCountedAsOOM(t *testing.T) {
 				reconcileApp(spec.AppStateFile)
 			}
 
-			stub := &memoryStub{sizes: map[int]int64{a.PID: 100 * mib}}
+			stub := &memoryStub{sizes: map[int]int64{a.PID: 200 * mib}}
 			runOnce(t, stub)
 			waitGone(t, a)
 
@@ -418,7 +430,7 @@ func TestMemory_AStrangersPIDIsNeverSignalledOrMarkedSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stub := &memoryStub{sizes: map[int]int64{rec.PID: 100 * mib}}
+	stub := &memoryStub{sizes: map[int]int64{rec.PID: 200 * mib}}
 	if pending := runOnce(t, stub); len(pending) != 0 {
 		t.Errorf("the run asks for a reconcile of %+v", pending)
 	}
@@ -453,7 +465,7 @@ func TestMemory_ADrainingCopyIsKilledAndNothingRestartsIt(t *testing.T) {
 	waitReady(t, process.InternalHost, two.Port)
 	reconcileApp(spec.AppStateFile)
 
-	stub := &memoryStub{sizes: map[int]int64{one.PID: 10 * mib, two.PID: 100 * mib}}
+	stub := &memoryStub{sizes: map[int]int64{one.PID: 10 * mib, two.PID: 200 * mib}}
 	runOnce(t, stub)
 	waitGone(t, two)
 	reconcileApp(spec.AppStateFile)
@@ -489,7 +501,7 @@ func TestMemory_AKillDuringAPlannedStopIsNoCrash(t *testing.T) {
 		unlock()
 		t.Fatal(err)
 	}
-	killOverLimit(context.Background(), memoryCopy{spec: spec, limit: limitMB * mib, rec: victim, recs: recs}, 100*mib)
+	killOverLimit(context.Background(), memoryCopy{spec: spec, limit: limitMB * mib, rec: victim, recs: recs}, 200*mib)
 	waitGone(t, victim)
 	unlock()
 
@@ -596,17 +608,17 @@ func TestMemory_ApplyNamesTheCopiesANewLimitWillKill(t *testing.T) {
 	cleanupApp(t, spec)
 	applyOK(t, spec)
 	recs := waitCopies(t, spec, 2)
-	useHooks(t, hooks{Measure: holding(100*mib, recs...)})
+	useHooks(t, hooks{Measure: holding(200*mib, recs...)})
 
 	// A limit the copies are under names nothing.
-	spec.MaxMemory = "128M"
+	spec.MaxMemory = "256M"
 	if got := applyResponse(t, spec).Message; strings.Contains(got, "will be killed") {
 		t.Errorf("an apply with a limit the copies are under said %q", got)
 	}
 
 	// New, and lower: each names both copies.
-	spec.MaxMemory = "64M"
-	want := `Updated "app" without a restart (manifest changed: max-memory); copies 1 and 2 already hold more than 64M and will be killed`
+	spec.MaxMemory = "128M"
+	want := `Updated "app" without a restart (manifest changed: max-memory); copies 1 and 2 already hold more than 128M and will be killed`
 	if got := applyResponse(t, spec).Message; got != want {
 		t.Errorf("a lower limit: %q, want %q", got, want)
 	}
@@ -615,13 +627,13 @@ func TestMemory_ApplyNamesTheCopiesANewLimitWillKill(t *testing.T) {
 	if got := applyResponse(t, spec).Message; strings.Contains(got, "will be killed") {
 		t.Errorf("an apply that changed nothing said %q", got)
 	}
-	spec.MaxMemory = "96M"
+	spec.MaxMemory = "192M"
 	if got := applyResponse(t, spec).Message; strings.Contains(got, "will be killed") {
 		t.Errorf("a higher limit said %q", got)
 	}
 
 	// Restart tells nothing of the kind.
-	spec.MaxMemory = "64M"
+	spec.MaxMemory = "128M"
 	if got := restartResponse(t, spec).Message; strings.Contains(got, "will be killed") {
 		t.Errorf("restart said %q", got)
 	}
@@ -634,10 +646,10 @@ func TestMemory_ApplyNamesOnlyTheCopiesThatAreOver(t *testing.T) {
 	cleanupApp(t, spec)
 	applyOK(t, spec)
 	recs := waitCopies(t, spec, 2)
-	useHooks(t, hooks{Measure: holding(100*mib, recs[1])})
+	useHooks(t, hooks{Measure: holding(300*mib, recs[1])})
 
-	spec.MaxMemory = "64M"
-	want := `Updated "app" without a restart (manifest changed: max-memory); copy 2 already holds more than 64M and will be killed`
+	spec.MaxMemory = "128M"
+	want := `Updated "app" without a restart (manifest changed: max-memory); copy 2 already holds more than 128M and will be killed`
 	if got := applyResponse(t, spec).Message; got != want {
 		t.Errorf("message = %q, want %q", got, want)
 	}
@@ -654,12 +666,12 @@ func TestMemory_ApplyOmitsACopyTheCycleReplaced(t *testing.T) {
 	// The record the measure saw is not the one that is there when the reply
 	// is made: a copy under a record of another start time.
 	heavy := []heavyCopy{{copy: 1, key: killKey{pid: a.PID, startedNs: a.StartedAt.UnixNano() + 1}}}
-	spec.MaxMemory = "64M"
+	spec.MaxMemory = "128M"
 	if got := killClause(spec, heavy); got != "" {
 		t.Errorf("killClause = %q for a copy that was replaced, want none", got)
 	}
 	heavy[0].key = killKeyOf(a)
-	if got := killClause(spec, heavy); got != "; copy 1 already holds more than 64M and will be killed" {
+	if got := killClause(spec, heavy); got != "; copy 1 already holds more than 128M and will be killed" {
 		t.Errorf("killClause = %q", got)
 	}
 }
