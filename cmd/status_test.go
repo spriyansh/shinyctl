@@ -10,6 +10,7 @@ import (
 
 	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/manifest"
+	"github.com/spriyansh/shinyctl/internal/reconcile"
 )
 
 func TestFormatMem(t *testing.T) {
@@ -443,5 +444,32 @@ This machine is low on memory: 120M of 2.0G available and no swap. Stop an app, 
 `
 	if out.String() != want {
 		t.Errorf("table =\n%s\nwant\n%s", out.String(), want)
+	}
+}
+
+func TestWarnIfMachineLow(t *testing.T) {
+	const clause = "; the copies just started need memory too\n"
+	low := &api.MachineMemory{Low: true, TotalBytes: 3900 << 20, AvailableBytes: 312 << 20, SwapTotalBytes: 2000 << 20, SwapUsedBytes: 1800 << 20}
+	const said = "warning: this machine is low on memory: 312M of 3.8G available, swap 1.8G of 2.0G used"
+	stall := &api.MachineMemory{Low: true, TotalBytes: 3900 << 20, AvailableBytes: 780 << 20, SwapTotalBytes: 2000 << 20, SwapUsedBytes: 1900 << 20, StallPercent: 23}
+
+	for _, tc := range []struct {
+		name string
+		resp api.ApplyResponse
+		want string
+	}{
+		{"start", api.ApplyResponse{Action: reconcile.ActionStart, MachineMemory: low}, said + clause},
+		{"restart", api.ApplyResponse{Action: reconcile.ActionRestart, MachineMemory: low}, said + clause},
+		{"none", api.ApplyResponse{Action: reconcile.ActionNone, MachineMemory: low}, said + "\n"},
+		{"backoff", api.ApplyResponse{Action: reconcile.ActionBackoff, MachineMemory: low}, said + "\n"},
+		{"with the stall", api.ApplyResponse{Action: reconcile.ActionStart, MachineMemory: stall},
+			"warning: this machine is low on memory: 780M of 3.8G available, swap 1.9G of 2.0G used, a process was waiting for memory 23% of the last minute" + clause},
+		{"no reading", api.ApplyResponse{Action: reconcile.ActionStart}, ""},
+	} {
+		var out bytes.Buffer
+		warnIfMachineLow(&out, tc.resp)
+		if out.String() != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", tc.name, out.String(), tc.want)
+		}
 	}
 }

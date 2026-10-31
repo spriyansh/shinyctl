@@ -17,6 +17,10 @@ type ApplyResponse struct {
 	// A daemon from before the limit leaves it out, which is how the CLI tells
 	// that it ignores a limit it was asked to apply.
 	MaxMemoryBytes int64 `json:"max-memory-bytes,omitempty"`
+
+	// MachineMemory is the machine's memory when it is low, for a warning
+	// that the copies just started need memory too; nil otherwise.
+	MachineMemory *MachineMemory `json:"machine-memory,omitempty"`
 }
 
 // CopyStatus is one copy of an app: what state.json recorded about its

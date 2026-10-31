@@ -159,6 +159,15 @@ func (w *machineWatch) current() (api.MachineMemory, bool) {
 	return w.apiLocked(), true
 }
 
+// currentIfLow is the reading when the machine is low, for the replies of
+// apply and restart; nil when it is healthy or there is no reading.
+func (w *machineWatch) currentIfLow() *api.MachineMemory {
+	if m, ok := w.current(); ok && m.Low {
+		return &m
+	}
+	return nil
+}
+
 // set is for tests: a reading, and the verdict on it, without going through
 // observe, which logs.
 func (w *machineWatch) set(reading process.MachineMemory, low bool) {

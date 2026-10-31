@@ -106,6 +106,7 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 
 	resp.MaxMemoryBytes = spec.EffectiveMaxMemory()
 	resp.Message += killClause(spec, heavy)
+	resp.MachineMemory = machine.currentIfLow()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

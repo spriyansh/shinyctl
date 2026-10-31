@@ -51,6 +51,7 @@ var restartCmd = &cobra.Command{
 
 		fmt.Println(resp.Message)
 		warnIfLimitIgnored(os.Stderr, spec, resp)
+		warnIfMachineLow(os.Stderr, resp)
 		return nil
 	},
 }
