@@ -27,9 +27,15 @@ import (
 // ticker read it from their own goroutines.
 var gateway *proxy.Gateway
 
-// handoverWaitFor is how long a check of ports waits for a load balancer that
-// is being started or replaced; a variable for the tests.
-var handoverWaitFor = proxy.HandoverWait
+// waitForBalancer waits, up to wait, while g's load balancer is being
+// started or replaced, and returns at once otherwise. It is the real Ready
+// hook; it takes g so that the tests can try it on a gateway of their own
+// without swapping gateway, which other goroutines read.
+func waitForBalancer(g *proxy.Gateway, wait time.Duration) {
+	if g != nil && g.Starting() {
+		g.WaitWhileStarting(wait)
+	}
+}
 
 // hooks are the few things the tests substitute (they exist for the tests,
 // nothing else sets them): what the load balancer is
@@ -79,12 +85,8 @@ var activeHooks atomic.Pointer[hooks]
 
 func currentHooks() hooks {
 	h := hooks{
-		Served: func() []proxy.App { return gateway.Served() },
-		Ready: func() {
-			if gateway != nil && gateway.Starting() {
-				gateway.WaitWhileStarting(handoverWaitFor())
-			}
-		},
+		Served:         func() []proxy.App { return gateway.Served() },
+		Ready:          func() { waitForBalancer(gateway, proxy.HandoverWait()) },
 		Probe:          process.PortAvailable,
 		ProbeAlongside: process.PortAvailableAlongside,
 		PortWait:       time.Second,

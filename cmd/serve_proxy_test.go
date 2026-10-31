@@ -446,13 +446,11 @@ func TestDefaultReady_WaitsOnlyWhileTheLoadBalancerIsStarting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	orig, origWait := gateway, handoverWaitFor
-	gateway, handoverWaitFor = g, func() time.Duration { return 300 * time.Millisecond }
-	t.Cleanup(func() { gateway, handoverWaitFor = orig, origWait })
-
+	// On a gateway of the test's own: gateway itself is read by the load
+	// balancer TestMain runs, and by exit-watchers that earlier tests left.
 	took := func() time.Duration {
 		start := time.Now()
-		currentHooks().Ready()
+		waitForBalancer(g, 300*time.Millisecond)
 		return time.Since(start)
 	}
 	if d := took(); d > 100*time.Millisecond {
