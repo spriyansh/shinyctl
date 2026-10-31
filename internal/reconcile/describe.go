@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
+	"github.com/spriyansh/shinyctl/internal/process"
 )
 
 // NothingToChange is Describe's answer when a plan does nothing.
@@ -163,10 +164,14 @@ func Describe(spec manifest.AppSpec, before []CopyView, p Plan, settings []strin
 		var lines []string
 		for _, n := range backoffs {
 			crashes := known[n].App.CrashCount
+			last := ""
+			if known[n].App.LastExitReason == string(process.ExitOOM) {
+				last = ", the last for going over max-memory"
+			}
 			if multi {
-				lines = append(lines, fmt.Sprintf("Backing off restart of %q copy %d after %d crash(es)", name, n, crashes))
+				lines = append(lines, fmt.Sprintf("Backing off restart of %q copy %d after %d crash(es)%s", name, n, crashes, last))
 			} else {
-				lines = append(lines, fmt.Sprintf("Backing off restart of %q after %d crash(es)", name, crashes))
+				lines = append(lines, fmt.Sprintf("Backing off restart of %q after %d crash(es)%s", name, crashes, last))
 			}
 		}
 		return strings.Join(lines, "; ")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
@@ -15,10 +16,41 @@ import (
 // else on the network can reach the process directly.
 const InternalHost = "127.0.0.1"
 
+// ExitReason says why shinyctl ended a process, when it did. Most exits have
+// no reason: the process stopped or crashed on its own.
+type ExitReason string
+
+// ExitOOM is the reason for a copy that shinyctl killed for going over its
+// max-memory.
+const ExitOOM ExitReason = "oom"
+
 // Exit reports how and when a started process ended.
 type Exit struct {
 	At     time.Time
 	Failed bool // true unless the process exited cleanly (status 0)
+
+	// Reason is empty here: Start knows only how the process ended. The caller
+	// that killed it sets it, because only that caller knows why.
+	Reason ExitReason
+
+	// Signal is the signal that ended the process, or 0 when it exited by
+	// itself. A kill is told from a crash by it.
+	Signal syscall.Signal
+}
+
+// exitOf builds the Exit of a process that ended at the moment it is called,
+// from the status Wait collected.
+func exitOf(ps *os.ProcessState) Exit {
+	// Wait can fail before it collects a status; all that is known is that
+	// the process is not known to have exited cleanly.
+	if ps == nil {
+		return Exit{At: time.Now(), Failed: true}
+	}
+	exit := Exit{At: time.Now(), Failed: !ps.Success()}
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		exit.Signal = ws.Signal()
+	}
+	return exit
 }
 
 // Start launches copy number copy of spec's app, an R process on
@@ -83,8 +115,8 @@ func Start(spec manifest.AppSpec, copy, port, revision int) (state.AppState, <-c
 	// IsAlive would report it as alive indefinitely.
 	done := make(chan Exit, 1)
 	go func() {
-		err := proc.Wait()
-		done <- Exit{At: time.Now(), Failed: err != nil}
+		proc.Wait()
+		done <- exitOf(proc.ProcessState)
 	}()
 
 	return state.AppState{

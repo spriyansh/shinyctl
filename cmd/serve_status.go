@@ -76,6 +76,8 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			RestartPolicy: string(spec.RestartPolicy.Effective()),
 			NotServed:     gateway.NotServed(spec.AppStateFile),
 			NotStarted:    notStartedReason(spec.AppStateFile),
+
+			MaxMemoryBytes: spec.EffectiveMaxMemory(),
 		}
 
 		for i, rec := range recs {
@@ -86,6 +88,8 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 				StartedAt:  rec.StartedAt,
 				Alive:      alive[i],
 				CrashCount: reconcile.CrashesNow(rec, alive[i], time.Now()),
+
+				LastExitReason: rec.LastExitReason,
 			}
 
 			switch {

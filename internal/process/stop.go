@@ -39,6 +39,34 @@ func Stop(app state.AppState, fallbacks ...string) (signaled bool, err error) {
 	return stop(app.PID, func() bool { return isOurs(app, fallbacks...) }, stopGrace)
 }
 
+// Kill ends app's recorded process at once with SIGKILL, with no grace period
+// and without waiting for it to be gone: the caller wants the process dead
+// now and watches for its exit itself. It signals under Stop's rule, only
+// while the process is identifiably the app's own, so a PID that was handed to
+// a stranger is left alone.
+//
+// beforeSignal, when it is not nil, is called once the process has been
+// recognised and just before the signal, so that a caller can note something
+// about a process that is certainly the app's. It is not called when nothing
+// of ours is there. signaled=false means there was nothing to kill (no PID,
+// already gone, or someone else's), which is not an error.
+func Kill(app state.AppState, beforeSignal func(), fallbacks ...string) (signaled bool, err error) {
+	if app.PID <= 0 || !isOurs(app, fallbacks...) {
+		return false, nil
+	}
+	if beforeSignal != nil {
+		beforeSignal()
+	}
+
+	if err := syscall.Kill(app.PID, syscall.SIGKILL); err != nil {
+		if err == syscall.ESRCH {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // StopIf is Stop for a process that isn't an app's, such as the load
 // balancer: SIGTERM, SIGKILL after the same grace period, each signal only
 // while ours reports that pid is still the process the caller means.

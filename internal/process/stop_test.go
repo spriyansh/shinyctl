@@ -179,3 +179,71 @@ func TestProxyDir(t *testing.T) {
 		t.Errorf("proxy dir = %v, %v, want a 0700 directory", fi, err)
 	}
 }
+
+func TestKill(t *testing.T) {
+	t.Run("SIGKILL at once, with the hook called once before it", func(t *testing.T) {
+		pid := startSleeper(t, true) // SIGTERM would not do
+
+		calls := 0
+		hook := func() {
+			calls++
+			if err := syscall.Kill(pid, 0); err != nil {
+				t.Errorf("the hook ran after the signal: %v", err)
+			}
+		}
+		if signaled, err := Kill(sleeperApp(pid, "sleep"), hook); err != nil || !signaled {
+			t.Fatalf("Kill = (%v, %v), want (true, nil)", signaled, err)
+		}
+		if calls != 1 {
+			t.Errorf("the hook was called %d times, want 1", calls)
+		}
+		if !waitGone(pid, 2*time.Second) {
+			t.Errorf("process %d still exists after Kill", pid)
+		}
+	})
+
+	t.Run("a nil hook is allowed", func(t *testing.T) {
+		pid := startSleeper(t, false)
+		if signaled, err := Kill(sleeperApp(pid, "sleep"), nil); err != nil || !signaled {
+			t.Fatalf("Kill = (%v, %v), want (true, nil)", signaled, err)
+		}
+		if !waitGone(pid, 2*time.Second) {
+			t.Errorf("process %d still exists after Kill", pid)
+		}
+	})
+
+	t.Run("a process that ends before the signal is not an error", func(t *testing.T) {
+		pid := startSleeper(t, false)
+
+		// The hook is the last thing before the signal, so ending the process
+		// there is the narrowest window for ESRCH.
+		hook := func() {
+			syscall.Kill(pid, syscall.SIGKILL)
+			waitGone(pid, 2*time.Second)
+		}
+		if signaled, err := Kill(sleeperApp(pid, "sleep"), hook); err != nil || signaled {
+			t.Errorf("Kill = (%v, %v), want (false, nil)", signaled, err)
+		}
+	})
+
+	t.Run("a process running something else is left alone, and the hook is not called", func(t *testing.T) {
+		pid := startSleeper(t, false)
+
+		hook := func() { t.Error("the hook was called for a stranger") }
+		if signaled, err := Kill(sleeperApp(pid, "some-other-app.R"), hook); err != nil || signaled {
+			t.Fatalf("Kill = (%v, %v), want (false, nil)", signaled, err)
+		}
+		if err := syscall.Kill(pid, 0); err != nil {
+			t.Errorf("process %d was signaled: %v", pid, err)
+		}
+	})
+
+	t.Run("no process, no hook", func(t *testing.T) {
+		hook := func() { t.Error("the hook was called with nothing to kill") }
+		for _, app := range []state.AppState{{}, sleeperApp(999999999, "sleep")} {
+			if signaled, err := Kill(app, hook); err != nil || signaled {
+				t.Errorf("Kill(%+v) = (%v, %v), want (false, nil)", app, signaled, err)
+			}
+		}
+	})
+}

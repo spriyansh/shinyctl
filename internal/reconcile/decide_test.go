@@ -355,6 +355,30 @@ func TestRecordExit(t *testing.T) {
 	})
 }
 
+func TestRecordExit_Reason(t *testing.T) {
+	now := time.Now()
+	app := state.AppState{StartedAt: now.Add(-time.Second)}
+
+	app = RecordExit(app, process.Exit{At: now, Failed: true, Reason: process.ExitOOM})
+	if app.LastExitReason != "oom" || app.CrashCount != 1 || !app.LastExitFailed {
+		t.Fatalf("after a kill for memory: %+v", app)
+	}
+
+	t.Run("a later crash clears it", func(t *testing.T) {
+		got := RecordExit(app, process.Exit{At: now, Failed: true})
+		if got.LastExitReason != "" || got.CrashCount != 2 {
+			t.Errorf("after a crash: %+v", got)
+		}
+	})
+
+	t.Run("a later clean exit clears it", func(t *testing.T) {
+		got := RecordExit(app, process.Exit{At: now})
+		if got.LastExitReason != "" || got.CrashCount != 0 {
+			t.Errorf("after a clean exit: %+v", got)
+		}
+	})
+}
+
 func TestChangedFields(t *testing.T) {
 	record := startedFrom(fullSpec, nil)
 
@@ -458,6 +482,9 @@ func TestSettingsChanged(t *testing.T) {
 		{"drain-timeout written another way is no change", manifest.AppSpec{DrainTimeout: "15m"}, manifest.AppSpec{DrainTimeout: "900s"}, nil},
 		{"drain-timeout 15m to 5m", manifest.AppSpec{DrainTimeout: "15m"}, manifest.AppSpec{DrainTimeout: "5m"}, []string{"drain-timeout"}},
 		{"drain-timeout comes after lb-policy", manifest.AppSpec{LBPolicy: "first"}, manifest.AppSpec{LBPolicy: "random", DrainTimeout: "0"}, []string{"lb-policy", "drain-timeout"}},
+		{"max-memory unset to 512M", manifest.AppSpec{}, manifest.AppSpec{MaxMemory: "512M"}, []string{"max-memory"}},
+		{"max-memory written another way is no change", manifest.AppSpec{MaxMemory: "1G"}, manifest.AppSpec{MaxMemory: "1024Mi"}, nil},
+		{"max-memory comes after drain-timeout", manifest.AppSpec{}, manifest.AppSpec{MaxMemory: "1G", DrainTimeout: "0", RestartPolicy: manifest.RestartNever}, []string{"drain-timeout", "max-memory", "restart-policy"}},
 		{"port", manifest.AppSpec{Port: 8080}, manifest.AppSpec{Port: 8081}, []string{"port"}},
 		{"host", manifest.AppSpec{Host: "127.0.0.1"}, manifest.AppSpec{Host: "0.0.0.0"}, []string{"host"}},
 		{"the same address written another way is no change", manifest.AppSpec{Host: "127.0.0.1"}, manifest.AppSpec{Host: "::ffff:127.0.0.1"}, nil},

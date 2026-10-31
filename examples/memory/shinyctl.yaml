@@ -1,12 +1,15 @@
 # An app whose memory grows when you ask it to, for watching the MEM column
-# of `shinyctl status` (and, later, a copy that goes over its max-memory).
+# of `shinyctl status` and a copy that goes over its max-memory.
 # Nothing grows by itself: apply alone changes nothing. Relative paths
 # resolve from this file's directory, so run from anywhere, e.g.:
 #
 #   shinyctl apply -f examples/memory/shinyctl.yaml
 #
 # Then open http://127.0.0.1:8766. A visitor sticks to one copy, so only
-# that copy grows while the other stays flat.
+# that copy grows while the other stays flat. Press "Grow until
+# stopped" and the copy passes 512M after a few seconds (it adds 100 MB a
+# second): shinyctl kills it, the warm copy takes over the page, and the page
+# reloads on the other process holding 0 MB.
 
 app-group: examples
 app-name: memory
@@ -16,14 +19,10 @@ app-state-file: ./state.json
 host: 127.0.0.1          # this machine only; 0.0.0.0 makes it reachable from the network
 replicas: 1
 warm-replicas: 1
+max-memory: 512M         # a copy that holds more is killed and the warm copy serves
 env:
-  # The most one copy will hold, in MB. Keep it below the machine's free
-  # memory: 1024 is safe on a 4 GB Raspberry Pi and on a small VPS. Raise it
-  # to watch compression (macOS) or swap (under a memory limit).
+  # The most one copy will hold, in MB, before the app stops growing by
+  # itself. It is above max-memory on purpose: the app never stops first, so
+  # shinyctl is what ends it. Keep it below the machine's free memory: 1024 is
+  # safe on a 4 GB Raspberry Pi and on a small VPS.
   MAX_MB: "1024"
-  # macOS keeps freed large blocks inside the process, so MEM would not go
-  # down after "Free it". This undocumented libmalloc setting makes it give
-  # them back; measured on macOS 26, a future allocator may ignore it, and
-  # real apps should not set it (every new large vector then maps fresh
-  # pages). Linux ignores it.
-  MallocLargeCache: "0"

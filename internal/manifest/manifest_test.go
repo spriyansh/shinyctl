@@ -258,6 +258,15 @@ func TestValidate(t *testing.T) {
 		{"lb-policy first accepted", func(s AppSpec) AppSpec { s.LBPolicy = "first"; return s }, false},
 		{"the engine's spelling least_conn rejected", func(s AppSpec) AppSpec { s.LBPolicy = "least_conn"; return s }, true},
 		{"unknown lb-policy rejected", func(s AppSpec) AppSpec { s.LBPolicy = "ip-hash"; return s }, true},
+		{"max-memory of 512M accepted", func(s AppSpec) AppSpec { s.MaxMemory = "512M"; return s }, false},
+		{"max-memory of 128M accepted", func(s AppSpec) AppSpec { s.MaxMemory = "128M"; return s }, false},
+		{"max-memory of 1.5Gi accepted", func(s AppSpec) AppSpec { s.MaxMemory = "1.5Gi"; return s }, false},
+		{"max-memory of 127M rejected", func(s AppSpec) AppSpec { s.MaxMemory = "127M"; return s }, true},
+		{"max-memory without a unit rejected", func(s AppSpec) AppSpec { s.MaxMemory = "512"; return s }, true},
+		{"max-memory of 0 rejected", func(s AppSpec) AppSpec { s.MaxMemory = "0"; return s }, true},
+		{"max-memory of 0M rejected", func(s AppSpec) AppSpec { s.MaxMemory = "0M"; return s }, true},
+		{"max-memory that is not a size rejected", func(s AppSpec) AppSpec { s.MaxMemory = "lots"; return s }, true},
+		{"max-memory that overflows rejected", func(s AppSpec) AppSpec { s.MaxMemory = "99999999999T"; return s }, true},
 		{"drain-timeout 0 accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "0"; return s }, false},
 		{"drain-timeout 0s accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "0s"; return s }, false},
 		{"drain-timeout 90s accepted", func(s AppSpec) AppSpec { s.DrainTimeout = "90s"; return s }, false},
@@ -455,5 +464,31 @@ func TestValidate_DrainTimeoutMessage(t *testing.T) {
 	want := `drain-timeout must be a duration from 0 to 24h, such as 15m, 90s or 1h (got "900")`
 	if err == nil || err.Error() != want {
 		t.Errorf("Validate = %v, want %q", err, want)
+	}
+}
+
+// TestValidate_MaxMemory: each refusal says what to do about it.
+func TestValidate_MaxMemory(t *testing.T) {
+	t.Cleanup(func() { lookPath = exec.LookPath })
+	lookPath = func(string) (string, error) { return "/usr/bin/Rscript", nil }
+	entrypoint := filepath.Join(t.TempDir(), "app.R")
+	if err := os.WriteFile(entrypoint, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct{ in, want string }{
+		{"512", `max-memory must be a size with a unit, such as 512M or 2G (got "512")`},
+		{"lots", `max-memory must be a size with a unit, such as 512M or 2G (got "lots")`},
+		{"0", "remove max-memory for no limit"},
+		{"0.0000000001M", "remove max-memory for no limit"},
+		{"127M", "max-memory must be at least 128M: an idle Shiny copy already holds about 70-100M"},
+		{"99999999999T", `max-memory is too large (got "99999999999T")`},
+		{"0.0001M", "max-memory must be at least 128M"},
+	} {
+		spec := AppSpec{AppGroup: "g", AppName: "n", EntrypointFile: entrypoint, Port: 8881, Replicas: 1, MaxMemory: c.in}
+		err := Validate(spec)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("Validate(max-memory %q) = %v, want it to say %q", c.in, err, c.want)
+		}
 	}
 }

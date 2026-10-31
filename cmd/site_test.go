@@ -15,6 +15,10 @@ import (
 // The website in site/ is plain HTML with no build step; these tests do the
 // checks a site generator would.
 
+// googleVerification matches the file Google Search Console asks for to
+// prove the site is ours: one line of text, not a page of the site.
+var googleVerification = regexp.MustCompile(`^google[0-9a-f]+\.html$`)
+
 func sitePages(t *testing.T) map[string]string {
 	t.Helper()
 	files, err := filepath.Glob("../site/*.html")
@@ -23,6 +27,9 @@ func sitePages(t *testing.T) map[string]string {
 	}
 	pages := map[string]string{}
 	for _, f := range files {
+		if googleVerification.MatchString(filepath.Base(f)) {
+			continue
+		}
 		data, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)

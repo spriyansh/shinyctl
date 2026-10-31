@@ -13,6 +13,7 @@ import (
 	"log"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/api"
@@ -102,9 +103,18 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 				// This daemon saw the process alive, nobody saw it exit and
 				// nobody will: count it, as a failure since its status is
 				// unknown.
+				// There is no wait status here, so a kill for memory is known
+				// by the note the loop left, which is evidence enough within
+				// the minute it is kept.
 				forgetSeen(spec.AppStateFile, rec.Copy)
-				log.Printf("reconcile: %q: copy %d (pid %d) is gone and its exit was not seen; counting it as a failure", spec.AppName, rec.Copy, rec.PID)
-				rec = reconcile.RecordExit(rec, process.Exit{At: time.Now(), Failed: true})
+				exit := process.Exit{At: time.Now(), Failed: true}
+				if _, oom := killed.LoadAndDelete(killKeyOf(rec)); oom {
+					exit.Reason = process.ExitOOM
+					log.Printf("reconcile: %q: copy %d (pid %d) is gone and was killed for going over max-memory; counting it as a crash", spec.AppName, rec.Copy, rec.PID)
+				} else {
+					log.Printf("reconcile: %q: copy %d (pid %d) is gone and its exit was not seen; counting it as a failure", spec.AppName, rec.Copy, rec.PID)
+				}
+				rec = reconcile.RecordExit(rec, exit)
 				st.Put(rec)
 				changed = true
 			}
@@ -159,8 +169,8 @@ func reconcileLocked(spec manifest.AppSpec, o reconcileOpts) (api.ApplyResponse,
 	dirty := false
 	if o.explicit {
 		for _, rec := range st.Copies() {
-			if rec.CrashCount != 0 || !rec.LastExitAt.IsZero() || rec.LastExitFailed {
-				rec.CrashCount, rec.LastExitAt, rec.LastExitFailed = 0, time.Time{}, false
+			if rec.CrashCount != 0 || !rec.LastExitAt.IsZero() || rec.LastExitFailed || rec.LastExitReason != "" {
+				rec.CrashCount, rec.LastExitAt, rec.LastExitFailed, rec.LastExitReason = 0, time.Time{}, false, ""
 				st.Put(rec)
 				dirty = true
 			}
@@ -420,6 +430,7 @@ func launchCopy(spec manifest.AppSpec, st *state.State, n int) error {
 		newApp.CrashCount = old.CrashCount
 		newApp.LastExitAt = old.LastExitAt
 		newApp.LastExitFailed = old.LastExitFailed
+		newApp.LastExitReason = old.LastExitReason
 	}
 	st.Put(newApp)
 	if err := state.Save(spec.AppStateFile, *st); err != nil {
@@ -436,6 +447,9 @@ func launchCopy(spec manifest.AppSpec, st *state.State, n int) error {
 	watched.Store(pid, struct{}{})
 	go func() {
 		exit := <-done
+		if _, ours := killed.LoadAndDelete(killKeyOf(newApp)); ours && exit.Signal == syscall.SIGKILL {
+			exit.Reason = process.ExitOOM
+		}
 		recorded := recordExit(spec, n, pid, exit)
 		watched.Delete(pid)
 		if recorded {

@@ -34,6 +34,7 @@ const (
 func RecordExit(app state.AppState, exit process.Exit) state.AppState {
 	app.LastExitAt = exit.At
 	app.LastExitFailed = exit.Failed
+	app.LastExitReason = string(exit.Reason)
 
 	switch {
 	case !exit.Failed:
@@ -108,7 +109,7 @@ func GaveUp(spec manifest.AppSpec, app state.AppState) bool {
 
 // fieldOrder is the order manifest fields are listed in replies: the order
 // of the README's manifest example.
-var fieldOrder = []string{"app-group", "app-name", "entrypoint-file", "port", "host", "replicas", "warm-replicas", "lb-policy", "drain-timeout", "restart-policy", "working-dir", "env"}
+var fieldOrder = []string{"app-group", "app-name", "entrypoint-file", "port", "host", "replicas", "warm-replicas", "lb-policy", "drain-timeout", "max-memory", "restart-policy", "working-dir", "env"}
 
 // OrderFields sorts manifest field names into fieldOrder. A name this
 // version doesn't know goes last, alphabetically.
@@ -162,7 +163,8 @@ func changedFields(app state.AppState, spec manifest.AppSpec) []string {
 // previously applied spec and spec and take effect without restarting the
 // running copies: port and host, which only move the load balancer's
 // listener; replicas and warm-replicas, which start or stop copies; lb-policy,
-// which changes how new visitors pick a copy; and restart-policy, which the
+// which changes how new visitors pick a copy; max-memory, which the loop that
+// watches the copies reads from the registry; and restart-policy, which the
 // reconcile loop reads from the registry on every pass.
 func SettingsChanged(previous, spec manifest.AppSpec) []string {
 	var changed []string
@@ -183,6 +185,9 @@ func SettingsChanged(previous, spec manifest.AppSpec) []string {
 	}
 	if previous.EffectiveDrainTimeout() != spec.EffectiveDrainTimeout() {
 		changed = append(changed, "drain-timeout")
+	}
+	if previous.EffectiveMaxMemory() != spec.EffectiveMaxMemory() {
+		changed = append(changed, "max-memory")
 	}
 	if previous.RestartPolicy.Effective() != spec.RestartPolicy.Effective() {
 		changed = append(changed, "restart-policy")

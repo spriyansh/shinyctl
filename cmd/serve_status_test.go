@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/process"
@@ -252,5 +253,32 @@ func TestHandleStatus_AppsInAFixedOrder(t *testing.T) {
 		if !slices.Equal(got, want) {
 			t.Fatalf("round %d: ports in order %v, want %v", round, got, want)
 		}
+	}
+}
+
+// TestHandleStatus_ReportsTheLimitAndWhyACopyExited: the status carries the
+// app's max-memory and each copy's last exit reason, for the CLI's note.
+func TestHandleStatus_ReportsTheLimitAndWhyACopyExited(t *testing.T) {
+	useFakeRscript(t)
+	spec := limitedSpec(t, "limited", 1, 0)
+	cleanupApp(t, spec)
+	a := applyOK(t, spec)
+	waitServed(t, spec, a.PID)
+
+	if got := statusOf(t, "limited"); got.MaxMemoryBytes != limitMB*mib || len(got.Copies) != 1 || got.Copies[0].LastExitReason != "" {
+		t.Errorf("status = %+v, want the limit and no reason", got)
+	}
+
+	if !recordExit(spec, 1, a.PID, process.Exit{At: time.Now(), Failed: true, Reason: process.ExitOOM}) {
+		t.Fatal("the exit was not recorded")
+	}
+	if got := statusOf(t, "limited"); len(got.Copies) != 1 || got.Copies[0].LastExitReason != "oom" || got.Copies[0].CrashCount != 1 {
+		t.Errorf("status = %+v, want copy 1 with the reason oom and one crash", got)
+	}
+
+	spec.MaxMemory = ""
+	applyOK(t, spec)
+	if got := statusOf(t, "limited"); got.MaxMemoryBytes != 0 {
+		t.Errorf("max-memory-bytes = %d after the limit was removed, want 0", got.MaxMemoryBytes)
 	}
 }

@@ -74,6 +74,11 @@ type hooks struct {
 	// Signal0 is kill(pid, 0), the ready-watcher's "is it still there".
 	Signal0 func(pid int) error
 
+	// Measure is process.ExactMemory, which an apply asks to tell which copies
+	// a new max-memory is going to kill. The memory loop is given its own
+	// measure as a parameter and does not read this.
+	Measure measureFunc
+
 	// Ready waits for the load balancer when it is being started or replaced
 	// (up to a handover's time), before a check of what it serves: during a
 	// handover it serves, but the gateway can't say so, and its own sockets
@@ -99,6 +104,7 @@ func currentHooks() hooks {
 		PortStart:      defaultPortStart,
 		Signal0:        func(pid int) error { return syscall.Kill(pid, 0) },
 		DrainSettle:    reconcile.DrainSettle,
+		Measure:        process.ExactMemory,
 	}
 	if o := activeHooks.Load(); o != nil {
 		if o.Served != nil {
@@ -144,6 +150,9 @@ func currentHooks() hooks {
 		}
 		if o.Signal0 != nil {
 			h.Signal0 = o.Signal0
+		}
+		if o.Measure != nil {
+			h.Measure = o.Measure
 		}
 	}
 	return h

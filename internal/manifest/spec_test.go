@@ -89,6 +89,25 @@ func TestEffectiveDrainTimeout(t *testing.T) {
 	}
 }
 
+func TestEffectiveMaxMemory(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int64
+	}{
+		{"", 0},
+		{"512M", 512 << 20},
+		{"2g", 2 << 30},
+		{"512", 0},
+		{"bad", 0},
+		{"-5M", 0},
+		{"99999999999T", 0},
+	} {
+		if got := (AppSpec{MaxMemory: tc.in}).EffectiveMaxMemory(); got != tc.want {
+			t.Errorf("EffectiveMaxMemory(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
 // YAML reads "drain-timeout: 0" as a number, which a string field takes as
 // "0", and that parses.
 func TestDrainTimeout_YAMLZero(t *testing.T) {

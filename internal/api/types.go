@@ -12,6 +12,11 @@ import (
 type ApplyResponse struct {
 	Action  reconcile.ActionType `json:"action"`
 	Message string               `json:"message"`
+
+	// MaxMemoryBytes is the max-memory limit the daemon applied, 0 for none.
+	// A daemon from before the limit leaves it out, which is how the CLI tells
+	// that it ignores a limit it was asked to apply.
+	MaxMemoryBytes int64 `json:"max-memory-bytes,omitempty"`
 }
 
 // CopyStatus is one copy of an app: what state.json recorded about its
@@ -44,6 +49,10 @@ type CopyStatus struct {
 	// (--now).
 	SkipDrain bool `json:"skip-drain,omitempty"`
 
+	// LastExitReason is why shinyctl ended the copy's last process, "oom" for
+	// one killed for going over max-memory; empty for an exit nobody caused.
+	LastExitReason string `json:"last-exit-reason,omitempty"`
+
 	// MemoryBytes is the memory of the copy's main process; zero when it
 	// isn't running or couldn't be measured. The wire name is historical: it
 	// was once the resident size, and is kept because the CLI and
@@ -69,6 +78,9 @@ type AppStatus struct {
 	// RestartPolicy is the app's restart-policy as it applies (always,
 	// on-failure or never), so a copy the policy leaves down can be explained.
 	RestartPolicy string `json:"restart-policy,omitempty"`
+
+	// MaxMemoryBytes is the app's max-memory in bytes; 0 for no limit.
+	MaxMemoryBytes int64 `json:"max-memory-bytes,omitempty"`
 
 	// NotServed is why the load balancer leaves the app's port unserved (it
 	// is taken by another program or another app), or empty. The copies may

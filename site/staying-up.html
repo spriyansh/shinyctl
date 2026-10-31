@@ -43,7 +43,7 @@
 
 <main class="prose">
 <h1>Staying up</h1>
-<p class="lede">What shinyctl does when a copy dies, when you deploy a new version, when you change the number of copies, and when you upgrade shinyctl itself.</p>
+<p class="lede">What shinyctl does when a copy dies, when a copy holds too much memory, when you deploy a new version, when you change the number of copies, and when you upgrade shinyctl itself.</p>
 <div class="legend" aria-label="Colours in the timelines">
   <span><i style="background:var(--accent)"></i>active</span>
   <span><i style="background:var(--warm)"></i>warm</span>
@@ -101,6 +101,32 @@
 <div class="note">
   <p>After its copy changes, an open Shiny page greys out until it is reloaded. The example app reloads by itself once the app answers again: copy its <code>tags$script</code> into your app's UI. Shiny's own <code>session$allowReconnect("force")</code> is no substitute: with shiny 1.14, a page reconnected to a new R process keeps its old outputs, and its downloads stop working.</p>
 </div>
+
+<h2 id="memory">When a copy holds too much memory</h2>
+<p>Set <code>max-memory</code> in the manifest, for example <code>max-memory: 2G</code>, and <code>shinyctl-api</code> measures each of the app's copies about once a second, the same number <code>MEM</code> shows in <code>status</code>. A copy that holds more is killed at once, with no drain: a process that keeps growing could take the machine down before a drain ended.</p>
+<ul>
+  <li><b>It counts as a crash</b>, so everything above holds: the spare takes over at once, the killed copy comes back as the spare after its backoff, and <code>restart-policy</code> decides whether it comes back at all. A draining copy is not restarted.</li>
+  <li><b>Its visitors lose their session.</b> A page with the example's script reloads by itself onto the spare. If every copy goes over, visitors get the restarting page until one is back.</li>
+  <li><b>Changing <code>max-memory</code></b> takes effect without a restart. A limit below what a copy already holds kills that copy, and <code>apply</code> says which.</li>
+  <li><b>Sizes</b> are K, M, G or T, in powers of 1024 as <code>MEM</code> shows them: <code>512M</code>, <code>1.5G</code>, <code>2Gi</code>. The least is <code>128M</code>, since an idle Shiny copy already holds about 70 to 100 MB.</li>
+</ul>
+<p><code>status</code> says why the copy went down, and so do <code>api.log</code> and the copy's log:</p>
+<pre><code>NAME    COPY  ROLE    PORT  PID    STATUS         READY  MEM   SESSIONS  CRASHES  STARTED
+memory  1     -       8766  98990  crash-looping  -      -     -         1        2026-10-31T18:38:12+01:00
+memory  2     active  8766  98992  alive          ready  137M  1         -        2026-10-31T18:38:12+01:00
+
+Memory: 137M in 1 R process, plus 12M for the load balancer.
+
+memory: copy 1 was killed for going over max-memory (512M); it starts again after its backoff.</code></pre>
+<p>What the limit doesn't do:</p>
+<ul>
+  <li><b>It is a check, not a wall.</b> A copy can hold more for a second or so before it is killed, and a spike faster than that can use up the machine's memory first. While memory can't be measured, nothing is killed, and <code>api.log</code> says why.</li>
+  <li><b>Only the main R process</b> is measured and killed. Workers it started, through callr or future for example, aren't counted and outlive it.</li>
+  <li><b>A killed copy leaves its R temporary folder behind</b>, uploads included: the kill gives R no chance to clean up.</li>
+  <li><b>On Linux, <code>MEM</code> counts the files and libraries a copy has mapped too</b>, which the system can reclaim, so leave the limit some room above what the app needs.</li>
+  <li><b>Measuring costs CPU on macOS:</b> a few percent of a core for an app with one copy and a spare, about a third of a core with 16 copies and a spare. On Linux it costs next to nothing, and apps without a limit are not measured.</li>
+</ul>
+<p>The <a href="install.html#example">memory example</a> grows until it goes over its limit of 512M.</p>
 
 <h2 id="redeploy">Redeploys</h2>
 <p><code>restart</code> starts new copies from the manifest as it is now, so new code in <code>app.R</code> takes effect. An <code>apply</code> does the same when it changes how the app starts: <code>env</code>, <code>working-dir</code>, <code>app-group</code>, <code>app-name</code> or <code>entrypoint-file</code>. Both return at once.</p>
@@ -170,7 +196,7 @@ hello: copy 1 is draining with 2 sessions; it stops when they end, or in 15m at 
 
 <h2 id="scaling">Scaling</h2>
 <p>Changing <code>replicas</code> or <code>warm-replicas</code> and applying starts copies, or drains the ones it removes the same way: they get no new visitors, and stop when their sessions end or at <code>drain-timeout</code>. Copies that are starting or dead stop at once, and <code>--now</code> stops them all at once. Copies leave in this order: those with no process, those still starting, then ready ones with the fewest open sessions, a warm copy before an active one when they tie.</p>
-<p>Changing <code>port</code>, <code>host</code>, <code>lb-policy</code>, <code>drain-timeout</code> or <code>restart-policy</code> takes effect without restarting the app's processes.</p>
+<p>Changing <code>port</code>, <code>host</code>, <code>lb-policy</code>, <code>drain-timeout</code>, <code>restart-policy</code> or <code>max-memory</code> takes effect without restarting the app's processes.</p>
 
 <h2 id="upgrade">Upgrading shinyctl</h2>
 <p>Install the new binary (running the installer again does it), then restart <code>shinyctl-api</code>:</p>

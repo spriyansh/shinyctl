@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -172,6 +173,20 @@ func Validate(spec AppSpec) error {
 	if spec.DrainTimeout != "" {
 		if d, err := time.ParseDuration(spec.DrainTimeout); err != nil || d < 0 || d > MaxDrainTimeout {
 			return fmt.Errorf("drain-timeout must be a duration from 0 to 24h, such as 15m, 90s or 1h (got %q)", spec.DrainTimeout)
+		}
+	}
+
+	if spec.MaxMemory != "" {
+		n, err := ParseSize(spec.MaxMemory)
+		switch {
+		case errors.Is(err, ErrSizeTooLarge):
+			return fmt.Errorf("max-memory is too large (got %q)", spec.MaxMemory)
+		case err != nil:
+			return fmt.Errorf("max-memory must be a size with a unit, such as 512M or 2G (got %q)", spec.MaxMemory)
+		case n == 0:
+			return fmt.Errorf("max-memory must be more than 0 (got %q); remove max-memory for no limit", spec.MaxMemory)
+		case n < MinMaxMemory:
+			return fmt.Errorf("max-memory must be at least 128M: an idle Shiny copy already holds about 70-100M (got %q)", spec.MaxMemory)
 		}
 	}
 

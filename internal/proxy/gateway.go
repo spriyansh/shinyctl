@@ -287,6 +287,50 @@ func (g *Gateway) SetPool(key string, p Pool) error {
 	return g.pushLocked()
 }
 
+// Withdraw takes the copy dialled at dial out of app key's pool, because it is
+// being killed, and lets the first warm copy take its place if it served: the
+// same pool the next reconcile ranks, so that cycle's SetPool changes nothing
+// and the visitors are not sent anywhere twice. It returns the pool as it is
+// now and whether anything changed. Nothing changes when no pool has been set
+// yet, or the app or the copy is not in it.
+//
+// The pool it changes is never edited in place: Pool hands the slices to
+// readers that do not hold poolMu. A dial listed twice, which only a
+// hand-edited state file produces, is removed at each place, because
+// sendable would have dropped all but the first.
+func (g *Gateway) Withdraw(key, dial string) (Pool, bool) {
+	g.poolMu.Lock()
+	defer g.poolMu.Unlock()
+	if !g.known {
+		return Pool{}, false
+	}
+	p, ok := g.pools[key]
+	if !ok {
+		return Pool{}, false
+	}
+	without := func(list []string) []string {
+		return slices.DeleteFunc(slices.Clone(list), func(d string) bool { return d == dial })
+	}
+
+	next := Pool{Active: without(p.Active), Warm: without(p.Warm), Draining: without(p.Draining)}
+	if len(next.Active) == len(p.Active) && len(next.Warm) == len(p.Warm) && len(next.Draining) == len(p.Draining) {
+		return p, false
+	}
+
+	// Warm copies are always newer than active ones, in a rollout too, so
+	// the first warm copy is the one the next ranking makes active.
+	if len(next.Active) < len(p.Active) && len(next.Warm) > 0 {
+		next.Active = append(next.Active, next.Warm[0])
+		next.Warm = next.Warm[1:]
+	}
+
+	g.pools[key] = next
+	g.poolSeq++
+	g.poolSet[key] = g.poolSeq
+	g.pushLocked()
+	return next, true
+}
+
 // Pool returns the copies recorded for app key.
 func (g *Gateway) Pool(key string) (Pool, bool) {
 	g.poolMu.Lock()

@@ -29,6 +29,11 @@ type AppState struct {
 	LastExitAt     time.Time `json:"last-exit-at"`
 	LastExitFailed bool      `json:"last-exit-failed"`
 
+	// LastExitReason is why shinyctl ended the last exit's process, such as
+	// "oom" for a copy it killed for going over its max-memory. Empty for an
+	// exit nobody caused, and cleared by the next exit that has no reason.
+	LastExitReason string `json:"last-exit-reason,omitempty"`
+
 	// StartedFrom is manifest.AppSpec.StartFields() at the time the process
 	// was started: the settings that shaped it beyond the typed fields
 	// above. A key that is absent means unknown, not changed (records from

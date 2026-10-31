@@ -114,6 +114,7 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 
 	resp.Message += notes
 	resp.Action = reconcile.ActionRestart
+	resp.MaxMemoryBytes = spec.EffectiveMaxMemory()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/api"
+	"github.com/spriyansh/shinyctl/internal/manifest"
 )
 
 func TestFormatMem(t *testing.T) {
@@ -70,6 +71,14 @@ func TestWriteStatus(t *testing.T) {
 			{Name: "finished", Port: 8088, RestartPolicy: "on-failure", Copies: []api.CopyStatus{
 				{Copy: 1, PID: 41, GaveUp: true, StartedAt: started},
 			}},
+			{Name: "hungry", Port: 8089, Replicas: 1, WarmReplicas: 1, MaxMemoryBytes: 512 << 20, Copies: []api.CopyStatus{
+				{Copy: 1, Role: "active", PID: 51, Alive: true, Ready: true, StartedAt: started},
+				{Copy: 2, PID: 52, CrashCount: 1, LastExitReason: "oom", StartedAt: started},
+			}},
+			{Name: "upgrade", Port: 8090, Replicas: 1, MaxMemoryBytes: 512 << 20, Copies: []api.CopyStatus{
+				{Copy: 1, Role: "active", PID: 61, Alive: true, Ready: true, Outdated: true},
+				{Copy: 2, PID: 62, CrashCount: 1, LastExitReason: "oom"},
+			}},
 		},
 	}
 
@@ -95,8 +104,12 @@ draining  4     -         8086  24     alive          starting  -     -         
 oneshot   1     active    8087  31     alive          ready     -     -         -        -
 oneshot   2     -         8087  32     exited         -         -     -         -        2026-10-11T18:20:21Z
 finished  1     -         8088  41     exited         -         -     -         -        2026-10-11T18:20:21Z
+hungry    1     active    8089  51     alive          ready     -     -         -        2026-10-11T18:20:21Z
+hungry    2     -         8089  52     crash-looping  -         -     -         1        2026-10-11T18:20:21Z
+upgrade   1     active    8090  61     alive          ready     -     -         -        -
+upgrade   2     -         8090  62     crash-looping  -         -     -         1        -
 
-Memory: 281M in 11 R processes (2 warm, 2 draining), plus 41M for the load balancer.
+Memory: 281M in 13 R processes (2 warm, 2 draining), plus 41M for the load balancer.
 
 blocked: its port is not served: 127.0.0.1:8083 is not available (taken) — pick a different port
 
@@ -104,9 +117,15 @@ taken: not started: 127.0.0.1:8084 is not available (taken) — pick a different
 
 rolling: new version starting in copy 3; copies 1 and 2 keep serving the previous version until it is ready, then drain
 
+upgrade: copy 1 keeps serving the previous version: copy 2 does not start (see shinyctl logs --copy 2)
+
 oneshot: copy 2 exited and restart-policy never leaves it down; apply or restart starts it again.
 
 finished: copy 1 exited without an error and restart-policy on-failure leaves it down; apply or restart starts it again. Its port is closed.
+
+hungry: copy 2 was killed for going over max-memory (512M); it starts again after its backoff.
+
+upgrade: copy 2 was killed for going over max-memory (512M); it starts again after its backoff.
 
 draining: copy 4, the new spare, is starting; until it is ready the app has no spare.
 
@@ -280,6 +299,59 @@ func TestExitedNote(t *testing.T) {
 	for _, c := range cases {
 		if got := exitedNote(c.app); got != c.want {
 			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestMemoryNote(t *testing.T) {
+	oom := func(c api.CopyStatus) api.CopyStatus { c.LastExitReason = "oom"; return c }
+	limit := int64(512 << 20)
+	cases := []struct {
+		name string
+		app  api.AppStatus
+		want string
+	}{
+		{"killed, waiting for its backoff", api.AppStatus{MaxMemoryBytes: limit, Copies: []api.CopyStatus{oom(api.CopyStatus{Copy: 1, CrashCount: 1})}},
+			"copy 1 was killed for going over max-memory (512M); it starts again after its backoff."},
+		{"killed, back", api.AppStatus{MaxMemoryBytes: limit, Copies: []api.CopyStatus{oom(api.CopyStatus{Copy: 1, CrashCount: 1, Alive: true})}},
+			"copy 1 was killed for going over max-memory (512M) and is back."},
+		{"killed, gave up", api.AppStatus{MaxMemoryBytes: limit, Copies: []api.CopyStatus{oom(api.CopyStatus{Copy: 1, CrashCount: 1, GaveUp: true})}},
+			"copy 1 was killed for going over max-memory (512M)."},
+		{"killed with a clean count, gave up", api.AppStatus{MaxMemoryBytes: limit, Copies: []api.CopyStatus{oom(api.CopyStatus{Copy: 1, GaveUp: true})}},
+			"copy 1 was killed for going over max-memory (512M)."},
+		{"two copies, one sentence each", api.AppStatus{MaxMemoryBytes: limit, Copies: []api.CopyStatus{
+			oom(api.CopyStatus{Copy: 1, CrashCount: 1}), oom(api.CopyStatus{Copy: 2, CrashCount: 2}), oom(api.CopyStatus{Copy: 3, CrashCount: 1, Alive: true})}},
+			"copies 1 and 2 were killed for going over max-memory (512M); they start again after their backoff. copy 3 was killed for going over max-memory (512M) and is back."},
+		{"the limit was taken away since", api.AppStatus{Copies: []api.CopyStatus{oom(api.CopyStatus{Copy: 1, CrashCount: 1})}},
+			"copy 1 was killed for going over max-memory; it starts again after its backoff."},
+		{"up for a minute: the crash count is gone", api.AppStatus{MaxMemoryBytes: limit, Copies: []api.CopyStatus{oom(api.CopyStatus{Copy: 1, Alive: true})}}, ""},
+		{"an ordinary crash", api.AppStatus{MaxMemoryBytes: limit, Copies: []api.CopyStatus{{Copy: 1, CrashCount: 1}}}, ""},
+		{"no copies", api.AppStatus{MaxMemoryBytes: limit}, ""},
+	}
+	for _, tc := range cases {
+		if got := memoryNote(tc.app); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestWarnIfLimitIgnored(t *testing.T) {
+	const warning = "warning: shinyctl-api is an older build and ignores max-memory; restart it and apply again\n"
+	cases := []struct {
+		name string
+		spec manifest.AppSpec
+		resp api.ApplyResponse
+		want string
+	}{
+		{"a limit the daemon dropped", manifest.AppSpec{MaxMemory: "512M"}, api.ApplyResponse{Message: "ok"}, warning},
+		{"a limit the daemon applied", manifest.AppSpec{MaxMemory: "512M"}, api.ApplyResponse{MaxMemoryBytes: 512 << 20}, ""},
+		{"no limit asked", manifest.AppSpec{}, api.ApplyResponse{}, ""},
+	}
+	for _, tc := range cases {
+		var out bytes.Buffer
+		warnIfLimitIgnored(&out, tc.spec, tc.resp)
+		if out.String() != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, out.String(), tc.want)
 		}
 	}
 }

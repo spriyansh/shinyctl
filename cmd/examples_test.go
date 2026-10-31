@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -49,6 +50,25 @@ func TestExamples(t *testing.T) {
 			t.Errorf("%s: port %d is also %s's", file, spec.Port, other)
 		}
 		ports[spec.Port] = file
+	}
+}
+
+// TestMemoryExampleGoesOverItsLimit: the memory example is the hand test for
+// max-memory, so its limit must be one the app reaches before it stops growing
+// at MAX_MB.
+func TestMemoryExampleGoesOverItsLimit(t *testing.T) {
+	useFakeRscript(t)
+
+	spec, err := manifest.Load("../examples/memory/shinyctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxMB, err := strconv.ParseInt(spec.Env["MAX_MB"], 10, 64)
+	if err != nil {
+		t.Fatalf("MAX_MB = %q: %v", spec.Env["MAX_MB"], err)
+	}
+	if limit := spec.EffectiveMaxMemory(); limit == 0 || limit >= maxMB<<20 {
+		t.Errorf("max-memory %q is %d bytes, want a limit below MAX_MB (%d MiB)", spec.MaxMemory, limit, maxMB)
 	}
 }
 

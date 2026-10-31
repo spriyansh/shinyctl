@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -792,3 +793,164 @@ func TestGateway_WaitWhileStartingEndsWhenTheAttemptFails(t *testing.T) {
 		t.Error("Starting() is still true after the attempt failed")
 	}
 }
+
+func TestGateway_Withdraw(t *testing.T) {
+	const a, b, w, d = "127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002", "127.0.0.1:20003"
+	newG := func() *Gateway {
+		return newGateway(settingsFor(shortDir(t)), fakeProc{ready: false})
+	}
+
+	t.Run("the only active copy hands over to the warm one", func(t *testing.T) {
+		g := newG()
+		g.SetPool("x", Pool{Active: []string{a}, Warm: []string{w}})
+		got, changed := g.Withdraw("x", a)
+		if want := (Pool{Active: []string{w}}); !changed || !samePool(got, want) {
+			t.Errorf("Withdraw = %+v, %v; want %+v, true", got, changed, want)
+		}
+		if kept, _ := g.Pool("x"); !samePool(kept, got) {
+			t.Errorf("the pool kept is %+v, want %+v", kept, got)
+		}
+	})
+
+	t.Run("one of two active copies leaves the first spare in its place", func(t *testing.T) {
+		g := newG()
+		g.SetPool("x", Pool{Active: []string{a, b}, Warm: []string{w, d}})
+		got, changed := g.Withdraw("x", a)
+		// Active b then w, as a table with a gone and w promoted: the shape in
+		// which the load balancer pairs a's visitors with w.
+		if want := (Pool{Active: []string{b, w}, Warm: []string{d}}); !changed || !samePool(got, want) {
+			t.Errorf("Withdraw = %+v, %v; want %+v, true", got, changed, want)
+		}
+	})
+
+	t.Run("with no spare the pool just loses the copy", func(t *testing.T) {
+		g := newG()
+		g.SetPool("x", Pool{Active: []string{a, b}})
+		got, changed := g.Withdraw("x", b)
+		if want := (Pool{Active: []string{a}}); !changed || !samePool(got, want) {
+			t.Errorf("Withdraw = %+v, %v; want %+v, true", got, changed, want)
+		}
+	})
+
+	t.Run("a warm copy is just removed", func(t *testing.T) {
+		g := newG()
+		g.SetPool("x", Pool{Active: []string{a}, Warm: []string{w, d}})
+		got, changed := g.Withdraw("x", w)
+		if want := (Pool{Active: []string{a}, Warm: []string{d}}); !changed || !samePool(got, want) {
+			t.Errorf("Withdraw = %+v, %v; want %+v, true", got, changed, want)
+		}
+	})
+
+	t.Run("a draining copy is just removed", func(t *testing.T) {
+		g := newG()
+		g.SetPool("x", Pool{Active: []string{a}, Warm: []string{w}, Draining: []string{d}})
+		got, changed := g.Withdraw("x", d)
+		if want := (Pool{Active: []string{a}, Warm: []string{w}}); !changed || !samePool(got, want) {
+			t.Errorf("Withdraw = %+v, %v; want %+v, true", got, changed, want)
+		}
+	})
+
+	t.Run("a dial listed twice goes from both places", func(t *testing.T) {
+		g := newG()
+		g.SetPool("x", Pool{Active: []string{a, b}, Warm: []string{a}})
+		got, changed := g.Withdraw("x", a)
+		if want := (Pool{Active: []string{b}}); !changed || !samePool(got, want) {
+			t.Errorf("Withdraw = %+v, %v; want %+v, true", got, changed, want)
+		}
+	})
+
+	t.Run("nothing changes before any pool is known, for an unknown app or an unlisted copy", func(t *testing.T) {
+		g := newG()
+		if _, changed := g.Withdraw("x", a); changed {
+			t.Error("Withdraw changed something before any pool was set")
+		}
+		g.SetPool("x", Pool{Active: []string{a}, Warm: []string{w}})
+		seq := g.PoolSeq()
+		if _, changed := g.Withdraw("y", a); changed {
+			t.Error("Withdraw changed an app that has no pool")
+		}
+		if got, changed := g.Withdraw("x", b); changed || !samePool(got, Pool{Active: []string{a}, Warm: []string{w}}) {
+			t.Errorf("Withdraw of an unlisted copy = %+v, %v; want the pool as it was, false", got, changed)
+		}
+		if g.PoolSeq() != seq {
+			t.Error("a Withdraw that changed nothing still moved the sequence")
+		}
+	})
+
+	t.Run("the pool a reader holds is never edited", func(t *testing.T) {
+		g := newG()
+		g.SetPool("x", Pool{Active: []string{a, b}, Warm: []string{w}})
+		held, _ := g.Pool("x")
+		g.Withdraw("x", a)
+		if !slices.Equal(held.Active, []string{a, b}) || !slices.Equal(held.Warm, []string{w}) {
+			t.Errorf("the pool read before the Withdraw became %+v", held)
+		}
+	})
+
+	t.Run("a rebuilt table that was made before it does not undo it", func(t *testing.T) {
+		g := newG()
+		before := Pool{Active: []string{a}, Warm: []string{w}}
+		g.SetPool("x", before)
+		since := g.PoolSeq()
+		g.Withdraw("x", a)
+		g.ReplacePools(Table{"x": before}, since)
+		if got, _ := g.Pool("x"); !samePool(got, Pool{Active: []string{w}}) {
+			t.Errorf("pool = %+v after a ReplacePools made before the Withdraw, want the Withdraw kept", got)
+		}
+	})
+
+	t.Run("readers see whole pools while it runs", func(t *testing.T) {
+		g := newG()
+		g.SetPool("x", Pool{Active: []string{a, b}, Warm: []string{w}})
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					p, _ := g.Pool("x")
+					for _, list := range [][]string{p.Active, p.Warm} {
+						for range list {
+						}
+					}
+				}
+			}
+		}()
+		for i := 0; i < 200; i++ {
+			g.Withdraw("x", a)
+			g.SetPool("x", Pool{Active: []string{a, b}, Warm: []string{w}})
+		}
+		close(stop)
+		<-done
+	})
+}
+
+func TestGateway_WithdrawPushesOnceAndTheNextRankingPushesNothing(t *testing.T) {
+	e := newGwEnv(t)
+	const a, w = "127.0.0.1:20000", "127.0.0.1:20001"
+	if err := e.gw.SetPool("x", Pool{Active: []string{a}, Warm: []string{w}}); err != nil {
+		t.Fatal(err)
+	}
+	pushes := e.gw.Pushes()
+
+	e.gw.Withdraw("x", a)
+	if got := e.gw.Pushes(); got != pushes+1 {
+		t.Errorf("Withdraw pushed %d table(s), want 1", got-pushes)
+	}
+	if got, err := (Admin{Socket: e.settings.AdminSocket}).Copies(); err != nil || !samePoolIn(got, "x", Pool{Active: []string{w}}) {
+		t.Errorf("the load balancer has %v, %v", got, err)
+	}
+
+	// What the reconcile that follows ranks.
+	if err := e.gw.SetPool("x", Pool{Active: []string{w}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.gw.Pushes(); got != pushes+1 {
+		t.Errorf("the ranking after a Withdraw pushed %d more table(s), want none", got-pushes-1)
+	}
+}
+
+func samePoolIn(t Table, key string, p Pool) bool { return t.Equal(Table{key: p}) }
