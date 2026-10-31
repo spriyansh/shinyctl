@@ -41,6 +41,11 @@ type Exit struct {
 // exitOf builds the Exit of a process that ended at the moment it is called,
 // from the status Wait collected.
 func exitOf(ps *os.ProcessState) Exit {
+	// Wait can fail before it collects a status; all that is known is that
+	// the process is not known to have exited cleanly.
+	if ps == nil {
+		return Exit{At: time.Now(), Failed: true}
+	}
 	exit := Exit{At: time.Now(), Failed: !ps.Success()}
 	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 		exit.Signal = ws.Signal()

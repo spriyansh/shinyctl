@@ -34,3 +34,11 @@ func TestExitOf(t *testing.T) {
 		})
 	}
 }
+
+// A Wait that failed before it collected a status leaves no ProcessState.
+func TestExitOf_NoStatus(t *testing.T) {
+	exit := exitOf(nil)
+	if !exit.Failed || exit.Signal != 0 || exit.At.IsZero() {
+		t.Errorf("exitOf(nil) = %+v, want a failure with no signal and a time", exit)
+	}
+}
