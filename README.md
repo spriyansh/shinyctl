@@ -63,7 +63,8 @@ mkdir -p ~/.local/bin && cp shinyctl_0.1.0_linux_arm64/shinyctl ~/.local/bin/
 
 The other archives are `linux_amd64`, `darwin_arm64` (Apple silicon) and
 `darwin_amd64`. Each unpacks into a folder of its own with `shinyctl`, this
-README, the license and notices, and the example in `examples/hello`.
+README, the license and notices, and the examples in `examples/hello` and
+`examples/memory`.
 
 - On Debian and Ubuntu, `~/.local/bin` is on your `PATH` after your next
   login. On macOS, add `export PATH="$HOME/.local/bin:$PATH"` to
@@ -95,9 +96,9 @@ Memory: 281M in 2 R processes (1 warm), plus 41M for the load balancer.
 
 Open `http://127.0.0.1:8080` (the `port` in your manifest).
 
-## Try the example
+## Try the examples
 
-The example app is in the archive, in `examples/hello`, and in this repo.
+The example apps are in the archive, in `examples/`, and in this repo.
 From the unpacked archive folder:
 
 ```sh
@@ -116,6 +117,20 @@ printed, including the crash. Remove the app with
 If something else on the machine already uses port 8765, `apply` says so and
 `status` shows `port-in-use`. Change `port` in `examples/hello/shinyctl.yaml`
 and apply again.
+
+`examples/memory` is an app whose memory grows when you ask it to, for
+watching the `MEM` column:
+
+```sh
+shinyctl apply -f examples/memory/shinyctl.yaml
+```
+
+Open http://127.0.0.1:8766 and click **Add 1 GB**: `shinyctl status` shows
+the copy serving the page about 1 GB bigger, while the other copy stays as it
+was. **Grow until stopped** adds 100 MB a second, up to `MAX_MB` in the
+example's manifest (1024 MB), and **Free it** gives the memory back. The
+memory belongs to the R process, so closing the page keeps it. Keep `MAX_MB`
+below the machine's free memory.
 
 ## How it works
 
