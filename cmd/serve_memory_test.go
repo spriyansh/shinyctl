@@ -18,6 +18,7 @@ import (
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
 	"github.com/spriyansh/shinyctl/internal/process"
+	"github.com/spriyansh/shinyctl/internal/proxy"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
@@ -124,8 +125,8 @@ func TestMemory_OverTheLimitIsKilledAndTheWarmCopyTakesOver(t *testing.T) {
 	if p, _ := gateway.Pool(spec.AppStateFile); !slices.Equal(p.Active, []string{dialOf(warm)}) || len(p.Warm) != 0 {
 		t.Errorf("pool = %+v right after the kill, want only the warm copy, active", p)
 	}
-	if pid, _ := visit(t, spec, cookie); pid != warm.PID {
-		t.Errorf("the visitor of the killed copy reached pid %d, want the warm copy %d", pid, warm.PID)
+	if pid, set := visit(t, spec, cookie); pid != warm.PID || set == nil || set.Name != proxy.CookieName(spec.Port) || set.Value == cookie.Value {
+		t.Errorf("the visitor of the killed copy reached pid %d with cookie %v, want the warm copy %d with a new %s cookie", pid, set, warm.PID, proxy.CookieName(spec.Port))
 	}
 
 	waitUntil(t, "the exit to be recorded", 5*time.Second, func() bool {
@@ -396,8 +397,16 @@ func TestMemory_AnAdoptedCopyIsCountedAsOOM(t *testing.T) {
 				reconcileApp(spec.AppStateFile)
 			}
 
+			// Without a watcher the run hands the kill back, for the loop to
+			// reconcile. With one it need not: the watcher may already have
+			// seen the exit and dropped itself by the time the run looks, and
+			// then a second reconcile is harmless.
+			_, watching := adoptedWatched.Load(a.PID)
 			stub := &memoryStub{sizes: map[int]int64{a.PID: 200 * mib}}
-			runOnce(t, stub)
+			pending := runOnce(t, stub)
+			if !watching && (len(pending) != 1 || pending[0].stateFile != spec.AppStateFile || pending[0].app.PID != a.PID) {
+				t.Errorf("the run handed back %+v, want the unwatched copy %d of this app", pending, a.PID)
+			}
 			waitGone(t, a)
 
 			reconcileApp(spec.AppStateFile)
@@ -708,4 +717,36 @@ func TestMemory_AFirstApplyMeasuresNothing(t *testing.T) {
 	if got := applyResponse(t, spec).Message; strings.Contains(got, "will be killed") {
 		t.Errorf("a first apply said %q", got)
 	}
+}
+
+// The loop reconciles an app whose killed copy nobody is watching, once the
+// process is gone: with no tick running, that reconcile is what counts the
+// exit.
+func TestMemory_LoopReconcilesAfterAnUnwatchedKill(t *testing.T) {
+	useFakeRscript(t)
+	resetMemoryState(t)
+	spec := limitedSpec(t, "app", 1, 0)
+	a := startCopy(t, spec)
+	cleanupApp(t, spec)
+	t.Cleanup(func() { killIfAlive(spec, a) })
+	if _, watching := adoptedWatched.Load(a.PID); watching || isWatched(a.PID) {
+		t.Fatal("the copy has a watcher")
+	}
+
+	stub := &memoryStub{sizes: map[int]int64{a.PID: 200 * mib}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runMemoryLoop(ctx, 20*time.Millisecond, stub.measure)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	waitUntil(t, "the exit to be counted by the reconcile after the kill", 10*time.Second, func() bool {
+		rec, _ := loadCopyRecord(spec, 1)
+		return rec.CrashCount == 1 && rec.LastExitReason == "oom"
+	})
 }
