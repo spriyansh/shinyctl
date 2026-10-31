@@ -49,7 +49,7 @@
 <ul>
   <li>Set <code>host: 127.0.0.1</code> in each manifest, and put <a href="#https">HTTPS</a> in front.</li>
   <li>On Linux, <a href="#boot">start at boot</a>, and enable lingering so logging out doesn't stop your apps.</li>
-  <li>Check there is <a href="#memory">memory</a> for every copy, plus the extra copy a redeploy runs for a moment.</li>
+  <li>Check there is <a href="#memory">memory</a> for every copy, plus the extra copy a redeploy runs for a moment, and set <code>max-memory</code> so one copy can't take it all.</li>
   <li>Copy the example's reload script into your app's UI, so open pages recover after a crash or a redeploy (<a href="staying-up.html#crash">why</a>).</li>
 </ul>
 
@@ -110,7 +110,7 @@ loginctl enable-linger "$USER"</code></pre>
 
 <h2 id="memory">Memory</h2>
 <p>Each copy is a full R process, and with the defaults every app runs two: one active copy and one warm spare. A small app takes about 110 to 140 MB per copy on a Raspberry Pi 5, and the load balancer about 40 MB in all (12 MB on a Mac). <code>status</code> shows the total.</p>
-<p><code>MEM</code> in <code>status</code> counts what the system has compressed or swapped out, too: on macOS it is the number Activity Monitor shows, on Linux resident plus swapped memory. An app that keeps growing shows there even after the machine starts swapping. The <a href="install.html#example">memory example</a> lets you watch it.</p>
+<p><code>MEM</code> in <code>status</code> counts what the system has compressed or swapped out, too: on macOS it is the number Activity Monitor shows, on Linux resident plus swapped memory. An app that keeps growing shows there even after the machine starts swapping. To stop a copy before it gets that far, set <code>max-memory</code>: a copy that holds more is killed and the spare takes over (<a href="staying-up.html#memory">how</a>).</p>
 <p>During a redeploy both versions run side by side: for the few seconds R takes to start, the peak is the old copies plus <code>replicas</code> new ones, which is 3 R processes with the defaults. Old copies that still have visitors run until <code>drain-timeout</code>. On a small machine, set <code>warm-replicas: 0</code>, a shorter <code>drain-timeout</code>, or use <code>--now</code>.</p>
 
 <h2 id="logs">Logs</h2>
