@@ -414,6 +414,8 @@ func TestDescribeMachine(t *testing.T) {
 			"this machine is low on memory (memory pressure: warning): swap 12.4G used"},
 		{"mac without swap", api.MachineMemory{Low: true, TotalBytes: g(32), AvailableBytes: g(2.88), Pressure: "critical"},
 			"this machine is low on memory (memory pressure: critical): 9% of 32.0G free"},
+		{"mac unknown level in a spell", api.MachineMemory{Low: true, TotalBytes: g(32), Pressure: "unknown"},
+			"this machine is low on memory (memory pressure: unknown)"},
 		{"mac with neither", api.MachineMemory{Low: true, TotalBytes: g(32), Pressure: "warning"},
 			"this machine is low on memory (memory pressure: warning)"},
 		{"mac never shows a stall", api.MachineMemory{Low: true, TotalBytes: g(32), AvailableBytes: g(2.88), StallPercent: 50, Pressure: "warning"},

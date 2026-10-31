@@ -113,7 +113,8 @@ type MachineMemory struct {
 	// not provide it. Linux only.
 	StallPercent int `json:"stall-percent,omitempty"`
 
-	// Pressure is the kernel's level on macOS: normal, warning or critical.
+	// Pressure is the kernel's level on macOS: normal, warning or critical,
+	// or unknown for a level this build does not know.
 	Pressure string `json:"pressure,omitempty"`
 }
 
