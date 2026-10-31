@@ -41,11 +41,11 @@ func TestWriteStatus(t *testing.T) {
 	two := 2
 	zero := 0
 	resp := api.StatusResponse{
-		BalancerRSS: 41 << 20,
+		BalancerMemory: 41 << 20,
 		Apps: []api.AppStatus{
 			{Name: "my-app", Port: 8080, Replicas: 1, WarmReplicas: 1, Copies: []api.CopyStatus{
-				{Copy: 1, Role: "active", PID: 61429, Alive: true, Ready: true, StartedAt: started, RSSBytes: 142 << 20, Sessions: &two},
-				{Copy: 2, Role: "warm", PID: 61430, Alive: true, Ready: true, StartedAt: started.Add(time.Second), RSSBytes: 139 << 20, Sessions: &zero},
+				{Copy: 1, Role: "active", PID: 61429, Alive: true, Ready: true, StartedAt: started, MemoryBytes: 142 << 20, Sessions: &two},
+				{Copy: 2, Role: "warm", PID: 61430, Alive: true, Ready: true, StartedAt: started.Add(time.Second), MemoryBytes: 139 << 20, Sessions: &zero},
 			}},
 			{Name: "flaky", Port: 8081, Copies: []api.CopyStatus{{Copy: 1, CrashCount: 3}}},
 			{Name: "parked", Port: 8082, Stopped: true},
@@ -235,15 +235,15 @@ func TestSpareNote(t *testing.T) {
 
 func TestMemoryLine_Draining(t *testing.T) {
 	two := 2
-	active := api.CopyStatus{Copy: 3, Role: "active", Alive: true, Ready: true, RSSBytes: 100 << 20, Sessions: &two}
-	draining := api.CopyStatus{Copy: 1, Role: "draining", Alive: true, Ready: true, RSSBytes: 100 << 20, Sessions: &two}
+	active := api.CopyStatus{Copy: 3, Role: "active", Alive: true, Ready: true, MemoryBytes: 100 << 20, Sessions: &two}
+	draining := api.CopyStatus{Copy: 1, Role: "draining", Alive: true, Ready: true, MemoryBytes: 100 << 20, Sessions: &two}
 	for _, tc := range []struct {
 		name   string
 		copies []api.CopyStatus
 		want   string
 	}{
 		{"only draining", []api.CopyStatus{active, draining}, "Memory: 200M in 2 R processes (1 draining)."},
-		{"warm and draining", []api.CopyStatus{active, {Copy: 4, Role: "warm", Alive: true, Ready: true, RSSBytes: 100 << 20}, draining}, "Memory: 300M in 3 R processes (1 warm, 1 draining)."},
+		{"warm and draining", []api.CopyStatus{active, {Copy: 4, Role: "warm", Alive: true, Ready: true, MemoryBytes: 100 << 20}, draining}, "Memory: 300M in 3 R processes (1 warm, 1 draining)."},
 		{"a dead draining copy is not counted", []api.CopyStatus{active, {Copy: 1, Role: "draining"}}, "Memory: 100M in 1 R process."},
 	} {
 		if got := memoryLine(api.StatusResponse{Apps: []api.AppStatus{{Name: "a", Copies: tc.copies}}}); got != tc.want {

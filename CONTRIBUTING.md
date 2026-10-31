@@ -128,7 +128,7 @@ Pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs
 GitHub Release with an archive for each of `linux`/`darwin` × `amd64`/`arm64`,
 plus a `checksums.txt`. An archive unpacks into a folder of its own
 (`shinyctl_0.1.0_linux_arm64/`) with the binary, `README.md`, `LICENSE`,
-`THIRD_PARTY_NOTICES` and the example in `examples/hello`. The notices are
+`THIRD_PARTY_NOTICES` and the examples in `examples/`. The notices are
 made by `tools/notices` from the licenses of every module the binary is built
 from; it fails when a module has none. Builds use `-trimpath` and the commit's
 time, so the same commit gives the same files.

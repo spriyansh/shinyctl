@@ -6,9 +6,11 @@ package cmd
 import (
 	"cmp"
 	"encoding/json"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/api"
@@ -17,6 +19,16 @@ import (
 	"github.com/spriyansh/shinyctl/internal/reconcile"
 	"github.com/spriyansh/shinyctl/internal/state"
 )
+
+// memoryOf measures the processes status shows; a variable so that the tests
+// can make it fail.
+var memoryOf = process.Memory
+
+// memoryWarned says the log already has a line about memory that could not be
+// measured. Status is asked for every few seconds by a watching CLI, and a
+// line each time would bury the log; so one line per spell, a spell ending
+// with the next call that measures everything.
+var memoryWarned atomic.Bool
 
 // handleStatus reports on every app appRegistry knows about — every spec
 // ever applied to this user's shinyctl-api and not since forgotten, across
@@ -119,20 +131,29 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Only processes that passed the identity check are measured, so a
 	// recorded PID that now belongs to something else never shows that
-	// process's memory. One ps call for all of them and the load balancer.
+	// process's memory. One measurement for all of them and the load
+	// balancer, so that a process spawn per app doesn't add up.
 	balancer := gateway.BalancerPID()
 	if balancer > 0 {
 		alivePIDs = append(alivePIDs, balancer)
 	}
-	rss := process.RSS(alivePIDs)
+	memory, err := memoryOf(alivePIDs)
+	if err != nil {
+		// Handlers run concurrently, one goroutine per connection.
+		if memoryWarned.CompareAndSwap(false, true) {
+			log.Printf("memory: %v", err)
+		}
+	} else {
+		memoryWarned.Store(false)
+	}
 	for i := range resp.Apps {
 		for j := range resp.Apps[i].Copies {
 			if c := &resp.Apps[i].Copies[j]; c.Alive {
-				c.RSSBytes = rss[c.PID]
+				c.MemoryBytes = memory[c.PID]
 			}
 		}
 	}
-	resp.BalancerRSS = rss[balancer]
+	resp.BalancerMemory = memory[balancer]
 	resp.BalancerStarting = gateway.Starting()
 
 	w.Header().Set("Content-Type", "application/json")

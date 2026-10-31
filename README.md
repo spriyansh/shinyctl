@@ -63,7 +63,8 @@ mkdir -p ~/.local/bin && cp shinyctl_0.1.0_linux_arm64/shinyctl ~/.local/bin/
 
 The other archives are `linux_amd64`, `darwin_arm64` (Apple silicon) and
 `darwin_amd64`. Each unpacks into a folder of its own with `shinyctl`, this
-README, the license and notices, and the example in `examples/hello`.
+README, the license and notices, and the examples in `examples/hello` and
+`examples/memory`.
 
 - On Debian and Ubuntu, `~/.local/bin` is on your `PATH` after your next
   login. On macOS, add `export PATH="$HOME/.local/bin:$PATH"` to
@@ -95,9 +96,9 @@ Memory: 281M in 2 R processes (1 warm), plus 41M for the load balancer.
 
 Open `http://127.0.0.1:8080` (the `port` in your manifest).
 
-## Try the example
+## Try the examples
 
-The example app is in the archive, in `examples/hello`, and in this repo.
+The example apps are in the archive, in `examples/`, and in this repo.
 From the unpacked archive folder:
 
 ```sh
@@ -116,6 +117,20 @@ printed, including the crash. Remove the app with
 If something else on the machine already uses port 8765, `apply` says so and
 `status` shows `port-in-use`. Change `port` in `examples/hello/shinyctl.yaml`
 and apply again.
+
+`examples/memory` is an app whose memory grows when you ask it to, for
+watching the `MEM` column:
+
+```sh
+shinyctl apply -f examples/memory/shinyctl.yaml
+```
+
+Open http://127.0.0.1:8766 and click **Add 1 GB**: `shinyctl status` shows
+the copy serving the page about 1 GB bigger, while the other copy stays as it
+was. **Grow until stopped** adds 100 MB a second, up to `MAX_MB` in the
+example's manifest (1024 MB), and **Free it** gives the memory back. The
+memory belongs to the R process, so closing the page keeps it. Keep `MAX_MB`
+below the machine's free memory.
 
 ## How it works
 
@@ -316,8 +331,13 @@ The columns:
     crash, and the next check tries again.
 - `READY` turns from `starting` to `ready` once the copy's R process accepts
   connections and the load balancer lists it.
-- `MEM` is the resident memory of the copy's main R process; worker
-  processes it started aren't counted.
+- `MEM` is the memory the copy's main R process takes, counting what the
+  system has compressed or swapped out: on macOS the number Activity Monitor
+  shows, on Linux resident plus swapped memory (`VmRSS` + `VmSwap`). On an
+  idle Mac it can be lower than `ps` shows, and under memory pressure much
+  higher. Worker processes the copy started aren't counted. When the number
+  can't be read, `MEM` falls back to resident memory from `ps`, or shows `-`,
+  and `api.log` says why.
 - `SESSIONS` is the number of requests open to the copy, a Shiny session
   being one open WebSocket.
 - `CRASHES` counts crashes in a row: it goes back to `-` once the copy has
@@ -325,8 +345,9 @@ The columns:
 
 Under the table, `status` says what the table can't:
 
-- a `Memory:` line with the total of the running copies, plus about 40 MB for
-  the load balancer, which isn't counted in any copy;
+- a `Memory:` line with the total of the running copies, plus the load
+  balancer, which isn't counted in any copy (about 40 MB on Linux, 12 MB on a
+  Mac);
 - an app's port that is not served, and why;
 - an app that was not started, and why;
 - a redeploy that has not taken over yet: which copy is starting, and, if the
