@@ -34,6 +34,7 @@ const (
 func RecordExit(app state.AppState, exit process.Exit) state.AppState {
 	app.LastExitAt = exit.At
 	app.LastExitFailed = exit.Failed
+	app.LastExitReason = string(exit.Reason)
 
 	switch {
 	case !exit.Failed:

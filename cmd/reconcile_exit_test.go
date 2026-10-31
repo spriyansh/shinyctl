@@ -290,3 +290,42 @@ func TestSeen_DroppedWhenTheAppIsDeleted(t *testing.T) {
 		t.Error("the entry survived the delete")
 	}
 }
+
+// TestReconcile_ExitReasonIsCarriedAndCleared: the reason of the last exit
+// stays with the copy through the restart it caused, as the crash count does,
+// and an explicit apply clears it with the rest of the exit history.
+func TestReconcile_ExitReasonIsCarriedAndCleared(t *testing.T) {
+	useFakeRscript(t)
+	spec := newTestSpec(t, t.TempDir(), "app", "app.R", freePorts(t, 1)[0])
+	var a, b state.AppState
+	t.Cleanup(func() {
+		postJSON(t, handleDelete, spec)
+		killIfAlive(spec, a)
+		killIfAlive(spec, b)
+	})
+	a = deadRecord(t, spec)
+	a.StartedAt = time.Now().Add(-10 * time.Second)
+	a.CrashCount, a.LastExitAt, a.LastExitFailed, a.LastExitReason = 1, time.Now().Add(-5*time.Second), true, "oom"
+	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{a}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !reconcileApp(spec.AppStateFile) {
+		t.Fatal("the copy was not started again")
+	}
+	b = loadApp(t, spec)
+	if b.PID == a.PID || b.CrashCount != 1 || b.LastExitReason != "oom" {
+		t.Fatalf("restarted copy = %+v, want a new process that keeps its crash and its reason", b)
+	}
+	waitServed(t, spec, b.PID)
+
+	unlock := state.Lock(spec.AppStateFile)
+	_, err := reconcileLocked(spec, reconcileOpts{explicit: true})
+	unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadApp(t, spec); got.CrashCount != 0 || got.LastExitReason != "" || !got.LastExitAt.IsZero() {
+		t.Errorf("after an explicit cycle = %+v, want the exit history cleared", got)
+	}
+}

@@ -155,7 +155,7 @@ func moveTakenPorts(spec manifest.AppSpec, st *state.State, views []reconcile.Co
 		}
 		portMoves.Store(ck, n+1)
 		forgetSeen(spec.AppStateFile, rec.Copy)
-		moved := state.AppState{Copy: rec.Copy, Port: rec.Port, CrashCount: rec.CrashCount, LastExitAt: rec.LastExitAt, LastExitFailed: rec.LastExitFailed}
+		moved := state.AppState{Copy: rec.Copy, Port: rec.Port, CrashCount: rec.CrashCount, LastExitAt: rec.LastExitAt, LastExitFailed: rec.LastExitFailed, LastExitReason: rec.LastExitReason}
 		st.Put(moved)
 		views[i] = reconcile.CopyView{App: moved, SessionsKnown: v.SessionsKnown}
 		changed = true

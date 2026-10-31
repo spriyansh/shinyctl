@@ -355,6 +355,30 @@ func TestRecordExit(t *testing.T) {
 	})
 }
 
+func TestRecordExit_Reason(t *testing.T) {
+	now := time.Now()
+	app := state.AppState{StartedAt: now.Add(-time.Second)}
+
+	app = RecordExit(app, process.Exit{At: now, Failed: true, Reason: process.ExitOOM})
+	if app.LastExitReason != "oom" || app.CrashCount != 1 || !app.LastExitFailed {
+		t.Fatalf("after a kill for memory: %+v", app)
+	}
+
+	t.Run("a later crash clears it", func(t *testing.T) {
+		got := RecordExit(app, process.Exit{At: now, Failed: true})
+		if got.LastExitReason != "" || got.CrashCount != 2 {
+			t.Errorf("after a crash: %+v", got)
+		}
+	})
+
+	t.Run("a later clean exit clears it", func(t *testing.T) {
+		got := RecordExit(app, process.Exit{At: now})
+		if got.LastExitReason != "" || got.CrashCount != 0 {
+			t.Errorf("after a clean exit: %+v", got)
+		}
+	})
+}
+
 func TestChangedFields(t *testing.T) {
 	record := startedFrom(fullSpec, nil)
 

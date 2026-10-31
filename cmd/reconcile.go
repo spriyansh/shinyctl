@@ -159,8 +159,8 @@ func reconcileLocked(spec manifest.AppSpec, o reconcileOpts) (api.ApplyResponse,
 	dirty := false
 	if o.explicit {
 		for _, rec := range st.Copies() {
-			if rec.CrashCount != 0 || !rec.LastExitAt.IsZero() || rec.LastExitFailed {
-				rec.CrashCount, rec.LastExitAt, rec.LastExitFailed = 0, time.Time{}, false
+			if rec.CrashCount != 0 || !rec.LastExitAt.IsZero() || rec.LastExitFailed || rec.LastExitReason != "" {
+				rec.CrashCount, rec.LastExitAt, rec.LastExitFailed, rec.LastExitReason = 0, time.Time{}, false, ""
 				st.Put(rec)
 				dirty = true
 			}
@@ -420,6 +420,7 @@ func launchCopy(spec manifest.AppSpec, st *state.State, n int) error {
 		newApp.CrashCount = old.CrashCount
 		newApp.LastExitAt = old.LastExitAt
 		newApp.LastExitFailed = old.LastExitFailed
+		newApp.LastExitReason = old.LastExitReason
 	}
 	st.Put(newApp)
 	if err := state.Save(spec.AppStateFile, *st); err != nil {
