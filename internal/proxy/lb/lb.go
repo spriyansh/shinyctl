@@ -6,10 +6,11 @@
 // reload of the settings. A reload rebinds every listener and drops the
 // connections that arrive while it runs; a table update touches none.
 //
-// The table is a package global: the engine builds new module instances on
-// every reload, and the table must outlive them. Tests in this package and
-// in internal/proxy share it, so they must never call t.Parallel, and they
-// reset it with Set(nil) when they are done.
+// The table and the set of active connections (active) are package globals:
+// the engine builds new module instances on every reload, and they must
+// outlive them. Tests in this package and in internal/proxy share them, so
+// they must never call t.Parallel, and they reset the table with Set(nil)
+// when they are done.
 package lb
 
 import (

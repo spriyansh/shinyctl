@@ -140,8 +140,10 @@ func Run(configPath string, after int) error {
 
 	// The engine closes its listeners at once on a stop, but answers the
 	// requests in flight in goroutines that nothing waits for before the
-	// process exits, so wait for them here (WebSockets are not counted: they
-	// end now). Both waits share stopTimeout.
+	// process exits, so wait here until every response is written. An open
+	// WebSocket is not waited for: it ends now. An upgrade the app has not
+	// answered yet is, like any request, up to stopTimeout. Both waits share
+	// stopTimeout.
 	deadline := time.Now().Add(stopTimeout)
 	stopped := make(chan struct{})
 	go func() {

@@ -224,7 +224,8 @@ type errorsConfig struct {
 	Routes []route `json:"routes"`
 }
 
-// inFlightHandler counts the requests being answered (see lb.InFlight).
+// inFlightHandler is what makes lb.InFlight count the requests being
+// answered: it registers the connection hook on its server.
 type inFlightHandler struct {
 	Handler string `json:"handler"`
 }
