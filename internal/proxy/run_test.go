@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/spriyansh/shinyctl/internal/proxy/lb"
 )
 
@@ -732,6 +734,101 @@ func inFlightGets(app App, n int) <-chan string {
 		}()
 	}
 	return results
+}
+
+// slowFinish is a handler for tests: it lets the handlers after it finish and
+// then waits before returning, which holds the response in net/http's buffer
+// for that long. The subprocess is this test binary, so registering it here
+// is enough for the subprocess to load it from a config.
+type slowFinish struct {
+	Delay caddy.Duration `json:"delay"`
+}
+
+func init() { caddy.RegisterModule(slowFinish{}) }
+
+func (slowFinish) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "http.handlers.shinyctl_test_slow_finish",
+		New: func() caddy.Module { return new(slowFinish) },
+	}
+}
+
+func (h slowFinish) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	err := next.ServeHTTP(w, r)
+	time.Sleep(time.Duration(h.Delay))
+	return err
+}
+
+var _ caddyhttp.MiddlewareHandler = slowFinish{}
+
+// withSlowFinish returns cfg with slowFinish first in the handlers of every
+// server's route. It must come before shinyctl_inflight, so that the count
+// would drop (in the old counting) while slowFinish is still sleeping.
+func withSlowFinish(t *testing.T, cfg []byte, d time.Duration) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatal(err)
+	}
+	servers := doc["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)
+	for _, v := range servers {
+		route := v.(map[string]any)["routes"].([]any)[0].(map[string]any)
+		handle := route["handle"].([]any)
+		route["handle"] = append([]any{map[string]any{
+			"handler": "shinyctl_test_slow_finish",
+			"delay":   int64(d),
+		}}, handle...)
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// A stop that lands after the handlers have returned but before the response
+// is written does not cut that response: the upstream answers at once, and a
+// handler in front holds each response back for 300 ms.
+func TestRun_StopWaitsForTheResponseToBeWritten(t *testing.T) {
+	const delay = 300 * time.Millisecond
+	var arrived atomic.Int32
+	up := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived.Add(1)
+		io.WriteString(w, "up")
+	}))
+	app := servedApp(t, "a", freePort(t), up)
+	home, _, s := proxyHome(t, app)
+	cfg, err := os.ReadFile(s.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.ConfigPath, withSlowFinish(t, cfg, delay), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := startSubproxyAt(t, s.ConfigPath, home)
+	p.waitAnswering(t, Admin{Socket: s.AdminSocket})
+	if code, _, _ := get(t, appURL(app)); code != 200 {
+		t.Fatalf("not serving: %d", code)
+	}
+	arrived.Store(0)
+	results := inFlightGets(app, 6)
+	// All six are through the upstream, so each is now held by slowFinish
+	// with its response not yet written.
+	waitFor(t, "all six requests to reach the upstream", 10*time.Second, func() bool { return arrived.Load() == 6 })
+	signalled := time.Now()
+	p.signal(syscall.SIGTERM)
+	<-p.exited
+	if took := time.Since(signalled); took > delay+500*time.Millisecond {
+		t.Errorf("the load balancer took %s to go, want it soon after the responses were written", took)
+	}
+	if p.err != nil {
+		t.Errorf("exit = %v, want a clean exit", p.err)
+	}
+	for i := 0; i < 6; i++ {
+		if got := <-results; got != "200" {
+			t.Errorf("a request whose handlers had returned at SIGTERM got %s, want 200", got)
+		}
+	}
 }
 
 // A request that takes longer than stopTimeout is cut at about stopTimeout,
