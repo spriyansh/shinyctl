@@ -38,6 +38,14 @@ import (
 // would be a data race. They use the package's in-memory instance, key each
 // app by their own temp state file, and clean up through handleDelete,
 // which forgets the app.
+//
+// The same goes for the machine global, the watch of the machine's memory.
+// Tests of its decision, its log and its loop use a machineWatch of their
+// own. Handler tests write the global only synchronously: resetMachine clears
+// it with the locked clear method, and again when the test ends, and the test
+// sets a reading with the locked set method. Never observe, which logs, and
+// never a struct assignment, which skips the lock.
+
 // testAdmin talks to the test load balancer's control socket, to look at what
 // it holds rather than at what the gateway believes.
 var testAdmin proxy.Admin

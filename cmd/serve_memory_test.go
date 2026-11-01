@@ -114,7 +114,17 @@ func TestMemory_OverTheLimitIsKilledAndTheWarmCopyTakesOver(t *testing.T) {
 	_, cookie := visit(t, spec, nil)
 
 	stub := &memoryStub{sizes: map[int]int64{active.PID: 200 * mib, warm.PID: 10 * mib}}
-	if pending := runOnce(t, stub); len(pending) != 0 {
+
+	// The app's state lock keeps reconcile cycles out from the kill to the
+	// look at the pool. The warm copy's ready-watcher can still have a cycle
+	// to run after waitRoles, and a cycle that observed the copies before the
+	// kill puts the pool it computed back until the next one. The loop never
+	// takes the lock.
+	unlock := state.Lock(spec.AppStateFile)
+	pending := runOnce(t, stub)
+	p, _ := gateway.Pool(spec.AppStateFile)
+	unlock()
+	if len(pending) != 0 {
 		t.Errorf("the run asks for a reconcile of %+v, but the copy is watched", pending)
 	}
 	if len(stub.asked) != 1 || len(stub.asked[0]) != 2 {
@@ -122,7 +132,7 @@ func TestMemory_OverTheLimitIsKilledAndTheWarmCopyTakesOver(t *testing.T) {
 	}
 
 	// Before any reconcile: the loop itself gave the visitors to the warm copy.
-	if p, _ := gateway.Pool(spec.AppStateFile); !slices.Equal(p.Active, []string{dialOf(warm)}) || len(p.Warm) != 0 {
+	if !slices.Equal(p.Active, []string{dialOf(warm)}) || len(p.Warm) != 0 {
 		t.Errorf("pool = %+v right after the kill, want only the warm copy, active", p)
 	}
 	if pid, set := visit(t, spec, cookie); pid != warm.PID || set == nil || set.Name != proxy.CookieName(spec.Port) || set.Value == cookie.Value {

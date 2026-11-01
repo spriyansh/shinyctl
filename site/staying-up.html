@@ -126,6 +126,7 @@ memory: copy 1 was killed for going over max-memory (512M); it starts again afte
   <li><b>On Linux, <code>MEM</code> counts the files and libraries a copy has mapped too</b>, which the system can reclaim, so leave the limit some room above what the app needs.</li>
   <li><b>Measuring costs CPU on macOS:</b> a few percent of a core for an app with one copy and a spare, about a third of a core with 16 copies and a spare. On Linux it costs next to nothing, and apps without a limit are not measured.</li>
 </ul>
+<p>When the whole machine runs low on memory, whatever holds it, <code>status</code> says so under the <code>Memory:</code> line (<a href="production.html#memory">more</a>).</p>
 <p>The <a href="install.html#example">memory example</a> grows until it goes over its limit of 512M.</p>
 
 <h2 id="redeploy">Redeploys</h2>

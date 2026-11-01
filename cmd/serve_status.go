@@ -159,6 +159,9 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.BalancerMemory = memory[balancer]
 	resp.BalancerStarting = gateway.Starting()
+	if m, ok := machine.current(); ok {
+		resp.MachineMemory = &m
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

@@ -370,6 +370,13 @@ Under the table, `status` says what the table can't:
 - a `Memory:` line with the total of the running copies, plus the load
   balancer, which isn't counted in any copy (about 40 MB on Linux, 12 MB on a
   Mac);
+- right under it, when the machine is low on memory, a line that says how
+  much is available and how much swap is used (on macOS, the memory pressure
+  level and how much the system counts as free), and what to do: stop an
+  app, set `max-memory`, or lower `warm-replicas`. It is about the whole
+  machine, other programs included. `apply` and `restart` print it as a
+  warning too, and `api.log` says when the machine becomes low and when it
+  no longer is;
 - an app's port that is not served, and why;
 - an app that was not started, and why;
 - a redeploy that has not taken over yet: which copy is starting, and, if the
@@ -560,6 +567,29 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
   the app needs.
 - **A copy the Linux kernel kills for lack of memory** is a crash like any
   other: `status` doesn't say it was memory.
+- **The low-memory line goes by the system's own figures**, read about once
+  a second. On Linux the machine is low when less than 10% of its memory is
+  available (`MemAvailable` in `/proc/meminfo`), and no longer low at 15%.
+  On macOS it is low while the memory pressure is at warning or critical,
+  which can come while the system still counts a good part of memory as
+  free. The line doesn't say which programs hold the memory, and an older
+  `shinyctl-api` never shows it.
+- **On Linux, the machine also counts as low when a process was waiting for
+  memory 20% or more of the last minute**, while less than a quarter of its
+  memory is available. This comes from the kernel's pressure stall
+  information (`/proc/pressure/memory`).
+  - It no longer counts once the waiting is under 10%, which can be a minute
+    after the waiting stopped.
+  - Raspberry Pi OS and kernels booted with `psi=0` don't provide it; then
+    only available memory counts.
+  - In a container the figure is the whole machine's, and a container
+    waiting inside its own memory limit isn't counted while the machine has
+    memory to spare.
+- **A memory limit the system sets on shinyctl isn't seen.** Under a cgroup
+  limit (systemd `MemoryMax`, `docker --memory`), the kernel kills copies at
+  that limit while the machine looks fine to `status`.
+- **On a ZFS machine, the ZFS cache (ARC) isn't counted as available**, so
+  the machine can look low on memory when it isn't.
 - **A drain ends at `drain-timeout`.** Sessions still open then are cut;
   pages with the example's script reload onto the new version.
 - **A tab left open is a session**, and so is a visitor whose connection

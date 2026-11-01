@@ -12,6 +12,7 @@ import (
 	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/manifest"
 	"github.com/spriyansh/shinyctl/internal/process"
+	"github.com/spriyansh/shinyctl/internal/reconcile"
 )
 
 var manifestFile string
@@ -56,6 +57,7 @@ var applyCmd = &cobra.Command{
 
 		fmt.Println(resp.Message)
 		warnIfLimitIgnored(os.Stderr, spec, resp)
+		warnIfMachineLow(os.Stderr, resp)
 		return nil
 	},
 }
@@ -67,6 +69,20 @@ func warnIfLimitIgnored(w io.Writer, spec manifest.AppSpec, resp api.ApplyRespon
 	if spec.EffectiveMaxMemory() > 0 && resp.MaxMemoryBytes == 0 {
 		fmt.Fprintln(w, "warning: shinyctl-api is an older build and ignores max-memory; restart it and apply again")
 	}
+}
+
+// warnIfMachineLow says so when shinyctl-api found the machine low on memory
+// while it answered. Copies that were just started need memory too, which is
+// the point of saying it now.
+func warnIfMachineLow(w io.Writer, resp api.ApplyResponse) {
+	if resp.MachineMemory == nil || !resp.MachineMemory.Low {
+		return
+	}
+	line := "warning: " + describeMachine(*resp.MachineMemory)
+	if resp.Action == reconcile.ActionStart || resp.Action == reconcile.ActionRestart {
+		line += "; the copies just started need memory too"
+	}
+	fmt.Fprintln(w, line)
 }
 
 func init() {

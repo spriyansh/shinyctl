@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/manifest"
 	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/state"
@@ -694,5 +695,45 @@ func TestCLI_ControlCharacterIsRefusedBeforeContactingTheDaemon(t *testing.T) {
 		if asked {
 			t.Errorf("%s asked for shinyctl-api before checking the manifest", command)
 		}
+	}
+}
+
+// TestHandleApply_CarriesTheMachinesMemoryOnlyWhenLow: the reply of apply and
+// restart has the reading when the machine is low, and not otherwise.
+func TestHandleApply_CarriesTheMachinesMemoryOnlyWhenLow(t *testing.T) {
+	useFakeRscript(t)
+	resetMachine(t)
+	spec := copiesSpec(t, "app", 1, 0)
+	cleanupApp(t, spec)
+
+	reply := func(handler http.HandlerFunc) api.ApplyResponse {
+		t.Helper()
+		rec := postJSON(t, handler, spec)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var resp api.ApplyResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	machine.set(process.MachineMemory{TotalBytes: 4 << 30, AvailableBytes: 300 << 20, SwapTotalBytes: 2 << 30, SwapUsedBytes: 1 << 30}, true)
+	if got := reply(handleApply).MachineMemory; got == nil || !got.Low || got.AvailableBytes != 300<<20 {
+		t.Errorf("apply, low: machine-memory = %+v", got)
+	}
+	if got := reply(handleRestart).MachineMemory; got == nil || !got.Low {
+		t.Errorf("restart, low: machine-memory = %+v", got)
+	}
+
+	machine.set(process.MachineMemory{TotalBytes: 4 << 30, AvailableBytes: 3 << 30}, false)
+	if got := reply(handleApply).MachineMemory; got != nil {
+		t.Errorf("apply, healthy: machine-memory = %+v, want none", got)
+	}
+
+	machine.clear()
+	if got := reply(handleRestart).MachineMemory; got != nil {
+		t.Errorf("restart, no reading: machine-memory = %+v, want none", got)
 	}
 }
