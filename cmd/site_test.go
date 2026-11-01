@@ -4,6 +4,7 @@ Copyright © 2026 Priyansh Srivastava <priyansh@metapriyansh.com>
 package cmd
 
 import (
+	"image/png"
 	"os"
 	"path"
 	"path/filepath"
@@ -173,5 +174,72 @@ func TestSiteMatchesTheREADME(t *testing.T) {
 	}
 	if !strings.Contains(files["index.html"], install) {
 		t.Errorf("index.html does not show the install command %q", install)
+	}
+}
+
+// TestSitePagesHaveALinkPreview: a link to any page unfurls, in chat apps
+// and on social sites, into the page's title, its description and the
+// social image, and the image is the size those sites expect. The absolute
+// URLs point at the published site, since crawlers don't resolve relative
+// ones.
+func TestSitePagesHaveALinkPreview(t *testing.T) {
+	const base = "https://spriyansh.github.io/shinyctl/"
+	pages := sitePages(t)
+	tag := func(page, attr, name string) string {
+		m := regexp.MustCompile(`<meta ` + attr + `="` + regexp.QuoteMeta(name) + `" content="([^"]*)">`).FindStringSubmatch(page)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	for name, page := range pages {
+		url := base + name
+		if name == "index.html" {
+			url = base
+		}
+		title := regexp.MustCompile(`<title>(.*?)</title>`).FindStringSubmatch(page)
+		if title == nil || tag(page, "property", "og:title") != title[1] {
+			t.Errorf("%s: og:title is not the page's title", name)
+		}
+		if tag(page, "property", "og:description") == "" || tag(page, "name", "description") == "" {
+			t.Errorf("%s: has no description for a link preview", name)
+		}
+		if got := tag(page, "property", "og:url"); got != url {
+			t.Errorf("%s: og:url is %q, want %q", name, got, url)
+		}
+		if !strings.Contains(page, `<link rel="canonical" href="`+url+`">`) {
+			t.Errorf("%s: has no canonical link to %s", name, url)
+		}
+		if got := tag(page, "property", "og:image"); got != base+"assets/social.png" {
+			t.Errorf("%s: og:image is %q", name, got)
+		}
+		if tag(page, "property", "og:image:alt") == "" {
+			t.Errorf("%s: og:image has no alt text", name)
+		}
+		if tag(page, "name", "twitter:card") != "summary_large_image" {
+			t.Errorf("%s: twitter:card is not summary_large_image", name)
+		}
+		for _, rel := range []string{"icon", "apple-touch-icon"} {
+			if !regexp.MustCompile(`<link rel="` + rel + `" href="assets/[^"]+"`).MatchString(page) {
+				t.Errorf("%s: has no %s link", name, rel)
+			}
+		}
+	}
+	f, err := os.Open("../site/assets/social.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	img, err := png.DecodeConfig(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Width != 1200 || img.Height != 630 {
+		t.Errorf("social.png is %dx%d, want 1200x630", img.Width, img.Height)
+	}
+	for name, page := range pages {
+		if w, h := tag(page, "property", "og:image:width"), tag(page, "property", "og:image:height"); w != "1200" || h != "630" {
+			t.Errorf("%s: og:image:width/height are %s/%s", name, w, h)
+		}
 	}
 }
