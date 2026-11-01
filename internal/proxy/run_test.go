@@ -715,7 +715,7 @@ func TestRun_StopAnswersTheRequestsInFlight(t *testing.T) {
 }
 
 // inFlightGets starts n requests on connections of their own and returns a
-// channel of their outcomes: the status, or "error".
+// channel of their outcomes: the status, or "error: " and what went wrong.
 func inFlightGets(app App, n int) <-chan string {
 	results := make(chan string, n)
 	client := &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
@@ -723,7 +723,7 @@ func inFlightGets(app App, n int) <-chan string {
 		go func() {
 			resp, err := client.Get(appURL(app))
 			if err != nil {
-				results <- "error"
+				results <- "error: " + err.Error()
 				return
 			}
 			io.Copy(io.Discard, resp.Body)
@@ -781,7 +781,7 @@ func TestRun_StopWaitsNoLongerThanStopTimeout(t *testing.T) {
 		t.Errorf("the load balancer took %s to go, want about the stop timeout (1s)", took)
 	}
 	for i := 0; i < 3; i++ {
-		if got := <-results; got != "error" {
+		if got := <-results; !strings.HasPrefix(got, "error") {
 			t.Errorf("a request that outlasts the stop timeout got %s, want it cut", got)
 		}
 	}
@@ -877,7 +877,7 @@ func TestRun_StopAnswersARequestThatOffersH2c(t *testing.T) {
 			req.Header.Set("HTTP2-Settings", "AAMAAABkAAQAAP__")
 			resp, err := client.Do(req)
 			if err != nil {
-				results <- "error"
+				results <- "error: " + err.Error()
 				return
 			}
 			io.Copy(io.Discard, resp.Body)
