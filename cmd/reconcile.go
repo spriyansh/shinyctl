@@ -161,6 +161,12 @@ func poolOf(plan reconcile.Plan, st state.State) proxy.Pool {
 // process for up to 12 seconds), and a copy about to be stopped gets no new
 // visitors.
 func reconcileLocked(spec manifest.AppSpec, o reconcileOpts) (api.ApplyResponse, error) {
+	// Under the state lock, so a cycle that was waiting for it while
+	// /shutdown stopped the app starts nothing.
+	if shuttingDown.Load() {
+		return api.ApplyResponse{}, errShuttingDown
+	}
+
 	st, err := state.Load(spec.AppStateFile)
 	if err != nil {
 		return api.ApplyResponse{}, err

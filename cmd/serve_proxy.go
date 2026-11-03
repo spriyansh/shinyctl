@@ -242,6 +242,11 @@ func syncProxy(stateFile string) error {
 // about the load balancer as a whole, appErr about the app at stateFile alone
 // (its address is taken, by a program or by another app).
 func syncProxyApp(stateFile string) (appErr, err error) {
+	// The load balancer is being stopped: a table pushed now would only
+	// race with that.
+	if shuttingDown.Load() {
+		return nil, nil
+	}
 	left, err := gateway.Sync(desiredApps())
 	if err != nil {
 		return nil, err

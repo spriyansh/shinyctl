@@ -67,6 +67,13 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 	unlock := state.Lock(spec.AppStateFile)
 	defer unlock()
 
+	// Before anything is remembered: an app recorded now would start at the
+	// next shinyctl-api, not at this request's word.
+	if shuttingDown.Load() {
+		http.Error(w, errShuttingDown.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
 	// Before anything changes: a move onto a port the load balancer can't
 	// take leaves the app serving where it is, with the old manifest.
 	if err := checkMove(spec); err != nil {
