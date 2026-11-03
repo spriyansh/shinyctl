@@ -189,10 +189,13 @@ func TestPortIsOurs_UnknownIsRememberedForAWhile(t *testing.T) {
 // a page that a stranger answered.
 func TestReadyWatcher_ATakenPortIsMovedBeforeThePageIsAsked(t *testing.T) {
 	useFakeRscript(t)
-	var target atomic.Int64
+	// The first process's port is another program's. Its pid is known only
+	// once apply has answered, and on a slow machine the port can open before
+	// that: until then, every port is taken to be another program's.
+	var first atomic.Int64
 	useHooks(t, hooks{
 		Owner: func(pid, port int) process.Owner {
-			if int64(pid) == target.Load() {
+			if f := first.Load(); f == 0 || int64(pid) == f {
 				return process.OwnerOther
 			}
 			return process.OwnerSelf
@@ -203,7 +206,7 @@ func TestReadyWatcher_ATakenPortIsMovedBeforeThePageIsAsked(t *testing.T) {
 	cleanupApp(t, spec)
 	buf := captureLog(t)
 	a := applyOK(t, spec)
-	target.Store(int64(a.PID)) // the port opens later
+	first.Store(int64(a.PID))
 
 	// No ticks: the watcher's own cycle does it.
 	waitUntil(t, "the copy to be moved", 3*time.Second, func() bool {
