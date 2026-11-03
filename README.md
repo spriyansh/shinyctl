@@ -143,6 +143,11 @@ free memory.
   load balancer, a process of its own, listens on each app's port and sends
   every request to one of the app's copies. Apps and the load balancer keep
   running if `shinyctl-api` dies; a new `shinyctl-api` adopts them.
+- **Ready.** A copy is ready once its page answers: when its R process
+  accepts connections, `shinyctl-api` asks it for `/` once, and any answer
+  below 500 makes it ready for the life of the process. A copy whose page
+  errors, or has not answered yet, gets no visitors; `status` says which
+  copy and where to look (see `shinyctl status`).
 - **Copies and roles.** Of the copies that are running and ready, the oldest
   `replicas` are *active* and take new visitors. The rest are *warm*:
   running, ready, and given no new visitors while every active copy is up
@@ -185,9 +190,9 @@ free memory.
     reloaded.
   - An old copy with no sessions stops within about 15 seconds.
   - For the few seconds the new spare takes to start the app has no spare.
-  - A new version that fails at start never takes over: the old copies
-    keep serving, and `status` says which copy doesn't start and where to
-    look.
+  - A new version that fails at start, or whose page fails, never takes
+    over: the old copies keep serving, and `status` says which copy doesn't
+    start or whose page fails, and where to look.
   - `--now` stops the old copies as soon as the new ones are ready.
   - A redeploy during another goes straight to the newest version. At most
     `replicas + warm-replicas` copies with visitors drain at once; beyond
@@ -351,8 +356,17 @@ The columns:
   - `port-in-use` means another program holds the app's port, so no copy was
     started; the reason is printed under the table, nothing is counted as a
     crash, and the next check tries again.
-- `READY` turns from `starting` to `ready` once the copy's R process accepts
-  connections and the load balancer lists it.
+- `READY` is `starting`, `page-failing` or `ready`. Once the copy's R process
+  accepts connections, `shinyctl-api` asks it for `/` once, as a visitor's
+  browser would; an app that counts page views sees that request. Any answer
+  below 500 makes the copy `ready`, and it stays ready for the life of the
+  process. An error (a 5xx, or an answer that is not HTTP) makes it
+  `page-failing`, and the page is asked again, at first after a second and
+  then less often, up to every 30 seconds, until it answers; a line under the
+  table says which copy and where to look. A page that takes long is waited
+  for: the copy stays `starting`, and after 10 seconds `status` says how long
+  it has been waiting. `api.log` notes a failing or slow page once per copy,
+  and when it answers. Only ready copies get visitors.
 - `MEM` is the memory the copy's main R process takes, counting what the
   system has compressed or swapped out: on macOS the number Activity Monitor
   shows, on Linux resident plus swapped memory (`VmRSS` + `VmSwap`). On an
@@ -380,7 +394,10 @@ Under the table, `status` says what the table can't:
 - an app's port that is not served, and why;
 - an app that was not started, and why;
 - a redeploy that has not taken over yet: which copy is starting, and, if the
-  new version does not start, which copy and where to look;
+  new version does not start or its page fails, which copy and where to look;
+- a copy whose page fails or has not answered, and, while no copy of an app
+  has a page that answered, what a visitor gets: a wait of up to 15 seconds,
+  then the page saying the app is restarting;
 - draining copies: how many sessions are left and when `drain-timeout` ends
   them at the latest;
 - copies that `exited`, and why;
@@ -487,10 +504,12 @@ systemctl --user restart shinyctl                 # if you installed the service
 pkill -u "$USER" -f '(^|/)shinyctl serve$' && shinyctl serve -d
 ```
 
-Your apps keep running: the new `shinyctl-api` adopts them. If the new
-version comes with a new load balancer, it is started next to the old one
-and takes over without refusing a connection. The old one answers the
-requests it is in the middle of, for up to five seconds, and then stops.
+Your apps keep running: the new `shinyctl-api` adopts them, and the copies
+the load balancer was serving stay ready without their page being asked
+again. If the new version comes with a new load balancer, it is started
+next to the old one and takes over without refusing a connection. The old
+one answers the requests it is in the middle of, for up to five seconds, and
+then stops.
 Connections that were open on it (a Shiny session is one) end, so a page open
 at that moment reconnects or reloads once (pages with the example's script do
 it by themselves). On Linux, a request that reaches the old one in the very
@@ -604,8 +623,9 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
   version. Without that script the page reconnects to the old copy.
 - **Both versions run side by side** for up to `drain-timeout`, so a change
   to shared data (a database schema, files) must suit both.
-- **A new version that starts but fails on its page still takes over:** a
-  copy counts as ready once R accepts connections.
+- **Readiness is the page, asked once per process.** An error in `server`,
+  which happens per session, and a page that breaks after the copy became
+  ready are not seen.
 - **Copies don't share memory.** Anything a session keeps in R lives in
   its copy.
 - **The load balancer is in the path of every request.** If it dies,
