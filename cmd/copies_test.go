@@ -466,7 +466,7 @@ func TestNeverPolicy_PerCopy(t *testing.T) {
 			t.Errorf("copy %d: GaveUp = %v; only the copy that died under `never` has given up", c.Copy, c.GaveUp)
 		}
 	}
-	if !process.IsReady(spec.Host, spec.Port) {
+	if !process.Listening(spec.Host, spec.Port) {
 		t.Error("the port closed while a copy is still running")
 	}
 	// The table says exited, and under it why.
@@ -804,7 +804,7 @@ func TestReadyWatcher_OneMissedProbeDoesNotStrandTheCopy(t *testing.T) {
 		if missed.CompareAndSwap(false, true) {
 			return false
 		}
-		return process.IsReady(host, port)
+		return process.Listening(host, port)
 	}})
 	spec := copiesSpec(t, "app", 1, 0)
 	cleanupApp(t, spec)

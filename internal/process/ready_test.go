@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestIsReady(t *testing.T) {
-	t.Run("wildcard-bound listener is ready via loopback", func(t *testing.T) {
+func TestListening(t *testing.T) {
+	t.Run("wildcard-bound listener is listening via loopback", func(t *testing.T) {
 		ln, err := net.Listen("tcp4", "0.0.0.0:0")
 		if err != nil {
 			t.Fatal(err)
@@ -14,12 +14,12 @@ func TestIsReady(t *testing.T) {
 		defer ln.Close()
 		port := ln.Addr().(*net.TCPAddr).Port
 
-		if !IsReady("0.0.0.0", port) {
-			t.Errorf("IsReady(0.0.0.0, %d) = false for a live listener", port)
+		if !Listening("0.0.0.0", port) {
+			t.Errorf("Listening(0.0.0.0, %d) = false for a live listener", port)
 		}
 	})
 
-	t.Run("loopback-bound listener is ready on loopback", func(t *testing.T) {
+	t.Run("loopback-bound listener is listening on loopback", func(t *testing.T) {
 		ln, err := net.Listen("tcp4", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -27,12 +27,12 @@ func TestIsReady(t *testing.T) {
 		defer ln.Close()
 		port := ln.Addr().(*net.TCPAddr).Port
 
-		if !IsReady("127.0.0.1", port) {
-			t.Errorf("IsReady(127.0.0.1, %d) = false for a live listener", port)
+		if !Listening("127.0.0.1", port) {
+			t.Errorf("Listening(127.0.0.1, %d) = false for a live listener", port)
 		}
 	})
 
-	t.Run("nothing listening is not ready", func(t *testing.T) {
+	t.Run("nothing listening is not listening", func(t *testing.T) {
 		ln, err := net.Listen("tcp4", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -40,8 +40,8 @@ func TestIsReady(t *testing.T) {
 		port := ln.Addr().(*net.TCPAddr).Port
 		ln.Close()
 
-		if IsReady("127.0.0.1", port) {
-			t.Errorf("IsReady(127.0.0.1, %d) = true with nothing listening", port)
+		if Listening("127.0.0.1", port) {
+			t.Errorf("Listening(127.0.0.1, %d) = true with nothing listening", port)
 		}
 	})
 
@@ -53,8 +53,8 @@ func TestIsReady(t *testing.T) {
 		defer ln.Close()
 		port := ln.Addr().(*net.TCPAddr).Port
 
-		if !IsReady("::", port) {
-			t.Errorf("IsReady(::, %d) = false for a live listener", port)
+		if !Listening("::", port) {
+			t.Errorf("Listening(::, %d) = false for a live listener", port)
 		}
 	})
 }

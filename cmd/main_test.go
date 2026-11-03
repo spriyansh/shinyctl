@@ -350,7 +350,7 @@ func waitReady(t *testing.T, host string, port int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if process.IsReady(host, port) {
+		if process.Listening(host, port) {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -529,7 +529,7 @@ func waitClosed(t *testing.T, host string, port int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if !process.IsReady(host, port) {
+		if !process.Listening(host, port) {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)

@@ -84,7 +84,7 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 				v.Sessions = sessions[dialOf(rec)]
 				v.SessionsKnown = sessions != nil
 			} else {
-				v.Ready = process.IsReady(spec.EffectiveHost(), rec.Port)
+				v.Ready = process.Listening(spec.EffectiveHost(), rec.Port)
 			}
 
 		case rec.Copy == 0:

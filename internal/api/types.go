@@ -24,9 +24,8 @@ type ApplyResponse struct {
 }
 
 // CopyStatus is one copy of an app: what state.json recorded about its
-// process, plus live IsAlive/IsReady checks, not just a mirror of the file.
-// Ready is purely informational (it never drives a restart decision, only
-// Alive does): the copy's process accepts connections, and the load balancer
+// process, plus live IsAlive/Listening checks, not just a mirror of the file.
+// Ready means the copy's process accepts connections, and the load balancer
 // serves the app's port and lists the copy (for a process from before the
 // load balancer, whether its own port accepts).
 type CopyStatus struct {

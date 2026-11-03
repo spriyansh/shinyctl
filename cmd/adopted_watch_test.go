@@ -258,7 +258,7 @@ func TestAdopted_GivingUpClosesThePortAtOnce(t *testing.T) {
 	if err := syscall.Kill(a.PID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
-	for process.IsReady(spec.Host, spec.Port) {
+	for process.Listening(spec.Host, spec.Port) {
 		if time.Since(killed) > 2500*time.Millisecond { // well under the 5 s tick, with room for a loaded machine
 			t.Fatalf("%s:%d still answers 2.5 seconds after the last copy died and the app gave up", spec.Host, spec.Port)
 		}

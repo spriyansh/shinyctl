@@ -111,13 +111,13 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 				// process is down. A record from before the load balancer
 				// still holds the app's port itself.
 				if rec.Copy >= 1 {
-					copy.Ready = process.IsReady(process.InternalHost, rec.Port) && copy.Role != "" && serves
+					copy.Ready = process.Listening(process.InternalHost, rec.Port) && copy.Role != "" && serves
 					if sessions != nil {
 						n := sessions[dial]
 						copy.Sessions = &n
 					}
 				} else {
-					copy.Ready = process.IsReady(spec.EffectiveHost(), rec.Port)
+					copy.Ready = process.Listening(spec.EffectiveHost(), rec.Port)
 				}
 			}
 			copy.SkipDrain = rec.SkipDrain
