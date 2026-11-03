@@ -151,7 +151,7 @@ rm -rf ~/.shinyctl</code></pre>
   <li><b>Apps keep running if <code>shinyctl-api</code> dies, but nothing restarts a crashed copy</b> until it is back. Any <code>apply</code>, or <code>shinyctl serve -d</code>, brings it back; on Linux the service restarts it by itself.</li>
   <li><b><code>stop</code> signals only the main R process.</b> Workers the app started, for example through callr or future, can outlive it.</li>
   <li><b>A drain ends at <code>drain-timeout</code>.</b> Sessions still open then are cut, and a tab left open counts as a session.</li>
-  <li><b>A new version that starts but fails on its page still takes over:</b> a copy counts as ready once R accepts connections.</li>
+  <li><b>Readiness is the page, asked once per process.</b> An error in <code>server</code>, which happens per session, and a page that breaks after the copy became ready are not seen.</li>
 </ul>
 <p>The full list is in the <a href="https://github.com/spriyansh/shinyctl#limitations">README</a>.</p>
 

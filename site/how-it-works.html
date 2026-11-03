@@ -178,7 +178,7 @@
 <h2 id="cycle">The cycle</h2>
 <p><code>shinyctl-api</code> runs the same five steps for each app every 5 seconds, and at once whenever something happens: a command from you, or a copy that exits. An exit is noticed the moment it happens; the 5-second check catches anything else.</p>
 <ol class="cycle" aria-label="The cycle">
-  <li><b>Observe</b><span>Which copies are alive and ready, and how many sessions each holds.</span></li>
+  <li><b>Observe</b><span>Which copies are alive, which have a page that answered, and how many sessions each holds.</span></li>
   <li><b>Decide</b><span>Each copy's role (active, warm or draining) and what to start or stop.</span></li>
   <li><b>Record</b><span>Write the decision to the app's <code>state.json</code>.</span></li>
   <li><b>Push</b><span>Send the copies table to the load balancer, which swaps it without a reload.</span></li>
@@ -187,13 +187,13 @@
 <p>What is stored is what happened: processes, start times, crash counts, and when a copy began to drain. What should happen (roles, what to start, what to stop) is worked out again on every cycle, so nothing about a role can go stale on disk.</p>
 
 <h2 id="roles">Copies and roles</h2>
-<p>A copy is one R process running your app, numbered from 1. Of the copies that are running and ready:</p>
+<p>A copy is one R process running your app, numbered from 1. A copy is ready once its page answers: when its R process accepts connections, <code>shinyctl-api</code> asks it for <code>/</code> once, and any answer below 500 makes it ready for the life of the process. Of the copies that are running and ready:</p>
 <ul>
   <li><b>active</b>: the oldest <code>replicas</code> copies. They take new visitors.</li>
   <li><b>warm</b>: the rest. They are running and ready, and get no new visitors while every active copy is up. When an active copy fails, a warm copy takes its visitors at once.</li>
   <li><b>draining</b>: a copy being replaced. It keeps the visitors it has, gets no new ones, and stops when they are gone or <code>drain-timeout</code> passes.</li>
 </ul>
-<p>A copy that is starting has no role yet; <code>status</code> shows <code>-</code> until it is ready.</p>
+<p>A copy that is starting has no role yet; <code>status</code> shows <code>-</code> until it is ready. A copy whose page errors shows <code>page-failing</code> under <code>READY</code> and gets no visitors; the page is asked again until it answers, and a line under the table says which copy and where to look. A slow page is waited for, and after 10 seconds <code>status</code> says how long.</p>
 
 <h2 id="sticky">Sticky sessions</h2>
 <p>Copies don't share memory, so a Shiny session has to stay with its R process. The load balancer sets a cookie named <code>lb_&lt;port&gt;</code> (for example <code>lb_8080</code>) that keeps each visitor on one copy for as long as it runs. This needs the browser to keep the cookie: it doesn't hold for an app embedded in another site's frame, or in Safari with third-party cookies blocked.</p>
