@@ -942,8 +942,17 @@ func TestReady_IsKeptWhenThePageFailsLater(t *testing.T) {
 	}
 
 	armed.Store(true)
-	waitUntil(t, "the missed probe to pass", 10*time.Second, func() bool { return missed.Load() && same() })
+	waitUntil(t, "the probe to miss", 10*time.Second, missed.Load)
+	// The cycle that missed takes copy 1 out of the table and brings its
+	// watcher back. While that cycle runs, the pool can still look as before,
+	// and the watcher has not looked at the page yet. So the ticks stop first:
+	// after that only the watcher puts the copy back, and it frees its slot
+	// before it does, once it has decided about the page.
 	stop()
+	waitUntil(t, "copy 1's watcher to put it back", 10*time.Second, func() bool {
+		_, watching := readyWatched.Load(pidPort{one.PID, one.Port})
+		return !watching && same()
+	})
 	if n := asked.Load(); n != 0 {
 		t.Errorf("the page was asked %d times for copies that had answered", n)
 	}
