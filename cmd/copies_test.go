@@ -823,6 +823,42 @@ func TestStartup_ListedCopiesKeepTheirRolesBeforeTheirPagesAreAsked(t *testing.T
 	})
 }
 
+// A daemon that starts asks the page of every running copy the saved table
+// did not list (one that was still starting when the daemon before stopped),
+// as soon as the load balancer has its table back: OnReady starts their
+// ready-watchers, so such a copy gets its role without waiting for a tick.
+func TestStartup_OnReadyWatchesTheCopiesItDoesNotTrust(t *testing.T) {
+	useFakeRscript(t)
+	spec := copiesSpec(t, "app", 1, 1)
+	cleanupApp(t, spec)
+	one, two := adoptCopies(t, spec)
+
+	// Copy 1 was trusted from the table; copy 2 was not listed.
+	forgetPage(two)
+
+	dir, err := os.MkdirTemp("", "sp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	exe, _ := os.Executable()
+	_, sup, err := newGateway(dir, exe, filepath.Join(dir, "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup.OnReady()
+
+	// No tick and no cycle of the test's own: OnReady's rebuild leaves copy 2
+	// out, and only its watcher puts it in.
+	pool := waitRoles(t, spec, 1, 1)
+	if !slices.Equal(pool.Active, []string{dialOf(one)}) || !slices.Equal(pool.Warm, []string{dialOf(two)}) {
+		t.Errorf("pool = %+v, want copy 1 active and copy 2 warm", pool)
+	}
+	if !pageReady(two) {
+		t.Error("copy 2's page was not asked")
+	}
+}
+
 // A copy whose page fails is never given a role, whatever the cycles say, and
 // serves as soon as its page answers.
 func TestApply_PageFailingCopiesAreNeverPromoted(t *testing.T) {
