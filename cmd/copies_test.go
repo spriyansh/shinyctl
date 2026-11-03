@@ -857,6 +857,37 @@ func TestApply_PageFailingCopiesAreNeverPromoted(t *testing.T) {
 	}
 	stop()
 
+	app := statusOf(t, spec.AppName)
+	if len(app.Copies) != 2 {
+		t.Fatalf("copies = %+v, want two", app.Copies)
+	}
+	for _, c := range app.Copies {
+		if !c.Alive || c.Ready || c.PageProblem != "answers HTTP 500" {
+			t.Errorf("copy %d = %+v, want it alive, not ready, with the page's problem", c.Copy, c)
+		}
+	}
+	var out bytes.Buffer
+	if err := writeStatus(&out, httptestStatus(t)); err != nil {
+		t.Fatal(err)
+	}
+	failing := 0
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "app ") && strings.Contains(line, "page-failing") {
+			failing++
+		}
+	}
+	if failing != 2 {
+		t.Errorf("status shows %d copies as page-failing, want 2:\n%s", failing, out.String())
+	}
+	for _, want := range []string{
+		"app: copy 1 is not ready: its page answers HTTP 500 (see shinyctl logs --copy 1)",
+		"app: no copy serves yet: a visitor waits up to 15s, then gets a page saying the app is restarting, until a copy's page answers",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("status lacks %q:\n%s", want, out.String())
+		}
+	}
+
 	fixPage(t, file)
 	waitRoles(t, spec, 1, 1)
 }
@@ -947,6 +978,10 @@ func TestReady_ASlowPageIsWaitedForAndAskedOnce(t *testing.T) {
 	waitUntil(t, "the wait to be reported", 5*time.Second, func() bool {
 		return strings.Contains(buf.String(), pageLine(a, "has not answered after 200ms; still waiting"))
 	})
+	// Still waiting: starting, with how long it has waited.
+	if c := statusOf(t, spec.AppName).Copies[0]; !c.Alive || c.Ready || c.PageProblem != "" || c.PageWaitingSince.IsZero() {
+		t.Errorf("copy = %+v, want it alive, not ready, waiting for its page", c)
+	}
 	waitRoles(t, spec, 1, 0)
 	mu.Lock()
 	n := calls[a.Port]

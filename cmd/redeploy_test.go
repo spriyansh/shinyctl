@@ -518,6 +518,19 @@ func TestRedeploy_BrokenPageStalls(t *testing.T) {
 		t.Errorf("the log says copy 3's page fails %d times, want once:\n%s", n, buf.String())
 	}
 
+	var out bytes.Buffer
+	if err := writeStatus(&out, httptestStatus(t)); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"page-failing",
+		"app: copies 1 and 2 keep serving the previous version: copy 3's page answers HTTP 500 (see shinyctl logs --copy 3)",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("status lacks %q:\n%s", want, out.String())
+		}
+	}
+
 	// The manifest as it was: the failing copy goes, nothing drains.
 	applyResponse(t, spec)
 	waitUntil(t, "the broken copy to go", 5*time.Second, func() bool {

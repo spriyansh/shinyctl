@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/process"
+	"github.com/spriyansh/shinyctl/internal/proxy"
 	"github.com/spriyansh/shinyctl/internal/reconcile"
 )
 
@@ -91,8 +92,11 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 			case c.Alive:
 				status = "alive"
 				ready = "starting"
-				if c.Ready {
+				switch {
+				case c.Ready:
 					ready = "ready"
+				case c.PageProblem != "":
+					ready = "page-failing"
 				}
 			case c.GaveUp:
 				// The process is gone and the restart policy leaves it so.
@@ -161,6 +165,11 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 		}
 	}
 	for _, app := range resp.Apps {
+		for _, line := range pageNote(app) {
+			fmt.Fprintf(out, "\n%s: %s\n", app.Name, line)
+		}
+	}
+	for _, app := range resp.Apps {
 		if note := memoryNote(app); note != "" {
 			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
 		}
@@ -188,20 +197,30 @@ func plural(list []int, one, many string) string {
 
 // rolloutNote explains a redeploy that has not taken over yet: copies of a
 // previous version serve (they are not draining) while the new ones are not
-// ready. If a new copy is crashing or has given up, the takeover won't come by
-// itself, and the note says so and where to look. It is empty when there is
-// nothing of the kind.
+// ready. If a new copy is crashing, has given up, or runs with a page that
+// fails, the takeover won't come by itself, and the note says so and where to
+// look. It is empty when there is nothing of the kind.
 func rolloutNote(app api.AppStatus) string {
-	var old, waiting, failing, gaveUp []int
+	var old, waiting, failing, gaveUp, pageFailing []int
+	var firstProblem *api.CopyStatus // the lowest copy whose page fails
+	var slowest *api.CopyStatus      // the lowest waiting copy whose page has not answered yet
 	allSkip := true
-	for _, c := range app.Copies {
+	for i, c := range app.Copies {
 		switch {
 		case c.Outdated && c.Alive && c.Role != "draining":
 			old = append(old, c.Copy)
 			allSkip = allSkip && c.SkipDrain
 		case !c.Outdated && c.Role != "draining" && !(c.Alive && c.Ready):
 			waiting = append(waiting, c.Copy)
+			if c.Alive && !c.PageWaitingSince.IsZero() && slowest == nil {
+				slowest = &app.Copies[i]
+			}
 			switch {
+			case c.Alive && c.PageProblem != "":
+				pageFailing = append(pageFailing, c.Copy)
+				if firstProblem == nil {
+					firstProblem = &app.Copies[i]
+				}
 			case c.GaveUp:
 				gaveUp = append(gaveUp, c.Copy)
 			case !c.Alive && c.CrashCount > 0:
@@ -213,9 +232,20 @@ func rolloutNote(app api.AppStatus) string {
 		return ""
 	}
 
-	if len(failing)+len(gaveUp) > 0 {
+	if len(failing)+len(gaveUp)+len(pageFailing) > 0 {
 		var why string
 		switch {
+		case len(pageFailing) > 0 && len(failing)+len(gaveUp) == 0:
+			problem := fmt.Sprintf("copy %d's page %s (see shinyctl logs --copy %d)", firstProblem.Copy, firstProblem.PageProblem, firstProblem.Copy)
+			if len(waiting) == 1 {
+				why = problem
+			} else {
+				why = fmt.Sprintf("%s are not ready; %s", reconcile.ListCopies(waiting), problem)
+			}
+		case len(pageFailing) > 0:
+			bad := slices.Concat(failing, gaveUp, pageFailing)
+			slices.Sort(bad)
+			why = fmt.Sprintf("%s are not ready (see shinyctl logs --copy %d)", reconcile.ListCopies(bad), bad[0])
 		case len(gaveUp) > 0 && len(failing) == 0:
 			why = fmt.Sprintf("%s gave up starting (see shinyctl logs --copy %d; apply again once it is fixed)", reconcile.ListCopies(gaveUp), gaveUp[0])
 		case len(failing) > 0 && len(gaveUp) == 0:
@@ -232,8 +262,13 @@ func rolloutNote(app api.AppStatus) string {
 	if allSkip {
 		then = plural(old, "stops", "stop")
 	}
+	starting := reconcile.ListCopies(waiting)
+	if slowest != nil {
+		starting += fmt.Sprintf(" (copy %d's page has not answered after %s)", slowest.Copy,
+			reconcile.FormatDuration(statusNow().Sub(slowest.PageWaitingSince).Round(time.Second)))
+	}
 	return fmt.Sprintf("new version starting in %s; %s %s serving the previous version until it is ready, then %s",
-		reconcile.ListCopies(waiting), reconcile.ListCopies(old), plural(old, "keeps", "keep"), then)
+		starting, reconcile.ListCopies(old), plural(old, "keeps", "keep"), then)
 }
 
 // exitedNote says why copies are down that the restart policy leaves down,
@@ -278,6 +313,34 @@ func exitedNote(app api.AppStatus) string {
 		note += " Its port is closed."
 	}
 	return note
+}
+
+// pageNote says which copies are listening but are not ready for want of
+// their page, and, when that leaves the app with no copy serving, what a
+// visitor gets meanwhile. A copy that a note about a redeploy already names
+// is left to that note. It is empty when there is nothing of the kind.
+func pageNote(app api.AppStatus) []string {
+	if rolloutNote(app) != "" {
+		return nil
+	}
+	var lines []string
+	for _, c := range app.Copies {
+		if !c.Alive || c.Ready {
+			continue
+		}
+		switch {
+		case c.PageProblem != "":
+			lines = append(lines, fmt.Sprintf("copy %d is not ready: its page %s (see shinyctl logs --copy %d)", c.Copy, c.PageProblem, c.Copy))
+		case !c.PageWaitingSince.IsZero():
+			lines = append(lines, fmt.Sprintf("copy %d is not ready: its page has not answered after %s (see shinyctl logs --copy %d)", c.Copy,
+				reconcile.FormatDuration(statusNow().Sub(c.PageWaitingSince).Round(time.Second)), c.Copy))
+		}
+	}
+	if len(lines) > 0 && !slices.ContainsFunc(app.Copies, func(c api.CopyStatus) bool { return c.Role != "" }) {
+		lines = append(lines, fmt.Sprintf("no copy serves yet: a visitor waits up to %s, then gets a page saying the app is restarting, until a copy's page answers",
+			reconcile.FormatDuration(proxy.DefaultTryDuration)))
+	}
+	return lines
 }
 
 // memoryNote says that copies were killed for going over max-memory, while
@@ -336,7 +399,7 @@ func spareNote(app api.AppStatus) string {
 			draining = true
 		case c.Role == "active":
 			active = true
-		case c.Alive && !c.Ready && !c.Outdated && c.Role == "":
+		case c.Alive && !c.Ready && !c.Outdated && c.Role == "" && c.PageProblem == "":
 			starting = append(starting, c.Copy)
 		}
 	}
