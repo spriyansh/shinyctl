@@ -115,6 +115,12 @@ var serveCmd = &cobra.Command{
 			return err
 		}
 
+		// The copies the load balancer was serving are trusted before
+		// anything can run a cycle: the supervisor marks the load balancer
+		// running before its OnReady, so a cycle could otherwise decide on
+		// a serving copy as if it were new.
+		trustListedCopies(proxy.SettingsFor(proxyDir).CopiesPath)
+
 		loopCtx, cancelLoop := context.WithCancel(context.Background())
 		defer cancelLoop()
 		sup.Expect()

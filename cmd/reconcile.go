@@ -77,10 +77,13 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 				watchAdopted(spec, rec)
 			}
 			if rec.Copy >= 1 {
-				v.Ready = currentHooks().ObserveProbe(process.InternalHost, rec.Port)
-				if v.Ready && !servedNow(spec.AppStateFile, rec) && !portIsOurs(spec.AppStateFile, rec) {
-					v.Ready, v.PortTaken = false, true
+				listening := currentHooks().ObserveProbe(process.InternalHost, rec.Port)
+				if listening && !servedNow(spec.AppStateFile, rec) && !portIsOurs(spec.AppStateFile, rec) {
+					listening, v.PortTaken = false, true
 				}
+				// The page is not asked here: a cycle only reads what the
+				// copy's watcher found, so no cycle waits on R.
+				v.Ready = listening && pageReady(rec)
 				v.Sessions = sessions[dialOf(rec)]
 				v.SessionsKnown = sessions != nil
 			} else {
@@ -270,7 +273,7 @@ func reconcileLocked(spec manifest.AppSpec, o reconcileOpts) (api.ApplyResponse,
 	// including one an earlier daemon started.
 	for _, v := range views {
 		if v.Alive && !v.Ready && v.App.Copy >= 1 {
-			go watchReady(spec.AppStateFile, v.App.PID, v.App.Port)
+			go watchReady(spec, v.App)
 		}
 	}
 	return resp, nil
@@ -456,7 +459,10 @@ func launchCopy(spec manifest.AppSpec, st *state.State, n int) error {
 			triggerReconcile(spec.AppStateFile)
 		}
 	}()
-	go watchReady(spec.AppStateFile, pid, port)
+	// A fresh process starts with no record of its page, whatever pid and
+	// port it reuses.
+	forgetPage(newApp)
+	go watchReady(spec, newApp)
 	return nil
 }
 

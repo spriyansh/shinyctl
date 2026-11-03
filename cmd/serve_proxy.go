@@ -4,6 +4,7 @@ Copyright © 2026 Priyansh Srivastava <priyansh@metapriyansh.com>
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -39,8 +40,8 @@ func waitForBalancer(g *proxy.Gateway, wait time.Duration) {
 
 // hooks are the few things the tests substitute (they exist for the tests,
 // nothing else sets them): what the load balancer is
-// serving, how an address is probed, and how long a recorded port is waited
-// for. A zero field means the real one. The tests set them through an atomic
+// serving, how an address and a copy's page are probed, and how long a
+// recorded port is waited for. A zero field means the real one. The tests set them through an atomic
 // pointer, since exit-watchers of earlier tests may still be reading.
 type hooks struct {
 	Served         func() []proxy.App
@@ -54,10 +55,19 @@ type hooks struct {
 	// at least. Zero means the real one.
 	DrainSettle time.Duration
 
-	// Whether a copy accepts connections: the ready-watcher's probe and the
-	// reconcile's own are separate so that a test can make one of them miss.
-	WatchProbe   func(host string, port int) bool
+	// ObserveProbe is whether a copy accepts connections, which every cycle
+	// asks (process.Listening); a test can make it miss.
 	ObserveProbe func(host string, port int) bool
+
+	// PageProbe asks a copy for its page (process.CheckPage). PageSlow is when
+	// a page that has not answered yet is reported; PageRetry and PageRetryMax
+	// bound the wait before a failed page is asked again. Zero means the real one.
+	// They are hooks, not package variables, because the ready-watchers of
+	// earlier tests still read them while the next test sets its own.
+	PageProbe    func(ctx context.Context, host string, port int) process.Page
+	PageSlow     time.Duration
+	PageRetry    time.Duration
+	PageRetryMax time.Duration
 
 	// WatchExit is process.WatchExit.
 	WatchExit func(spec manifest.AppSpec, app state.AppState) (<-chan struct{}, error)
@@ -96,8 +106,11 @@ func currentHooks() hooks {
 		ProbeAlongside: process.PortAvailableAlongside,
 		PortWait:       time.Second,
 		PortEvery:      100 * time.Millisecond,
-		WatchProbe:     process.Listening,
 		ObserveProbe:   process.Listening,
+		PageProbe:      process.CheckPage,
+		PageSlow:       process.PageSlow,
+		PageRetry:      pageRetry,
+		PageRetryMax:   pageRetryMax,
 		WatchExit:      process.WatchExit,
 		Sessions:       func() map[string]int { return gateway.Sessions() },
 		Owner:          process.PortOwner,
@@ -130,8 +143,17 @@ func currentHooks() hooks {
 		if o.DrainSettle != 0 {
 			h.DrainSettle = o.DrainSettle
 		}
-		if o.WatchProbe != nil {
-			h.WatchProbe = o.WatchProbe
+		if o.PageProbe != nil {
+			h.PageProbe = o.PageProbe
+		}
+		if o.PageSlow != 0 {
+			h.PageSlow = o.PageSlow
+		}
+		if o.PageRetry != 0 {
+			h.PageRetry = o.PageRetry
+		}
+		if o.PageRetryMax != 0 {
+			h.PageRetryMax = o.PageRetryMax
 		}
 		if o.ObserveProbe != nil {
 			h.ObserveProbe = o.ObserveProbe
@@ -193,6 +215,9 @@ func newGateway(dir, exe, logPath string) (*proxy.Gateway, *proxy.Supervisor, er
 			watchRestoredCopies()
 			refreshPools()
 			syncProxy("")
+			// After the table is rebuilt and sent: a cycle a watcher
+			// triggers must not send a table that is still empty.
+			watchUnreadyCopies()
 		},
 
 		// A handover between builds has settled: act at once on whatever

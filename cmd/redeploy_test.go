@@ -462,6 +462,110 @@ func TestRedeploy_BrokenVersionStalls(t *testing.T) {
 	}
 }
 
+// startBrokenPageRedeploy applies a good app of one active copy and one warm,
+// then a new version whose page fails: copy 3 listens and answers 500. It
+// returns the old copies, the new version's spec, and the file that fixes the
+// page when removed.
+func startBrokenPageRedeploy(t *testing.T) (spec, broken manifest.AppSpec, oldActive, oldWarm state.AppState, file string) {
+	t.Helper()
+	useFakeRscript(t)
+	useHooks(t, fastRetry())
+	spec = copiesSpec(t, "app", 1, 1)
+	cleanupApp(t, spec)
+	applyOK(t, spec)
+	pool := waitRoles(t, spec, 1, 1)
+	oldActive, oldWarm = copyByDial(t, spec, pool.Active[0]), copyByDial(t, spec, pool.Warm[0])
+
+	broken = spec
+	file = brokenPage(t, &broken)
+	applyResponse(t, broken)
+	return spec, broken, oldActive, oldWarm, file
+}
+
+// A new version whose page fails (Shiny answers 500 with its port open) never
+// takes over: the old copies keep serving, nothing drains, and the log says
+// once what is wrong.
+func TestRedeploy_BrokenPageStalls(t *testing.T) {
+	buf := captureLog(t)
+	spec, broken, oldActive, oldWarm, _ := startBrokenPageRedeploy(t)
+
+	var three state.AppState
+	waitUntil(t, "copy 3 to listen", 10*time.Second, func() bool {
+		rec, ok := loadCopyRecord(spec, 3)
+		three = rec
+		return ok && rec.PID > 0 && process.Listening(process.InternalHost, rec.Port)
+	})
+	stopTicks := tick(broken)
+	end := time.Now().Add(2 * time.Second)
+	for time.Now().Before(end) {
+		if pid, _ := visit(t, spec, nil); pid != oldActive.PID {
+			stopTicks()
+			t.Fatalf("served by pid %d, want the old active copy %d", pid, oldActive.PID)
+		}
+		if got, _ := gateway.Pool(spec.AppStateFile); len(got.Draining) != 0 || !slices.Equal(got.Active, []string{dialOf(oldActive)}) || !slices.Equal(got.Warm, []string{dialOf(oldWarm)}) {
+			stopTicks()
+			t.Fatalf("pool = %+v, want the old copies serving and nothing draining", got)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stopTicks()
+
+	three, _ = loadCopyRecord(spec, 3)
+	if !process.IsAlive(spec, three) || !three.DrainingSince.IsZero() {
+		t.Errorf("copy 3 = %+v, want it alive and not draining", three)
+	}
+	if n := strings.Count(buf.String(), pageLine(three, "answers HTTP 500")); n != 1 {
+		t.Errorf("the log says copy 3's page fails %d times, want once:\n%s", n, buf.String())
+	}
+
+	// The manifest as it was: the failing copy goes, nothing drains.
+	applyResponse(t, spec)
+	waitUntil(t, "the broken copy to go", 5*time.Second, func() bool {
+		reconcileApp(spec.AppStateFile)
+		recs := loadCopies(t, spec)
+		return len(recs) == 2 && recs[0].PID == oldActive.PID && recs[1].PID == oldWarm.PID
+	})
+	for _, rec := range loadCopies(t, spec) {
+		if !rec.DrainingSince.IsZero() {
+			t.Errorf("copy %d is draining: %+v", rec.Copy, rec)
+		}
+	}
+}
+
+// A page that fails at first and answers later takes over then: the copy is
+// asked again, and ready as soon as it answers.
+func TestRedeploy_PageThatAnswersLaterTakesOver(t *testing.T) {
+	buf := captureLog(t)
+	spec, broken, oldActive, oldWarm, file := startBrokenPageRedeploy(t)
+
+	var three state.AppState
+	waitUntil(t, "copy 3's page to be reported", 10*time.Second, func() bool {
+		rec, ok := loadCopyRecord(spec, 3)
+		three = rec
+		return ok && strings.Contains(buf.String(), pageLine(rec, "answers HTTP 500"))
+	})
+	fixPage(t, file)
+	stopTicks := tick(broken)
+	defer stopTicks()
+
+	waitPool(t, spec, "copy 3 to take over", func(p proxy.Pool) bool {
+		return slices.Equal(p.Active, []string{dialOf(three)})
+	})
+	if pid, _ := visit(t, spec, nil); pid != three.PID {
+		t.Errorf("served by pid %d, want copy 3 (%d)", pid, three.PID)
+	}
+	if want := fmt.Sprintf("copy 3 (pid %d): its page answers now", three.PID); !strings.Contains(buf.String(), want) {
+		t.Errorf("the log lacks %q:\n%s", want, buf.String())
+	}
+	waitPool(t, spec, "a new warm copy", func(p proxy.Pool) bool {
+		if len(p.Warm) != 1 {
+			return false
+		}
+		w := copyByDial(t, spec, p.Warm[0])
+		return w.PID != oldActive.PID && w.PID != oldWarm.PID
+	})
+}
+
 // 9: an apply during a rollout goes straight to the newest version.
 func TestRedeploy_ApplyDuringARollout(t *testing.T) {
 	useFakeRscript(t)
@@ -620,11 +724,13 @@ func TestRedeploy_UpgradeFromARolloutHalfDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitReady(t, process.InternalHost, one.Port)
+	markPageReady(one) // an earlier daemon found it ready
 	two := startAt(2, 1)
 	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Revision: 1, Apps: []state.AppState{one, two}}); err != nil {
 		t.Fatal(err)
 	}
 	waitReady(t, process.InternalHost, two.Port)
+	markPageReady(two)
 
 	triggerReconcile(spec.AppStateFile)
 	recs := loadCopies(t, spec)

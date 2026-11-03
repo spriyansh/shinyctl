@@ -28,11 +28,13 @@ func adoptCopies(t *testing.T, spec manifest.AppSpec) (one, two state.AppState) 
 		t.Fatal(err)
 	}
 	waitReady(t, process.InternalHost, one.Port)
+	markPageReady(one) // an earlier daemon found it ready
 	two, _ = startRaw(t, spec, 2)
 	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: []state.AppState{one, two}}); err != nil {
 		t.Fatal(err)
 	}
 	waitReady(t, process.InternalHost, two.Port)
+	markPageReady(two)
 	refreshPools()
 	if err := syncProxy(spec.AppStateFile); err != nil {
 		t.Fatal(err)
