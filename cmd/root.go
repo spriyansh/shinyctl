@@ -26,6 +26,7 @@ over without cutting off the visitors of the old one.
   shinyctl status                      see what's running right now
   shinyctl stop -f shinyctl.yaml       take it down and keep it down
   shinyctl delete -f shinyctl.yaml     stop it and forget it entirely
+  shinyctl shutdown                    stop every app, the load balancer and shinyctl-api
   shinyctl restart -f shinyctl.yaml    pick up code changes (--now skips the drain)
   shinyctl logs -f shinyctl.yaml       print the app's log (--follow to keep watching, --copy N for one copy)
   shinyctl startup                     print a systemd unit that starts shinyctl-api at boot`,
