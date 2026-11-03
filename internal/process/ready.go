@@ -6,16 +6,15 @@ import (
 	"time"
 )
 
-// IsReady reports whether something is actually accepting TCP connections
-// on host:port yet — distinct from IsAlive's PID-level check. A Shiny app
-// can be alive (the R process exists) for a while before it's actually
-// ready to serve, if it's loading a large dataset at startup; this is
-// purely a display signal for `status`, never a restart/promotion input.
+// Listening reports whether something accepts TCP connections on host:port:
+// the port half of a copy's readiness. It says nothing about the page. A
+// Shiny app is alive for a while before it listens (it may load a large
+// dataset at startup), and it listens before anything has asked for its page.
 //
 // Dials the address the app actually bound, not a fixed 127.0.0.1: an app
 // bound to one specific interface isn't listening on loopback at all, and
 // would otherwise show as "starting" forever.
-func IsReady(host string, port int) bool {
+func Listening(host string, port int) bool {
 	conn, err := net.DialTimeout(tcpNetwork(host), net.JoinHostPort(dialHost(host), strconv.Itoa(port)), 200*time.Millisecond)
 	if err != nil {
 		return false

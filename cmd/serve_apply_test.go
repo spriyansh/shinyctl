@@ -524,7 +524,7 @@ func TestHandleApply_StartsOnInternalPort(t *testing.T) {
 	}
 	waitReady(t, process.InternalHost, a.Port)
 	waitServed(t, spec, a.PID)
-	if !process.IsReady("0.0.0.0", spec.Port) {
+	if !process.Listening("0.0.0.0", spec.Port) {
 		t.Error("the app's own port does not answer")
 	}
 }

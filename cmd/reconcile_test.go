@@ -155,7 +155,7 @@ func TestGivenUpAppClosesItsPort(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(3 * time.Second)
-	for process.IsReady(spec.Host, spec.Port) {
+	for process.Listening(spec.Host, spec.Port) {
 		if time.Now().After(deadline) {
 			t.Fatal("the port still accepts connections 3s after the app gave up")
 		}

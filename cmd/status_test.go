@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 	"time"
 
@@ -80,6 +81,12 @@ func TestWriteStatus(t *testing.T) {
 				{Copy: 1, Role: "active", PID: 61, Alive: true, Ready: true, Outdated: true},
 				{Copy: 2, PID: 62, CrashCount: 1, LastExitReason: "oom"},
 			}},
+			{Name: "broken", Port: 8091, Replicas: 1, Copies: []api.CopyStatus{
+				{Copy: 1, PID: 71, Alive: true, PageProblem: "answers HTTP 500"},
+			}},
+			{Name: "slow", Port: 8092, Replicas: 1, Copies: []api.CopyStatus{
+				{Copy: 1, PID: 81, Alive: true, PageWaitingSince: now.Add(-25 * time.Second)},
+			}},
 		},
 	}
 
@@ -88,29 +95,31 @@ func TestWriteStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := `NAME      COPY  ROLE      PORT  PID    STATUS         READY     MEM   SESSIONS  CRASHES  STARTED
-my-app    1     active    8080  61429  alive          ready     142M  2         -        2026-10-11T18:20:21Z
-my-app    2     warm      8080  61430  alive          ready     139M  0         -        2026-10-11T18:20:22Z
-flaky     1     -         8081  0      crash-looping  -         -     -         3        -
-parked    -     -         8082  0      stopped        -         -     -         -        -
-blocked   1     -         8083  7      alive          starting  -     -         -        -
-taken     -     -         8084  0      port-in-use    -         -     -         -        -
-rolling   1     active    8085  11     alive          ready     -     -         -        -
-rolling   2     warm      8085  12     alive          ready     -     -         -        -
-rolling   3     -         8085  13     alive          starting  -     -         -        -
-draining  1     draining  8086  21     alive          ready     -     2         -        -
-draining  2     draining  8086  22     alive          ready     -     0         -        -
-draining  3     active    8086  23     alive          ready     -     2         -        -
-draining  4     -         8086  24     alive          starting  -     -         -        -
-oneshot   1     active    8087  31     alive          ready     -     -         -        -
-oneshot   2     -         8087  32     exited         -         -     -         -        2026-10-11T18:20:21Z
-finished  1     -         8088  41     exited         -         -     -         -        2026-10-11T18:20:21Z
-hungry    1     active    8089  51     alive          ready     -     -         -        2026-10-11T18:20:21Z
-hungry    2     -         8089  52     crash-looping  -         -     -         1        2026-10-11T18:20:21Z
-upgrade   1     active    8090  61     alive          ready     -     -         -        -
-upgrade   2     -         8090  62     crash-looping  -         -     -         1        -
+	want := `NAME      COPY  ROLE      PORT  PID    STATUS         READY         MEM   SESSIONS  CRASHES  STARTED
+my-app    1     active    8080  61429  alive          ready         142M  2         -        2026-10-11T18:20:21Z
+my-app    2     warm      8080  61430  alive          ready         139M  0         -        2026-10-11T18:20:22Z
+flaky     1     -         8081  0      crash-looping  -             -     -         3        -
+parked    -     -         8082  0      stopped        -             -     -         -        -
+blocked   1     -         8083  7      alive          starting      -     -         -        -
+taken     -     -         8084  0      port-in-use    -             -     -         -        -
+rolling   1     active    8085  11     alive          ready         -     -         -        -
+rolling   2     warm      8085  12     alive          ready         -     -         -        -
+rolling   3     -         8085  13     alive          starting      -     -         -        -
+draining  1     draining  8086  21     alive          ready         -     2         -        -
+draining  2     draining  8086  22     alive          ready         -     0         -        -
+draining  3     active    8086  23     alive          ready         -     2         -        -
+draining  4     -         8086  24     alive          starting      -     -         -        -
+oneshot   1     active    8087  31     alive          ready         -     -         -        -
+oneshot   2     -         8087  32     exited         -             -     -         -        2026-10-11T18:20:21Z
+finished  1     -         8088  41     exited         -             -     -         -        2026-10-11T18:20:21Z
+hungry    1     active    8089  51     alive          ready         -     -         -        2026-10-11T18:20:21Z
+hungry    2     -         8089  52     crash-looping  -             -     -         1        2026-10-11T18:20:21Z
+upgrade   1     active    8090  61     alive          ready         -     -         -        -
+upgrade   2     -         8090  62     crash-looping  -             -     -         1        -
+broken    1     -         8091  71     alive          page-failing  -     -         -        -
+slow      1     -         8092  81     alive          starting      -     -         -        -
 
-Memory: 281M in 13 R processes (2 warm, 2 draining), plus 41M for the load balancer.
+Memory: 281M in 15 R processes (2 warm, 2 draining), plus 41M for the load balancer.
 
 blocked: its port is not served: 127.0.0.1:8083 is not available (taken) — pick a different port
 
@@ -123,6 +132,14 @@ upgrade: copy 1 keeps serving the previous version: copy 2 does not start (see s
 oneshot: copy 2 exited and restart-policy never leaves it down; apply or restart starts it again.
 
 finished: copy 1 exited without an error and restart-policy on-failure leaves it down; apply or restart starts it again. Its port is closed.
+
+broken: copy 1 is not ready: its page answers HTTP 500 (see shinyctl logs --copy 1)
+
+broken: no copy serves yet: a visitor waits up to 15s, then gets a page saying the app is restarting, until a copy's page answers
+
+slow: copy 1 is not ready: its page has not answered after 25s (see shinyctl logs --copy 1)
+
+slow: no copy serves yet: a visitor waits up to 15s, then gets a page saying the app is restarting, until a copy's page answers
 
 hungry: copy 2 was killed for going over max-memory (512M); it starts again after its backoff.
 
@@ -143,6 +160,11 @@ func TestRolloutNote(t *testing.T) {
 	}
 	skip := func(c api.CopyStatus) api.CopyStatus { c.SkipDrain = true; return c }
 	draining := func(c api.CopyStatus) api.CopyStatus { c.Role = "draining"; return c }
+	pageFails := func(c api.CopyStatus) api.CopyStatus { c.PageProblem = "answers HTTP 500"; return c }
+	now := time.Date(2026, 10, 11, 19, 0, 0, 0, time.UTC)
+	t.Cleanup(func() { statusNow = time.Now })
+	statusNow = func() time.Time { return now }
+	waitsFor := func(c api.CopyStatus, d time.Duration) api.CopyStatus { c.PageWaitingSince = now.Add(-d); return c }
 	cases := []struct {
 		name string
 		app  api.AppStatus
@@ -168,6 +190,20 @@ func TestRolloutNote(t *testing.T) {
 			"copy 1 keeps serving the previous version: copies 2 and 3 do not start (see shinyctl logs --copy 2)"},
 		{"a starting copy that has crashed before is still just starting", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), {Copy: 2, Alive: true, CrashCount: 2}}},
 			"new version starting in copy 2; copy 1 keeps serving the previous version until it is ready, then drains"},
+		{"the new copy's page fails", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), copyOf(2, true, true, true), pageFails(copyOf(3, false, true, false))}},
+			"copies 1 and 2 keep serving the previous version: copy 3's page answers HTTP 500 (see shinyctl logs --copy 3)"},
+		{"two new copies, one page failing", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), copyOf(2, true, true, true), pageFails(copyOf(3, false, true, false)), copyOf(4, false, true, false)}},
+			"copies 1 and 2 keep serving the previous version: copies 3 and 4 are not ready; copy 3's page answers HTTP 500 (see shinyctl logs --copy 3)"},
+		{"two new copies, both pages failing", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), copyOf(2, true, true, true), pageFails(copyOf(3, false, true, false)), pageFails(copyOf(4, false, true, false))}},
+			"copies 1 and 2 keep serving the previous version: copies 3 and 4 are not ready; copy 3's page answers HTTP 500 (see shinyctl logs --copy 3)"},
+		{"a page failing and a crash", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), copyOf(2, true, true, true), {Copy: 3, CrashCount: 2}, pageFails(copyOf(4, false, true, false))}},
+			"copies 1 and 2 keep serving the previous version: copies 3 and 4 are not ready (see shinyctl logs --copy 3)"},
+		{"a page failing and a copy that gave up", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), pageFails(copyOf(2, false, true, false)), {Copy: 3, CrashCount: 1, GaveUp: true}}},
+			"copy 1 keeps serving the previous version: copies 2 and 3 are not ready (see shinyctl logs --copy 2)"},
+		{"a page that has not answered yet", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), copyOf(2, true, true, true), waitsFor(copyOf(3, false, true, false), 25*time.Second)}},
+			"new version starting in copy 3 (copy 3's page has not answered after 25s); copies 1 and 2 keep serving the previous version until it is ready, then drain"},
+		{"a page that has not answered, and a copy that is only starting", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), copyOf(2, false, true, false), waitsFor(copyOf(3, false, true, false), 90*time.Second)}},
+			"new version starting in copies 2 and 3 (copy 3's page has not answered after 1m30s); copy 1 keeps serving the previous version until it is ready, then drains"},
 		{"no old copy serves", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, false, true, false), copyOf(2, false, true, false)}}, ""},
 		{"old copies, nothing starting", api.AppStatus{Copies: []api.CopyStatus{copyOf(1, true, true, true), copyOf(2, false, true, true)}}, ""},
 		{"a draining copy is not serving", api.AppStatus{Copies: []api.CopyStatus{draining(copyOf(1, true, true, true)), copyOf(2, false, true, false)}}, ""},
@@ -242,12 +278,48 @@ func TestSpareNote(t *testing.T) {
 		{"the new spare is starting after the switch", api.AppStatus{WarmReplicas: 1, Copies: []api.CopyStatus{
 			{Copy: 1, Role: "draining", Alive: true, Ready: true, Outdated: true}, {Copy: 3, Role: "active", Alive: true, Ready: true}, {Copy: 4, Alive: true}}},
 			"copy 4, the new spare, is starting; until it is ready the app has no spare"},
+		{"the new spare's page fails", api.AppStatus{WarmReplicas: 1, Copies: []api.CopyStatus{
+			{Copy: 1, Role: "draining", Alive: true, Ready: true, Outdated: true}, {Copy: 3, Role: "active", Alive: true, Ready: true}, {Copy: 4, Alive: true, PageProblem: "answers HTTP 500"}}}, ""},
 		{"no spares wanted", api.AppStatus{WarmReplicas: 0, Copies: []api.CopyStatus{
 			{Copy: 1, Role: "draining", Alive: true, Ready: true, Outdated: true}, {Copy: 3, Role: "active", Alive: true, Ready: true}, {Copy: 4, Alive: true}}}, ""},
 		{"nothing drains", api.AppStatus{WarmReplicas: 1, Copies: []api.CopyStatus{{Copy: 3, Role: "active", Alive: true, Ready: true}, {Copy: 4, Alive: true}}}, ""},
 	}
 	for _, tc := range cases {
 		if got := spareNote(tc.app); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPageNote(t *testing.T) {
+	now := time.Date(2026, 10, 11, 19, 0, 0, 0, time.UTC)
+	t.Cleanup(func() { statusNow = time.Now })
+	statusNow = func() time.Time { return now }
+	const noServe = "no copy serves yet: a visitor waits up to 15s, then gets a page saying the app is restarting, until a copy's page answers"
+	fails := func(n int, role string) api.CopyStatus {
+		return api.CopyStatus{Copy: n, Role: role, Alive: true, PageProblem: "answers HTTP 500"}
+	}
+	cases := []struct {
+		name string
+		app  api.AppStatus
+		want []string
+	}{
+		{"one copy's page fails", api.AppStatus{Copies: []api.CopyStatus{fails(1, "")}}, []string{
+			"copy 1 is not ready: its page answers HTTP 500 (see shinyctl logs --copy 1)", noServe}},
+		{"two copies' pages fail", api.AppStatus{Copies: []api.CopyStatus{fails(1, ""), fails(2, "")}}, []string{
+			"copy 1 is not ready: its page answers HTTP 500 (see shinyctl logs --copy 1)",
+			"copy 2 is not ready: its page answers HTTP 500 (see shinyctl logs --copy 2)", noServe}},
+		{"a page that has not answered", api.AppStatus{Copies: []api.CopyStatus{{Copy: 1, Alive: true, PageWaitingSince: now.Add(-25 * time.Second)}}}, []string{
+			"copy 1 is not ready: its page has not answered after 25s (see shinyctl logs --copy 1)", noServe}},
+		{"another copy serves", api.AppStatus{Copies: []api.CopyStatus{{Copy: 1, Role: "active", Alive: true, Ready: true}, fails(2, "")}}, []string{
+			"copy 2 is not ready: its page answers HTTP 500 (see shinyctl logs --copy 2)"}},
+		{"a copy that is only starting", api.AppStatus{Copies: []api.CopyStatus{{Copy: 1, Alive: true}}}, nil},
+		{"a copy that is down", api.AppStatus{Copies: []api.CopyStatus{{Copy: 1, CrashCount: 1}}}, nil},
+		{"a rollout note says it already", api.AppStatus{Copies: []api.CopyStatus{
+			{Copy: 1, Role: "active", Alive: true, Ready: true, Outdated: true}, fails(2, "")}}, nil},
+	}
+	for _, tc := range cases {
+		if got := pageNote(tc.app); !slices.Equal(got, tc.want) {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
 		}
 	}

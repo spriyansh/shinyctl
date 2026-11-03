@@ -14,7 +14,7 @@ import (
 type CopyView struct {
 	App     state.AppState
 	Alive   bool // running, and identifiably this copy (entrypoint and port)
-	Ready   bool // alive and accepting connections on its internal port
+	Ready   bool // alive, listening on its internal port, and its page has answered (once, for this process)
 	Pending bool // not alive, and its exit-watcher has yet to record the exit
 
 	// Sessions is the number of requests open to the copy through the load

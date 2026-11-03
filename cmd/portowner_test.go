@@ -184,6 +184,44 @@ func TestPortIsOurs_UnknownIsRememberedForAWhile(t *testing.T) {
 	}
 }
 
+// The port opens, and something else holds it: the owner check runs before
+// the page is asked, so the copy is moved at once, and nothing is said about
+// a page that a stranger answered.
+func TestReadyWatcher_ATakenPortIsMovedBeforeThePageIsAsked(t *testing.T) {
+	useFakeRscript(t)
+	// The first process's port is another program's. Its pid is known only
+	// once apply has answered, and on a slow machine the port can open before
+	// that: until then, every port is taken to be another program's.
+	var first atomic.Int64
+	useHooks(t, hooks{
+		Owner: func(pid, port int) process.Owner {
+			if f := first.Load(); f == 0 || int64(pid) == f {
+				return process.OwnerOther
+			}
+			return process.OwnerSelf
+		},
+		PageProbe: failingPage,
+	})
+	spec := slowSpec(t, 1, 0, "300ms")
+	cleanupApp(t, spec)
+	buf := captureLog(t)
+	a := applyOK(t, spec)
+	first.Store(int64(a.PID))
+
+	// No ticks: the watcher's own cycle does it.
+	waitUntil(t, "the copy to be moved", 3*time.Second, func() bool {
+		rec, _ := loadCopyRecord(spec, 1)
+		return rec.PID != a.PID
+	})
+	log := buf.String()
+	if !strings.Contains(log, fmt.Sprintf("port %d is held by another program", a.Port)) {
+		t.Errorf("the log does not say the port was held:\n%s", log)
+	}
+	if strings.Contains(log, fmt.Sprintf("copy 1 (pid %d) listens on port", a.PID)) {
+		t.Errorf("the log blames the copy's page for a stranger's answer:\n%s", log)
+	}
+}
+
 // A copy whose own port keeps being judged another program's (a process that
 // hides its descriptors, say) is moved three times and then trusted, with one
 // line in the log, and takes over.

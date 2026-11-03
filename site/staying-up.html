@@ -192,7 +192,7 @@ memory: copy 1 was killed for going over max-memory (512M); it starts again afte
   <li><b>New copies first.</b> <code>replicas</code> new copies start next to the running ones. The spares start once those have taken over, so at most one extra R process runs with the defaults.</li>
   <li><b>The switch.</b> Once the new copies that serve are ready, new visitors go to them, and the old copies drain: they keep the visitors they have until those sessions end or <code>drain-timeout</code> (15 minutes by default) passes. An old spare with no visitors stops right away, and an old copy with no sessions stops within about 15 seconds.</li>
   <li><b>Old pages keep working.</b> A page left open on an old copy keeps working on the old version, and reloading it brings the new one. When an old copy stops at the timeout, pages with the example's script reload onto the new version by themselves.</li>
-  <li><b>A broken version never takes over.</b> If the new copies don't start, the old ones keep serving, and <code>status</code> says which copy doesn't start and where to look.</li>
+  <li><b>A broken version never takes over.</b> If the new copies don't start or fail their page, the old ones keep serving, and <code>status</code> says which copy doesn't start or whose page fails, and where to look.</li>
   <li><b><code>--now</code></b> stops the old copies as soon as the new ones are ready, without waiting for their visitors.</li>
   <li><b>A redeploy during another</b> goes straight to the newest version.</li>
 </ul>

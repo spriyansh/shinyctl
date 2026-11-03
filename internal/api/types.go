@@ -24,11 +24,10 @@ type ApplyResponse struct {
 }
 
 // CopyStatus is one copy of an app: what state.json recorded about its
-// process, plus live IsAlive/IsReady checks, not just a mirror of the file.
-// Ready is purely informational (it never drives a restart decision, only
-// Alive does): the copy's process accepts connections, and the load balancer
-// serves the app's port and lists the copy (for a process from before the
-// load balancer, whether its own port accepts).
+// process, plus live IsAlive/Listening checks, not just a mirror of the file.
+// Ready means the copy's process accepts connections, its page has answered,
+// and the load balancer serves the app's port and lists the copy (for a
+// process from before the load balancer, whether its own port accepts).
 type CopyStatus struct {
 	Copy       int       `json:"copy"`
 	Role       string    `json:"role,omitempty"` // "active", "warm", "draining", or empty when the load balancer doesn't list it
@@ -67,6 +66,15 @@ type CopyStatus struct {
 	// Sessions is the number of requests open to the copy through the load
 	// balancer (a Shiny session is one open WebSocket); nil when unknown.
 	Sessions *int `json:"sessions,omitempty"`
+
+	// PageProblem is what the copy's page answered instead of the page ("answers
+	// HTTP 500", read after "its page") while that keeps the copy from being
+	// ready; empty once the page has answered, or before any answer.
+	PageProblem string `json:"page-problem,omitempty"`
+
+	// PageWaitingSince is when the request for the copy's page that is still
+	// unanswered was sent, once it has waited process.PageSlow; zero otherwise.
+	PageWaitingSince time.Time `json:"page-waiting-since,omitzero"`
 }
 
 // AppStatus is one app's current, observed status, with a row per copy.

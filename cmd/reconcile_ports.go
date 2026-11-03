@@ -70,8 +70,9 @@ const unknownFor = 30 * time.Second
 // judged to be another program's, and brakes remembers the processes (pid and
 // port) that were given up on after maxMoves: from then on that process's port
 // is taken for its own when it accepts connections, as it was before the owner
-// could be asked. It covers that process only: a copy that crashes and starts
-// again is a new process, judged afresh, and its count starts again.
+// could be asked (its page is still asked before the copy is ready). It
+// covers that process only: a copy that crashes and starts again is a new
+// process, judged afresh, and its count starts again.
 var (
 	portMoves sync.Map // seenKey -> int
 	brakes    sync.Map // pidPort -> struct{}
@@ -81,11 +82,11 @@ const maxMoves = 3
 
 // portIsOurs reports whether the socket listening on rec's port is not
 // another program's. A copy counts as ready, and so gets a role and visitors,
-// only when it is: another user's shinyctl-api can pick the same internal
-// port, and its R, or any program, can win the bind. Where the owner can't be
-// told (another system, a failed lookup), or the copy has been moved
-// maxMoves times in a row, a port that accepts connections is taken to be the
-// copy's, as it always was.
+// only when its port is its own (and its page has answered): another user's
+// shinyctl-api can pick the same internal port, and its R, or any program,
+// can win the bind. Where the owner can't be told (another system, a failed
+// lookup), or the copy has been moved maxMoves times in a row, a port that
+// accepts connections is taken to be the copy's, as it always was.
 func portIsOurs(stateFile string, rec state.AppState) bool {
 	key := pidPort{rec.PID, rec.Port}
 	if _, ok := ownedPorts.Load(key); ok {
@@ -129,7 +130,7 @@ func servedNow(stateFile string, rec state.AppState) bool {
 // nothing wrong. It never goes into the table meanwhile. A copy that is
 // judged foreign maxMoves times in a row is not moved again (the judgement is
 // wrong for it: a process that hides its descriptors, say): it is left to
-// the TCP check, once, with a line in the log.
+// the page check, once, with a line in the log.
 func moveTakenPorts(spec manifest.AppSpec, st *state.State, views []reconcile.CopyView) (changed bool) {
 	for i, v := range views {
 		if !v.PortTaken || !v.Alive || !v.App.DrainingSince.IsZero() {
@@ -145,7 +146,7 @@ func moveTakenPorts(spec manifest.AppSpec, st *state.State, views []reconcile.Co
 			brakes.Store(pidPort{rec.PID, rec.Port}, struct{}{})
 			portMoves.Delete(ck)
 			log.Printf("reconcile: %q: copy %d has been moved %d times because its port looked like another program's; this process is trusted on port %d", spec.AppName, rec.Copy, maxMoves, rec.Port)
-			views[i].Ready, views[i].PortTaken = true, false
+			views[i].Ready, views[i].PortTaken = pageReady(rec), false
 			continue
 		}
 		log.Printf("reconcile: %q: copy %d: port %d is held by another program; stopping the copy to start it again on another port", spec.AppName, rec.Copy, rec.Port)

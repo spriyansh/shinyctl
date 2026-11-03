@@ -84,7 +84,7 @@
       </article>
       <article class="fact">
         <h3><span class="dot drain"></span>Redeploys that drain</h3>
-        <p><code>restart</code>, or an <code>apply</code> that changes how the app starts, brings up new copies first. Old copies keep their visitors until those leave or <code>drain-timeout</code> passes. A new version that fails to start never takes over.</p>
+        <p><code>restart</code>, or an <code>apply</code> that changes how the app starts, brings up new copies first. Old copies keep their visitors until those leave or <code>drain-timeout</code> passes. A new version that fails to start, or whose page fails, never takes over.</p>
         <p class="measure">drain-timeout 15m by default · --now skips the wait</p>
       </article>
       <article class="fact">

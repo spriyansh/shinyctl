@@ -173,6 +173,7 @@ func TestHandleStatus_Ready(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitReady(t, process.InternalHost, b.Port)
+	markPageReady(b)
 
 	status := func() map[string]api.AppStatus {
 		rec := httptest.NewRecorder()

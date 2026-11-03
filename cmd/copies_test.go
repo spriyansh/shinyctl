@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -466,7 +468,7 @@ func TestNeverPolicy_PerCopy(t *testing.T) {
 			t.Errorf("copy %d: GaveUp = %v; only the copy that died under `never` has given up", c.Copy, c.GaveUp)
 		}
 	}
-	if !process.IsReady(spec.Host, spec.Port) {
+	if !process.Listening(spec.Host, spec.Port) {
 		t.Error("the port closed while a copy is still running")
 	}
 	// The table says exited, and under it why.
@@ -766,6 +768,277 @@ func TestStartup_OnReadyGivesTheAdoptedBalancerItsCopies(t *testing.T) {
 	}
 }
 
+// A daemon that starts finds the copies the load balancer was serving listed
+// in copies.json, and trusts them before any cycle can run: a cycle with an
+// empty memory would otherwise take a serving copy for a new one, and drop it
+// from the table until its page has been asked.
+func TestStartup_ListedCopiesKeepTheirRolesBeforeTheirPagesAreAsked(t *testing.T) {
+	useFakeRscript(t)
+	spec := copiesSpec(t, "app", 1, 1)
+	cleanupApp(t, spec)
+	one, two := adoptCopies(t, spec)
+	h := fastRetry()
+	h.PageProbe = failingPage
+	useHooks(t, h)
+	want, _ := gateway.Pool(spec.AppStateFile)
+	if len(want.Active) != 1 || len(want.Warm) != 1 {
+		t.Fatalf("pool = %+v, want one active and one warm", want)
+	}
+
+	// The empty memory of a new daemon, and the table the one before left.
+	forgetPage(one)
+	forgetPage(two)
+	trustListedCopies(writeTable(t, proxy.Table{spec.AppStateFile: {Active: []string{dialOf(one)}, Warm: []string{dialOf(two)}}}))
+
+	// A cycle before OnReady has run.
+	reconcileApp(spec.AppStateFile)
+	got, _ := gateway.Pool(spec.AppStateFile)
+	if !slices.Equal(got.Active, want.Active) || !slices.Equal(got.Warm, want.Warm) || len(got.Draining) != 0 {
+		t.Errorf("pool = %+v, want %+v untouched", got, want)
+	}
+	for _, rec := range []state.AppState{one, two} {
+		if cur, _ := loadCopyRecord(spec, rec.Copy); cur.PID != rec.PID || !cur.DrainingSince.IsZero() {
+			t.Errorf("copy %d = %+v, want it untouched", rec.Copy, cur)
+		}
+	}
+
+	// Without the trust the same cycle drops both from the table, and their
+	// pages are asked.
+	buf := captureLog(t)
+	forgetPage(one)
+	forgetPage(two)
+	trustListedCopies(writeTable(t, proxy.Table{}))
+	reconcileApp(spec.AppStateFile)
+	got, _ = gateway.Pool(spec.AppStateFile)
+	if len(got.Active) != 0 || len(got.Warm) != 0 {
+		t.Errorf("pool = %+v, want no copy listed while their pages fail", got)
+	}
+	for _, rec := range []state.AppState{one, two} {
+		if !process.IsAlive(spec, rec) {
+			t.Errorf("copy %d is not alive", rec.Copy)
+		}
+	}
+	waitUntil(t, "copy 1's page to be reported", 5*time.Second, func() bool {
+		return strings.Contains(buf.String(), pageLine(one, "answers HTTP 500"))
+	})
+}
+
+// A daemon that starts asks the page of every running copy the saved table
+// did not list (one that was still starting when the daemon before stopped),
+// as soon as the load balancer has its table back: OnReady starts their
+// ready-watchers, so such a copy gets its role without waiting for a tick.
+func TestStartup_OnReadyWatchesTheCopiesItDoesNotTrust(t *testing.T) {
+	useFakeRscript(t)
+	spec := copiesSpec(t, "app", 1, 1)
+	cleanupApp(t, spec)
+	one, two := adoptCopies(t, spec)
+
+	// Copy 1 was trusted from the table; copy 2 was not listed.
+	forgetPage(two)
+
+	dir, err := os.MkdirTemp("", "sp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	exe, _ := os.Executable()
+	_, sup, err := newGateway(dir, exe, filepath.Join(dir, "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup.OnReady()
+
+	// No tick and no cycle of the test's own: OnReady's rebuild leaves copy 2
+	// out, and only its watcher puts it in.
+	pool := waitRoles(t, spec, 1, 1)
+	if !slices.Equal(pool.Active, []string{dialOf(one)}) || !slices.Equal(pool.Warm, []string{dialOf(two)}) {
+		t.Errorf("pool = %+v, want copy 1 active and copy 2 warm", pool)
+	}
+	if !pageReady(two) {
+		t.Error("copy 2's page was not asked")
+	}
+}
+
+// A copy whose page fails is never given a role, whatever the cycles say, and
+// serves as soon as its page answers.
+func TestApply_PageFailingCopiesAreNeverPromoted(t *testing.T) {
+	useFakeRscript(t)
+	useHooks(t, fastRetry())
+	spec := copiesSpec(t, "app", 1, 1)
+	file := brokenPage(t, &spec)
+	cleanupApp(t, spec)
+	buf := captureLog(t)
+	applyOK(t, spec)
+
+	waitUntil(t, "both pages to be reported", 10*time.Second, func() bool {
+		recs := loadCopies(t, spec)
+		if len(recs) != 2 {
+			return false
+		}
+		for _, rec := range recs {
+			if !strings.Contains(buf.String(), pageLine(rec, "answers HTTP 500")) {
+				return false
+			}
+		}
+		return true
+	})
+	stop := tick(spec)
+	end := time.Now().Add(time.Second)
+	for time.Now().Before(end) {
+		if pool, _ := gateway.Pool(spec.AppStateFile); len(pool.Active) != 0 || len(pool.Warm) != 0 {
+			stop()
+			t.Fatalf("pool = %+v, want no copy listed while the pages fail", pool)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stop()
+
+	app := statusOf(t, spec.AppName)
+	if len(app.Copies) != 2 {
+		t.Fatalf("copies = %+v, want two", app.Copies)
+	}
+	for _, c := range app.Copies {
+		if !c.Alive || c.Ready || c.PageProblem != "answers HTTP 500" {
+			t.Errorf("copy %d = %+v, want it alive, not ready, with the page's problem", c.Copy, c)
+		}
+	}
+	var out bytes.Buffer
+	if err := writeStatus(&out, httptestStatus(t)); err != nil {
+		t.Fatal(err)
+	}
+	failing := 0
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "app ") && strings.Contains(line, "page-failing") {
+			failing++
+		}
+	}
+	if failing != 2 {
+		t.Errorf("status shows %d copies as page-failing, want 2:\n%s", failing, out.String())
+	}
+	for _, want := range []string{
+		"app: copy 1 is not ready: its page answers HTTP 500 (see shinyctl logs --copy 1)",
+		"app: no copy serves yet: a visitor waits up to 15s, then gets a page saying the app is restarting, until a copy's page answers",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("status lacks %q:\n%s", want, out.String())
+		}
+	}
+
+	fixPage(t, file)
+	waitRoles(t, spec, 1, 1)
+}
+
+// A copy whose page answered stays ready for as long as its process lives:
+// R does one thing at a time, so a busy copy answers no page for a while, and
+// must not lose its visitors for that. Even when the cycle's own probe of its
+// port misses once, and its watcher is brought back, the page is not asked
+// again.
+func TestReady_IsKeptWhenThePageFailsLater(t *testing.T) {
+	useFakeRscript(t)
+	spec := copiesSpec(t, "app", 1, 1)
+	file := filepath.Join(t.TempDir(), "broken")
+	spec.Env = map[string]string{"FAKE_RSCRIPT_PAGE_FAILS_WHILE": file}
+	cleanupApp(t, spec)
+	applyOK(t, spec)
+	pool := waitRoles(t, spec, 1, 1)
+	one, two := copyByDial(t, spec, pool.Active[0]), copyByDial(t, spec, pool.Warm[0])
+
+	var asked atomic.Int32
+	var armed, missed atomic.Bool
+	buf := captureLog(t)
+	useHooks(t, hooks{
+		PageProbe: func(ctx context.Context, host string, port int) process.Page {
+			asked.Add(1)
+			return process.CheckPage(ctx, host, port)
+		},
+		ObserveProbe: func(host string, port int) bool {
+			if port == one.Port && armed.CompareAndSwap(true, false) {
+				missed.Store(true)
+				return false
+			}
+			return process.Listening(host, port)
+		},
+	})
+	same := func() bool {
+		got, _ := gateway.Pool(spec.AppStateFile)
+		return slices.Equal(got.Active, []string{dialOf(one)}) && slices.Equal(got.Warm, []string{dialOf(two)})
+	}
+
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop := sync.OnceFunc(tick(spec))
+	defer stop()
+	end := time.Now().Add(time.Second)
+	for time.Now().Before(end) {
+		if got, _ := gateway.Pool(spec.AppStateFile); !same() {
+			t.Fatalf("pool = %+v, want copy 1 active and copy 2 warm while the page fails", got)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	armed.Store(true)
+	waitUntil(t, "the probe to miss", 10*time.Second, missed.Load)
+	// The cycle that missed takes copy 1 out of the table and brings its
+	// watcher back. While that cycle runs, the pool can still look as before,
+	// and the watcher has not looked at the page yet. So the ticks stop first:
+	// after that only the watcher puts the copy back, and it frees its slot
+	// before it does, once it has decided about the page.
+	stop()
+	waitUntil(t, "copy 1's watcher to put it back", 10*time.Second, func() bool {
+		_, watching := readyWatched.Load(pidPort{one.PID, one.Port})
+		return !watching && same()
+	})
+	if n := asked.Load(); n != 0 {
+		t.Errorf("the page was asked %d times for copies that had answered", n)
+	}
+	for _, rec := range []state.AppState{one, two} {
+		if strings.Contains(buf.String(), fmt.Sprintf("copy %d (pid %d) listens on port", rec.Copy, rec.PID)) {
+			t.Errorf("the log says something about copy %d's page:\n%s", rec.Copy, buf.String())
+		}
+	}
+}
+
+// A page that takes long is waited for, once: the copy is not ready until it
+// answers, the wait is reported after PageSlow, and R renders the page once.
+func TestReady_ASlowPageIsWaitedForAndAskedOnce(t *testing.T) {
+	useFakeRscript(t)
+	var mu sync.Mutex
+	calls := map[int]int{}
+	useHooks(t, hooks{
+		PageSlow: 200 * time.Millisecond,
+		PageProbe: func(ctx context.Context, host string, port int) process.Page {
+			mu.Lock()
+			calls[port]++
+			mu.Unlock()
+			return process.CheckPage(ctx, host, port)
+		},
+	})
+	spec := copiesSpec(t, "app", 1, 0)
+	spec.Env = map[string]string{"FAKE_RSCRIPT_PAGE_DELAY": "1500ms"}
+	cleanupApp(t, spec)
+	buf := captureLog(t)
+	a := applyOK(t, spec)
+
+	waitUntil(t, "the wait to be reported", 5*time.Second, func() bool {
+		return strings.Contains(buf.String(), pageLine(a, "has not answered after 200ms; still waiting"))
+	})
+	// Still waiting: starting, with how long it has waited.
+	if c := statusOf(t, spec.AppName).Copies[0]; !c.Alive || c.Ready || c.PageProblem != "" || c.PageWaitingSince.IsZero() {
+		t.Errorf("copy = %+v, want it alive, not ready, waiting for its page", c)
+	}
+	waitRoles(t, spec, 1, 0)
+	mu.Lock()
+	n := calls[a.Port]
+	mu.Unlock()
+	if n != 1 {
+		t.Errorf("the page was asked %d times, want once", n)
+	}
+	if want := fmt.Sprintf("copy %d (pid %d): its page answers now", a.Copy, a.PID); !strings.Contains(buf.String(), want) {
+		t.Errorf("the log lacks %q:\n%s", want, buf.String())
+	}
+}
+
 func nrolesNow(spec manifest.AppSpec) [2]int {
 	p, _ := gateway.Pool(spec.AppStateFile)
 	return [2]int{len(p.Active), len(p.Warm)}
@@ -804,7 +1077,7 @@ func TestReadyWatcher_OneMissedProbeDoesNotStrandTheCopy(t *testing.T) {
 		if missed.CompareAndSwap(false, true) {
 			return false
 		}
-		return process.IsReady(host, port)
+		return process.Listening(host, port)
 	}})
 	spec := copiesSpec(t, "app", 1, 0)
 	cleanupApp(t, spec)
@@ -885,21 +1158,27 @@ func TestRefreshPools_HasNoSideEffects(t *testing.T) {
 func TestReadyWatcher_StopsWhenThePidIsAnotherUsers(t *testing.T) {
 	var probed atomic.Int32
 	useHooks(t, hooks{
-		Signal0:    func(int) error { return syscall.EPERM },
-		WatchProbe: func(string, int) bool { probed.Add(1); return true },
+		Signal0: func(int) error { return syscall.EPERM },
+		PageProbe: func(context.Context, string, int) process.Page {
+			probed.Add(1)
+			return process.Page{Listening: true, Ready: true}
+		},
 	})
 	const pid = 987654
 	done := make(chan struct{})
-	go func() { watchReady("/no/such/state.json", pid, 1); close(done) }()
+	go func() {
+		watchReady(manifest.AppSpec{AppStateFile: "/no/such/state.json"}, state.AppState{PID: pid, Port: 1})
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the watcher is still running")
 	}
 	if probed.Load() != 0 {
-		t.Errorf("the port was probed %d times for a process that is not ours", probed.Load())
+		t.Errorf("the page was probed %d times for a process that is not ours", probed.Load())
 	}
-	if _, still := readyWatched.Load(pid); still {
+	if _, still := readyWatched.Load(pidPort{pid, 1}); still {
 		t.Error("the watcher's slot was not freed")
 	}
 }

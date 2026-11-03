@@ -222,6 +222,22 @@ func runFakeRscript(args string) {
 			<-r.Context().Done()
 			return
 		}
+		if r.URL.Path == "/" {
+			// FAKE_RSCRIPT_PAGE_DELAY makes the page slow, the way a heavy
+			// ui is, and FAKE_RSCRIPT_PAGE_FAILS_WHILE makes it answer 500, as
+			// Shiny does when the ui fails, for as long as the named file
+			// exists.
+			if d, err := time.ParseDuration(os.Getenv("FAKE_RSCRIPT_PAGE_DELAY")); err == nil {
+				time.Sleep(d)
+			}
+			if f := os.Getenv("FAKE_RSCRIPT_PAGE_FAILS_WHILE"); f != "" {
+				if _, err := os.Stat(f); err == nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					io.WriteString(w, "the page is broken")
+					return
+				}
+			}
+		}
 		io.WriteString(w, body)
 	}))
 	os.Exit(1)
@@ -350,7 +366,7 @@ func waitReady(t *testing.T, host string, port int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if process.IsReady(host, port) {
+		if process.Listening(host, port) {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -412,6 +428,7 @@ func startCopy(t *testing.T, spec manifest.AppSpec) state.AppState {
 		t.Fatal(err)
 	}
 	waitReady(t, process.InternalHost, app.Port)
+	markPageReady(app) // an earlier daemon found it ready
 	refreshPools()
 	if err := syncProxy(spec.AppStateFile); err != nil {
 		t.Fatalf("syncProxy: %v", err)
@@ -529,7 +546,7 @@ func waitClosed(t *testing.T, host string, port int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if !process.IsReady(host, port) {
+		if !process.Listening(host, port) {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
