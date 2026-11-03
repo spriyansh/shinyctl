@@ -97,7 +97,7 @@ func newShutdowner(yes bool, out, errOut io.Writer) (*shutdowner, error) {
 		dialable:   func() bool { return process.SocketDialable(socketPath) },
 		status:     func() (api.StatusResponse, error) { return api.Status(socketPath) },
 		leftovers:  func() (int, []string, error) { return leftovers(proxyDir, registryPath) },
-		service:    func() (bool, error) { return false, nil },
+		service:    func() (bool, error) { return stopService(realServiceEnv()) },
 		start:      process.EnsureAPIRunning,
 		shutdown:   func() (api.ShutdownResponse, error) { return api.Shutdown(socketPath) },
 		wait:       10 * time.Second,

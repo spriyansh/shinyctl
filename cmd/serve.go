@@ -142,7 +142,7 @@ var serveCmd = &cobra.Command{
 		mux.HandleFunc("/delete", handleDelete)
 		mux.HandleFunc("/restart", handleRestart)
 		mux.HandleFunc("/shutdown", shutdownHandler(shutdownDeps{
-			unit: func() (string, bool) { return "", false },
+			unit: ownServiceUnit,
 			// ensure does not watch the context, so wait for the supervisor
 			// to return: after that nothing starts or adopts a load balancer.
 			stopLoops:    func() { cancelLoop(); <-supDone },
