@@ -39,9 +39,9 @@ func waitForBalancer(g *proxy.Gateway, wait time.Duration) {
 }
 
 // hooks are the few things the tests substitute (they exist for the tests,
-// nothing else sets them): what the load balancer is
-// serving, how an address and a copy's page are probed, and how long a
-// recorded port is waited for. A zero field means the real one. The tests set them through an atomic
+// nothing else sets them): what the load balancer is serving, how an address
+// and a copy's page are probed, and how long a recorded port is waited for. A
+// zero field means the real one. The tests set them through an atomic
 // pointer, since exit-watchers of earlier tests may still be reading.
 type hooks struct {
 	Served         func() []proxy.App

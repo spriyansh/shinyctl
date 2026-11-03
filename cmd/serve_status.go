@@ -107,10 +107,10 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 				// Ready needs the process answering and, for a process behind
 				// the load balancer, the load balancer serving the app's own
 				// port and listing the copy (a role is only given to a copy
-				// whose page has answered, or one that drains); the public port is not probed,
-				// since the load balancer accepts there even while the
-				// process is down. A record from before the load balancer
-				// still holds the app's port itself.
+				// whose page has answered, or one that drains); the public
+				// port is not probed, since the load balancer accepts there
+				// even while the process is down. A record from before the
+				// load balancer still holds the app's port itself.
 				if rec.Copy >= 1 {
 					copy.Ready = process.Listening(process.InternalHost, rec.Port) && copy.Role != "" && serves
 					// What the copy's watcher found; status asks no one.

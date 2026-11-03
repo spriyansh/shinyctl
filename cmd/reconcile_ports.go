@@ -84,10 +84,9 @@ const maxMoves = 3
 // another program's. A copy counts as ready, and so gets a role and visitors,
 // only when its port is its own (and its page has answered): another user's
 // shinyctl-api can pick the same internal port, and its R, or any program,
-// can win the bind. Where the owner can't be
-// told (another system, a failed lookup), or the copy has been moved
-// maxMoves times in a row, a port that accepts connections is taken to be the
-// copy's, as it always was.
+// can win the bind. Where the owner can't be told (another system, a failed
+// lookup), or the copy has been moved maxMoves times in a row, a port that
+// accepts connections is taken to be the copy's, as it always was.
 func portIsOurs(stateFile string, rec state.AppState) bool {
 	key := pidPort{rec.PID, rec.Port}
 	if _, ok := ownedPorts.Load(key); ok {
