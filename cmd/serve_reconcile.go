@@ -128,8 +128,9 @@ func triggerReconcile(stateFile string) {
 // replacement.
 func reconcileApp(stateFile string) bool {
 	// Cheap gate before the lock, so this never queues behind a stop or
-	// delete that is holding it.
-	if !appRegistry.Managed(stateFile) {
+	// delete that is holding it, or behind /shutdown's stops, and a
+	// watcher that sees a copy go down logs nothing about it.
+	if shuttingDown.Load() || !appRegistry.Managed(stateFile) {
 		return false
 	}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -96,6 +97,41 @@ func Delete(socketPath string, spec manifest.AppSpec) (ApplyResponse, error) {
 // next to the running ones, which then drain (or stop, with opts.Now).
 func Restart(socketPath string, spec manifest.AppSpec, opts Options) (ApplyResponse, error) {
 	return postSpec(socketPath, opts.path("/restart"), spec)
+}
+
+// ErrNoShutdown is what Shutdown returns when shinyctl-api has no /shutdown:
+// it is a build from before the command.
+var ErrNoShutdown = errors.New("shinyctl-api has no shutdown endpoint")
+
+// shutdownTimeout is how long Shutdown waits for the answer. It covers a
+// shinyctl-api that first waits out a handover between load balancers, then
+// the apps' stops (up to 12 seconds) and the load balancer's.
+const shutdownTimeout = 3 * time.Minute
+
+// Shutdown asks shinyctl-api to stop every app and the load balancer and then
+// exit. It answers before it exits.
+func Shutdown(socketPath string) (ShutdownResponse, error) {
+	client := unixClient(socketPath)
+	client.Timeout = shutdownTimeout
+	resp, err := client.Post("http://unix/shutdown", "application/json", nil)
+	if err != nil {
+		return ShutdownResponse{}, fmt.Errorf("calling shinyctl-api: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ShutdownResponse{}, ErrNoShutdown
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return ShutdownResponse{}, fmt.Errorf("shinyctl-api: %s", bytes.TrimSpace(msg))
+	}
+
+	var out ShutdownResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ShutdownResponse{}, err
+	}
+	return out, nil
 }
 
 // Status fetches shinyctl-api's /status endpoint over the Unix socket at

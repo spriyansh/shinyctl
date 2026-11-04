@@ -320,6 +320,7 @@ max-memory: 2G                  # a copy that holds more is killed and restarted
 | `restart -f <file>` | Starts new copies from the manifest as it is now, so new code in `app.R` and other app files takes effect, and returns at once. Once they are ready they take new visitors; the old copies keep theirs until those leave or `drain-timeout` passes (see Redeploys). `--now` stops the old copies as soon as the new ones are ready. Also starts a stopped or crash-looping app right away. |
 | `logs -f <file>` | Prints the last 100 lines of the app's log. `--copy N` shows one copy; without it every copy is shown. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
 | `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
+| `shutdown` | Stops every app, the load balancer and `shinyctl-api`, after asking when apps are running (`--yes` skips the question). On Linux it stops the systemd service first. The apps stay registered and come back with the next `serve -d`, any `apply`, or at boot. Starts `shinyctl-api` only when it is not running but left something behind. |
 | `startup` | Prints a systemd user unit that starts `shinyctl-api` at boot (Linux), and on stderr how to install it. |
 | `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
 | `version` | Prints the version: `v0.1.0` for a release or `go install ...@v0.1.0`, `dev (abc1234)` for a build from a checkout (`, modified` when it has uncommitted changes). |
@@ -487,7 +488,7 @@ loginctl enable-linger "$USER"
 - Stop a `shinyctl-api` you started by hand first (the `pkill` line). It
   would hold the socket and make the service's copy exit. Its apps and the
   load balancer keep running, and the service's `shinyctl-api` adopts
-  them.
+  them. (`shinyctl shutdown` would stop the apps too.)
 - The unit uses the `PATH` of the shell you ran `startup` in, plus
   `Rscript`'s directory. Under systemd, apps get the user manager's
   environment, that `PATH`, and the manifest's `env`.
@@ -506,10 +507,10 @@ pkill -u "$USER" -f '(^|/)shinyctl serve$' && shinyctl serve -d
 
 Your apps keep running: the new `shinyctl-api` adopts them, and the copies
 the load balancer was serving stay ready without their page being asked
-again. If the new version comes with a new load balancer, it is started
-next to the old one and takes over without refusing a connection. The old
-one answers the requests it is in the middle of, for up to five seconds, and
-then stops.
+again. `shinyctl shutdown` is not needed for an upgrade. If the new version
+comes with a new load balancer, it is started next to the old one and takes
+over without refusing a connection. The old one answers the requests it is
+in the middle of, for up to five seconds, and then stops.
 Connections that were open on it (a Shiny session is one) end, so a page open
 at that moment reconnects or reloads once (pages with the example's script do
 it by themselves). On Linux, a request that reaches the old one in the very
@@ -518,10 +519,27 @@ instant it closes can fail once.
 ## Stopping and uninstalling
 
 `shinyctl-api` and the load balancer keep running after you remove the
-`shinyctl` binary, and the load balancer keeps every app's port open. To stop
-shinyctl completely, for example before uninstalling or downgrading it,
-delete the apps, stop the service if you installed one, then stop the two
-processes:
+`shinyctl` binary, and the load balancer keeps every app's port open. One
+command stops all of it:
+
+```sh
+shinyctl shutdown
+```
+
+When apps are running it lists them, with their open sessions, and asks
+before stopping anything; `--yes` skips the question, and is required
+when there is no terminal to ask (a script, cron). It stops every app's R
+processes, the load balancer and `shinyctl-api`, and on Linux the systemd
+service first, which stays enabled. A `shinyctl-api` that is not running
+but left apps or the load balancer behind is started once to stop them,
+and the command says so.
+
+The apps stay registered: the next `shinyctl serve -d`, any `apply`, or
+the service at boot starts them all again. `delete` the ones that should
+not come back, either before or after.
+
+Without the command, for example with an older `shinyctl-api`, the same
+by hand:
 
 ```sh
 shinyctl delete -f shinyctl.yaml                       # for each app
@@ -530,10 +548,9 @@ pkill -u "$USER" -f '(^|/)shinyctl (serve|proxy --config .*)$'
 ```
 
 The pattern matches only `shinyctl serve` and `shinyctl proxy --config …` of
-your user, not other `shinyctl` commands. An app you didn't delete keeps
-running, and its port stays closed once the load balancer is gone.
+your user, not other `shinyctl` commands.
 
-To remove shinyctl itself:
+To remove shinyctl itself, after `shutdown`:
 
 ```sh
 rm -f ~/.config/systemd/user/shinyctl.service && systemctl --user daemon-reload   # Linux, if you installed the service
@@ -565,7 +582,8 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
   app it was managing. On Linux, [the unit above](#start-at-boot-linux)
   starts it at boot and restarts it whenever it dies. The load balancer
   keeps serving them, but if it dies too, every app is unreachable until
-  `shinyctl-api` is back.
+  `shinyctl-api` is back. `shinyctl shutdown` is the one thing that stops
+  all three on purpose.
 - **Logging out can kill everything on systemd servers.** Enable
   lingering with `loginctl enable-linger $USER` if your server allows it.
   `shinyctl-api` writes a warning to `api.log` when lingering is off.

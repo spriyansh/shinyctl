@@ -23,6 +23,27 @@ type ApplyResponse struct {
 	MachineMemory *MachineMemory `json:"machine-memory,omitempty"`
 }
 
+// ShutdownResponse is shinyctl-api's answer to /shutdown, sent before it exits.
+// Errors do not stop a shutdown (its loops are cancelled and it cannot carry
+// on), so they come back here as Problems next to what was stopped.
+type ShutdownResponse struct {
+	PID int `json:"pid"` // the shinyctl-api process that is exiting
+
+	// Apps are the apps with at least one copy that was stopped, by name.
+	Apps []string `json:"apps,omitempty"`
+
+	// Balancer says whether a load balancer was stopped.
+	Balancer bool `json:"balancer,omitempty"`
+
+	// Notes are things to tell the user that are not problems, such as a
+	// recorded process that was left alone because it is not the app's.
+	Notes []string `json:"notes,omitempty"`
+
+	// Problems are what could not be stopped. Their records are kept, so
+	// running shutdown again retries.
+	Problems []string `json:"problems,omitempty"`
+}
+
 // CopyStatus is one copy of an app: what state.json recorded about its
 // process, plus live IsAlive/Listening checks, not just a mirror of the file.
 // Ready means the copy's process accepts connections, its page has answered,

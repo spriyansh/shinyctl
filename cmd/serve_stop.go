@@ -117,28 +117,42 @@ func stopRecorded(op string, spec manifest.AppSpec, app state.AppState) (signale
 	return false, fmt.Sprintf(" (recorded pid %d is not running this app, so it was not signaled)", app.PID), nil
 }
 
-// stopAll is stopRecorded for every copy at once: they are stopped in
-// parallel, since each may take up to ten seconds to answer SIGTERM, and the
-// notes come back in copy order. The first error is returned after all have
-// been tried.
-func stopAll(op string, spec manifest.AppSpec, recs []state.AppState) (notes string, err error) {
-	results := make([]string, len(recs))
-	errs := make([]error, len(recs))
+// copyStop is what stopping one recorded copy came to: whether the process
+// was ours and has been stopped, the note for a reused PID, and the error.
+type copyStop struct {
+	signaled bool
+	note     string
+	err      error
+}
+
+// stopEach is stopRecorded for every copy at once: they are stopped in
+// parallel, since each may take up to ten seconds to answer SIGTERM. The
+// outcomes come back in copy order, every copy tried whatever the others did.
+func stopEach(op string, spec manifest.AppSpec, recs []state.AppState) []copyStop {
+	results := make([]copyStop, len(recs))
 	var wg sync.WaitGroup
 	for i, rec := range recs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, results[i], errs[i] = stopRecorded(op, spec, rec)
+			results[i].signaled, results[i].note, results[i].err = stopRecorded(op, spec, rec)
 		}()
 	}
 	wg.Wait()
+	return results
+}
 
-	for i := range recs {
-		if errs[i] != nil {
-			return "", errs[i]
+// stopAll is stopEach for callers that want one answer: the notes in copy
+// order, or the first error after all have been tried.
+func stopAll(op string, spec manifest.AppSpec, recs []state.AppState) (notes string, err error) {
+	results := stopEach(op, spec, recs)
+	for _, r := range results {
+		if r.err != nil {
+			return "", r.err
 		}
-		notes += results[i]
+	}
+	for _, r := range results {
+		notes += r.note
 	}
 	return notes, nil
 }

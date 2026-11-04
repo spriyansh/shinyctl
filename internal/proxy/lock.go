@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/spriyansh/shinyctl/internal/process"
 )
 
 // LockPath is the proxy.lock beside configPath. The proxy holds an
@@ -152,4 +154,80 @@ func BuildID() string {
 		return "unknown"
 	}
 	return fmt.Sprintf("%x-%x", fi.Size(), fi.ModTime().UnixNano())
+}
+
+// commandLineFor is the command line of the load balancer whose config is
+// configPath, as a substring: how a process is told to be shinyctl's load
+// balancer before anything signals it.
+func commandLineFor(configPath string) string {
+	return "proxy --config " + configPath
+}
+
+// RunningPID is the process holding the lock beside configPath when it is
+// demonstrably the load balancer for that config (its command line says so);
+// otherwise 0. It reads the lock and nothing else, so it says the same
+// whether or not a Supervisor is running, and it never starts anything.
+func RunningPID(configPath string) int {
+	lock := LockPath(configPath)
+	if !lockHeld(lock) {
+		return 0
+	}
+	info := waitHolder(lock)
+	if info.PID > 0 && process.HasCommandLine(info.PID, commandLineFor(configPath)) {
+		return info.PID
+	}
+	return 0
+}
+
+// StopRunning stops the load balancer for s through its lock, and says
+// whether it signalled one. It does not depend on what a Supervisor
+// remembers: that is empty when ensure failed or the load balancer is in
+// restart backoff. A lock held by a process that is not demonstrably the
+// load balancer is never signalled.
+func StopRunning(s Settings) (stopped bool, err error) {
+	admin := Admin{Socket: s.AdminSocket}
+	command := commandLineFor(s.ConfigPath)
+	return stopRunning(
+		func() int { return RunningPID(s.ConfigPath) },
+		func() int {
+			pid, err := admin.ServingPID()
+			if err != nil || pid <= 0 || !process.HasCommandLine(pid, command) {
+				return 0
+			}
+			return pid
+		},
+		func(pid int) (bool, error) {
+			return process.StopIf(pid, func() bool { return process.HasCommandLine(pid, command) })
+		},
+	)
+}
+
+// stopRunning is StopRunning with its three lookups as parameters. Round one
+// stops the process that answers on the control socket when it is not the
+// lock holder (a successor started with --after that still waits for the
+// lock and would take it and go on serving once the holder is gone), then the
+// holder. Round two stops a holder that has appeared meanwhile. There is no
+// third round.
+func stopRunning(holder, serving func() int, stop func(pid int) (bool, error)) (stopped bool, err error) {
+	done := map[int]bool{}
+	stopOne := func(pid int) {
+		if pid <= 0 || done[pid] {
+			return
+		}
+		done[pid] = true
+		signaled, serr := stop(pid)
+		stopped = stopped || signaled
+		if serr != nil && err == nil {
+			err = serr
+		}
+	}
+
+	h := holder()
+	if sv := serving(); sv != h {
+		stopOne(sv)
+	}
+	stopOne(h)
+
+	stopOne(holder())
+	return stopped, err
 }

@@ -114,7 +114,7 @@ pkill -u "$USER" -f '(^|/)shinyctl serve$'
 systemctl --user enable --now shinyctl
 loginctl enable-linger "$USER"</code></pre>
 <ul>
-  <li>The <code>pkill</code> line stops a <code>shinyctl-api</code> you started by hand, which would hold the socket. Its apps and the load balancer keep running, and the service adopts them.</li>
+  <li>The <code>pkill</code> line stops a <code>shinyctl-api</code> you started by hand, which would hold the socket. Its apps and the load balancer keep running, and the service adopts them. (<code>shinyctl shutdown</code> would stop the apps too.)</li>
   <li>The unit uses the <code>PATH</code> of the shell you ran <code>startup</code> in, plus <code>Rscript</code>'s folder. Run <code>startup</code> again after moving <code>shinyctl</code> or R.</li>
   <li>Lingering keeps your user's services running after you log out. Without it, logging out can stop everything; <code>shinyctl-api</code> warns about it in <code>api.log</code>.</li>
   <li>On macOS, run <code>shinyctl serve -d</code> after a reboot.</li>
@@ -134,10 +134,9 @@ shinyctl logs --api                        <span class="c"># shinyctl-api and th
 <p>The files are under <code>~/.shinyctl/logs/</code>, and rotate at 1 GiB, keeping one previous file.</p>
 
 <h2 id="uninstall">Stopping and uninstalling</h2>
-<p><code>shinyctl-api</code> and the load balancer keep running after you remove the binary, and the load balancer keeps every app's port open. To stop everything, delete the apps, stop the service if you installed one, then stop the two processes:</p>
-<pre><code>shinyctl delete -f shinyctl.yaml                       <span class="c"># for each app</span>
-systemctl --user disable --now shinyctl                <span class="c"># Linux, if you installed the service</span>
-pkill -u "$USER" -f '(^|/)shinyctl (serve|proxy --config .*)$'</code></pre>
+<p><code>shinyctl-api</code> and the load balancer keep running after you remove the binary, and the load balancer keeps every app's port open. One command stops all of it:</p>
+<pre><code>shinyctl shutdown</code></pre>
+<p>When apps are running it lists them, with their open sessions, and asks before stopping anything; <code>--yes</code> skips the question. It stops every app, the load balancer and <code>shinyctl-api</code>, and on Linux the service first, which stays enabled. The apps stay registered: the next <code>shinyctl serve -d</code>, any <code>apply</code>, or the service at boot starts them all again, so <code>delete</code> the ones that should not come back.</p>
 <p>Then remove shinyctl itself:</p>
 <pre><code>rm -f ~/.config/systemd/user/shinyctl.service &amp;&amp; systemctl --user daemon-reload   <span class="c"># Linux, with the service</span>
 rm -f ~/.local/bin/shinyctl
@@ -148,7 +147,7 @@ rm -rf ~/.shinyctl</code></pre>
   <li><b>One machine.</b> Copies of an app run on the machine shinyctl runs on.</li>
   <li><b>Copies don't share memory.</b> Anything a session keeps in R lives in its copy.</li>
   <li><b>The load balancer is in the path of every request.</b> If it dies, <code>shinyctl-api</code> restarts it within about a second, and the apps are unreachable until then.</li>
-  <li><b>Apps keep running if <code>shinyctl-api</code> dies, but nothing restarts a crashed copy</b> until it is back. Any <code>apply</code>, or <code>shinyctl serve -d</code>, brings it back; on Linux the service restarts it by itself.</li>
+  <li><b>Apps keep running if <code>shinyctl-api</code> dies, but nothing restarts a crashed copy</b> until it is back. Any <code>apply</code>, or <code>shinyctl serve -d</code>, brings it back; on Linux the service restarts it by itself. <code>shinyctl shutdown</code> is the one thing that stops everything on purpose.</li>
   <li><b><code>stop</code> signals only the main R process.</b> Workers the app started, for example through callr or future, can outlive it.</li>
   <li><b>A drain ends at <code>drain-timeout</code>.</b> Sessions still open then are cut, and a tab left open counts as a session.</li>
   <li><b>Readiness is the page, asked once per process.</b> An error in <code>server</code>, which happens per session, and a page that breaks after the copy became ready are not seen.</li>

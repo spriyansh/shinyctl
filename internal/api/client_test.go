@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -57,5 +58,65 @@ func TestOptions_NowIsAQuery(t *testing.T) {
 		if seen[i] != want[i] {
 			t.Errorf("request %d = %q, want %q", i, seen[i], want[i])
 		}
+	}
+}
+
+func TestShutdown_Endpoint(t *testing.T) {
+	dir, err := os.MkdirTemp("", "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var seen []string
+	code := http.StatusOK
+	body := `{"pid":42,"apps":["a","b"],"balancer":true,"notes":["n"],"problems":["p"]}`
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		w.WriteHeader(code)
+		w.Write([]byte(body))
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	resp, err := Shutdown(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.PID != 42 || len(resp.Apps) != 2 || !resp.Balancer || len(resp.Notes) != 1 || len(resp.Problems) != 1 {
+		t.Errorf("response = %+v", resp)
+	}
+
+	mu.Lock()
+	code, body = http.StatusNotFound, "404 page not found\n"
+	mu.Unlock()
+	if _, err := Shutdown(sock); !errors.Is(err, ErrNoShutdown) {
+		t.Errorf("404: err = %v, want ErrNoShutdown", err)
+	}
+
+	mu.Lock()
+	code, body = http.StatusConflict, "it is already shutting down\n"
+	mu.Unlock()
+	if _, err := Shutdown(sock); err == nil || err.Error() != "shinyctl-api: it is already shutting down" {
+		t.Errorf("409: err = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range seen {
+		if s != "POST /shutdown" {
+			t.Errorf("request %q, want POST /shutdown", s)
+		}
+	}
+	if len(seen) != 3 {
+		t.Errorf("%d requests, want 3", len(seen))
 	}
 }

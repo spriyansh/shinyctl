@@ -65,6 +65,12 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	unlock := state.Lock(spec.AppStateFile)
 	defer unlock()
 
+	// Before Remember and the revision bump.
+	if shuttingDown.Load() {
+		http.Error(w, errShuttingDown.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
 	if err := checkMove(spec); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return

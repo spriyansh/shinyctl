@@ -704,3 +704,161 @@ func TestSupervisor_AFailedLoadIsNotStartedUntilTheFallbackServes(t *testing.T) 
 		}
 	}
 }
+
+func TestRunningPID(t *testing.T) {
+	e := newSupEnv(t)
+	e.cleanupProxy(t)
+	if got := RunningPID(e.settings.ConfigPath); got != 0 {
+		t.Errorf("no lock file: RunningPID = %d, want 0", got)
+	}
+
+	// A lock file nobody holds.
+	f, err := acquireLock(LockPath(e.settings.ConfigPath), lockInfo{PID: os.Getpid(), Build: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if got := RunningPID(e.settings.ConfigPath); got != 0 {
+		t.Errorf("lock nobody holds: RunningPID = %d, want 0", got)
+	}
+
+	// Held, but by a process that is not a load balancer for this config.
+	f, err = acquireLock(LockPath(e.settings.ConfigPath), lockInfo{PID: os.Getpid(), Build: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := RunningPID(e.settings.ConfigPath); got != 0 {
+		t.Errorf("a holder that is not the load balancer: RunningPID = %d, want 0", got)
+	}
+	f.Close()
+
+	s := e.supervisor(t, "")
+	run(t, s)
+	if !s.WaitReady(10 * time.Second) {
+		t.Fatal("the load balancer did not become ready")
+	}
+	if got := RunningPID(e.settings.ConfigPath); got != s.PID() {
+		t.Errorf("RunningPID = %d, want the load balancer's pid %d", got, s.PID())
+	}
+}
+
+func TestStopRunning(t *testing.T) {
+	e := newSupEnv(t)
+	e.cleanupProxy(t)
+
+	if stopped, err := StopRunning(e.settings); stopped || err != nil {
+		t.Errorf("nothing running: StopRunning = %v, %v, want false, nil", stopped, err)
+	}
+
+	s := e.supervisor(t, "")
+	stopSup := run(t, s)
+	if !s.WaitReady(10 * time.Second) {
+		t.Fatal("the load balancer did not become ready")
+	}
+	pid := s.PID()
+	stopSup()
+
+	stopped, err := StopRunning(e.settings)
+	if !stopped || err != nil {
+		t.Fatalf("StopRunning = %v, %v, want true, nil", stopped, err)
+	}
+	waitFor(t, "the load balancer to be gone", 3*time.Second, func() bool {
+		return gone(pid) && (Admin{Socket: e.settings.AdminSocket}).Ping() != nil
+	})
+	if RunningPID(e.settings.ConfigPath) != 0 {
+		t.Error("the lock is still held")
+	}
+}
+
+func TestStopRunning_LeavesAStrangerAlone(t *testing.T) {
+	e := newSupEnv(t)
+	sleeper, _ := startSleep(t)
+	f, err := acquireLock(LockPath(e.settings.ConfigPath), lockInfo{PID: sleeper.Process.Pid, Build: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	stopped, err := StopRunning(e.settings)
+	if stopped || err != nil {
+		t.Errorf("StopRunning = %v, %v, want false, nil", stopped, err)
+	}
+	if syscall.Kill(sleeper.Process.Pid, 0) != nil {
+		t.Error("the unrelated process named in the lock was signalled")
+	}
+}
+
+func TestStopRunning_Rounds(t *testing.T) {
+	record := func(into *[]int) func(int) (bool, error) {
+		return func(pid int) (bool, error) {
+			*into = append(*into, pid)
+			return true, nil
+		}
+	}
+
+	t.Run("a serving successor is stopped too", func(t *testing.T) {
+		var stopped []int
+		ok, err := stopRunning(func() int { return 10 }, func() int { return 20 }, record(&stopped))
+		if !ok || err != nil {
+			t.Fatalf("= %v, %v", ok, err)
+		}
+		if fmt.Sprint(stopped) != "[20 10]" {
+			t.Errorf("stopped %v, want the successor then the holder [20 10]", stopped)
+		}
+	})
+
+	t.Run("a holder that appears after the first round is stopped in the second", func(t *testing.T) {
+		var stopped []int
+		holders := []int{10, 30}
+		calls := 0
+		holder := func() int {
+			h := holders[min(calls, len(holders)-1)]
+			calls++
+			return h
+		}
+		ok, err := stopRunning(holder, func() int { return 10 }, record(&stopped))
+		if !ok || err != nil {
+			t.Fatalf("= %v, %v", ok, err)
+		}
+		if fmt.Sprint(stopped) != "[10 30]" {
+			t.Errorf("stopped %v, want [10 30]", stopped)
+		}
+	})
+
+	t.Run("a third holder is not looked for", func(t *testing.T) {
+		var stopped []int
+		calls := 0
+		holder := func() int {
+			calls++
+			return 10 * calls
+		}
+		stopRunning(holder, func() int { return 0 }, record(&stopped))
+		if calls != 2 || fmt.Sprint(stopped) != "[10 20]" {
+			t.Errorf("holder read %d times, stopped %v, want 2 reads and [10 20]", calls, stopped)
+		}
+	})
+
+	t.Run("nothing running", func(t *testing.T) {
+		var stopped []int
+		ok, err := stopRunning(func() int { return 0 }, func() int { return 0 }, record(&stopped))
+		if ok || err != nil || len(stopped) != 0 {
+			t.Errorf("= %v, %v, stopped %v, want false, nil, none", ok, err, stopped)
+		}
+	})
+
+	t.Run("an error is returned after the rest were tried", func(t *testing.T) {
+		boom := fmt.Errorf("boom")
+		var seen []int
+		stop := func(pid int) (bool, error) {
+			seen = append(seen, pid)
+			if pid == 20 {
+				return true, boom
+			}
+			return true, nil
+		}
+		_, err := stopRunning(func() int { return 10 }, func() int { return 20 }, stop)
+		if err != boom || fmt.Sprint(seen) != "[20 10]" {
+			t.Errorf("err = %v, seen %v, want boom after both", err, seen)
+		}
+	})
+}

@@ -65,7 +65,9 @@ changed for users and why.
 
 One binary is the command line, `shinyctl-api` (`shinyctl serve`, a background
 process) and the load balancer (the hidden `shinyctl proxy`, a process of its
-own).
+own). `shinyctl-api` never stops the load balancer on its own exit; `shinyctl
+shutdown` (`POST /shutdown`) is the one path that stops the apps, the load
+balancer and `shinyctl-api` together.
 
 - The CLI reads `shinyctl.yaml` and asks `shinyctl-api` to do things over
   `~/.shinyctl/api.sock` (package `internal/api`).

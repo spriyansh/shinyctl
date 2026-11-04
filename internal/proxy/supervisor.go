@@ -313,7 +313,7 @@ func (s *Supervisor) startAlongside(admin Admin, old int) (int, *child, error) {
 var afterFlag = "--after"
 
 func (s *Supervisor) commandLine() string {
-	return "proxy --config " + s.Settings.ConfigPath
+	return commandLineFor(s.Settings.ConfigPath)
 }
 
 // waitPing polls the control socket until it answers or timeout passes.

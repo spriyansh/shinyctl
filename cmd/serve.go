@@ -124,7 +124,15 @@ var serveCmd = &cobra.Command{
 		loopCtx, cancelLoop := context.WithCancel(context.Background())
 		defer cancelLoop()
 		sup.Expect()
-		go sup.Run(loopCtx)
+		supDone := make(chan struct{})
+		go func() {
+			sup.Run(loopCtx)
+			close(supDone)
+		}()
+
+		// /shutdown asks serve to return through exit; the handler answers
+		// first, and server.Shutdown below waits for it.
+		exit := make(chan struct{}, 1)
 
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", handleHealthz)
@@ -133,6 +141,19 @@ var serveCmd = &cobra.Command{
 		mux.HandleFunc("/stop", handleStop)
 		mux.HandleFunc("/delete", handleDelete)
 		mux.HandleFunc("/restart", handleRestart)
+		mux.HandleFunc("/shutdown", shutdownHandler(shutdownDeps{
+			unit: ownServiceUnit,
+			// ensure does not watch the context, so wait for the supervisor
+			// to return: after that nothing starts or adopts a load balancer.
+			stopLoops:    func() { cancelLoop(); <-supDone },
+			stopBalancer: func() (bool, error) { return proxy.StopRunning(sup.Settings) },
+			exit: func() {
+				select {
+				case exit <- struct{}{}:
+				default:
+				}
+			},
+		}))
 
 		server := &http.Server{Handler: mux}
 
@@ -155,11 +176,16 @@ var serveCmd = &cobra.Command{
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-		sig := <-sigs
-		log.Printf("received %s, shutting down", sig)
+		select {
+		case sig := <-sigs:
+			log.Printf("received %s, shutting down", sig)
+		case <-exit:
+			log.Print("shutdown requested, exiting")
+		}
 
-		// Only shinyctl-api's own loops stop. The load balancer keeps
-		// serving the apps, and the next shinyctl-api adopts it.
+		// On a signal only shinyctl-api's own loops stop. The load balancer
+		// keeps serving the apps, and the next shinyctl-api adopts it.
+		// After /shutdown they are stopped already, and this does nothing.
 		cancelLoop()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
