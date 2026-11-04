@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -36,12 +35,22 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 
+		out := cmd.OutOrStdout()
+		now := statusNow()
+
 		if !process.SocketDialable(socketPath) {
 			registryPath, err := process.RegistryPath()
 			if err != nil {
 				return err
 			}
-			fmt.Println(notRunningLine(registryPath))
+			if statusAsJSON {
+				doc, err := notRunningJSON(registryPath, now)
+				if err != nil {
+					return err
+				}
+				return writeStatusJSON(out, doc)
+			}
+			fmt.Fprintln(out, notRunningLine(registryPath))
 			return nil
 		}
 
@@ -50,12 +59,16 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 
+		if statusAsJSON {
+			return writeStatusJSON(out, statusJSON(resp, now))
+		}
+
 		if len(resp.Apps) == 0 {
-			fmt.Println("shinyctl-api is running but knows about no apps yet (run `apply` at least once)")
+			fmt.Fprintln(out, "shinyctl-api is running but knows about no apps yet (run `apply` at least once)")
 			return nil
 		}
 
-		return writeStatus(os.Stdout, resp)
+		return writeStatus(out, resp)
 	},
 }
 
@@ -654,6 +667,7 @@ func formatMem(bytes int64) string {
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+	statusCmd.Flags().BoolVar(&statusAsJSON, "json", false, "print what status knows as one JSON document, for scripts and monitoring")
 }
 
 // notRunningLine is what status says while shinyctl-api is not running.
