@@ -316,11 +316,7 @@ func killOverLimit(ctx context.Context, c memoryCopy, size int64) (unwatchedKill
 	}
 
 	line := fmt.Sprintf("memory: %q: copy %d (pid %d) holds %s, over max-memory %s; killed it", c.spec.AppName, c.rec.Copy, c.rec.PID, formatMem(size), formatMem(c.limit))
-	if others == 1 {
-		line += " and its 1 other process"
-	} else if others > 1 {
-		line += fmt.Sprintf(" and its %d other processes", others)
-	}
+	line += otherProcesses(others)
 	if pool, changed := gateway.Withdraw(stateFile, dialOf(c.rec)); changed {
 		// The next reconcile's roles line stays silent, as it finds this pool
 		// already in place, so this is the line that says who took over.
@@ -340,7 +336,7 @@ func killOverLimit(ctx context.Context, c memoryCopy, size int64) (unwatchedKill
 	}
 	log.Print(line)
 
-	markKilled(c, size)
+	markKilled(c, size, others)
 
 	if watching {
 		return unwatchedKill{}, false
@@ -348,9 +344,22 @@ func killOverLimit(ctx context.Context, c memoryCopy, size int64) (unwatchedKill
 	return unwatchedKill{stateFile, c.rec}, true
 }
 
+// otherProcesses is the end of a kill line that names the processes killed
+// with the copy's main one: "" for none, " and its 1 other process", " and its
+// 3 other processes".
+func otherProcesses(n int) string {
+	switch {
+	case n == 1:
+		return " and its 1 other process"
+	case n > 1:
+		return fmt.Sprintf(" and its %d other processes", n)
+	}
+	return ""
+}
+
 // markKilled writes the kill into the copy's log, so that someone reading it
 // finds why the copy stops there.
-func markKilled(c memoryCopy, size int64) {
+func markKilled(c memoryCopy, size int64, others int) {
 	logPath, err := process.CopyLogPath(c.spec, c.rec.Copy)
 	if err != nil {
 		return
@@ -360,5 +369,5 @@ func markKilled(c memoryCopy, size int64) {
 		return
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "--- shinyctl: killed copy %d at %s: %s over max-memory %s ---\n", c.rec.Copy, time.Now().Format(time.RFC3339), formatMem(size), formatMem(c.limit))
+	fmt.Fprintf(f, "--- shinyctl: killed copy %d at %s: %s over max-memory %s%s ---\n", c.rec.Copy, time.Now().Format(time.RFC3339), formatMem(size), formatMem(c.limit), otherProcesses(others))
 }

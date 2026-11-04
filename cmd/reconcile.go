@@ -495,7 +495,7 @@ func sweepLeftovers(spec manifest.AppSpec, n, pid int, note process.Note) {
 	if swept == 0 {
 		return
 	}
-	line := fmt.Sprintf("reconcile: %q: copy %d (pid %d) exited and left %d processes; ended them", spec.AppName, n, pid, swept)
+	line := fmt.Sprintf("reconcile: %q: copy %d (pid %d) exited and left %s; ended them", spec.AppName, n, pid, processes(swept))
 	if left > 0 {
 		line += fmt.Sprintf(", but %d are still running", left)
 	}

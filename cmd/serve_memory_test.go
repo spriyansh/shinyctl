@@ -833,6 +833,9 @@ func TestMemory_CountsTheCopysProcesses(t *testing.T) {
 	if !strings.Contains(logs.String(), want) {
 		t.Errorf("log = %q, want it to contain %q", logs.String(), want)
 	}
+	if log := readCopyLog(t, spec, rec.Copy); !strings.Contains(log, "160M over max-memory 128M and its 3 other processes ---") {
+		t.Errorf("the copy's log does not name the other processes:\n%s", log)
+	}
 	// A kill is not a crash that leaves workers: the sweep has nothing to say.
 	if strings.Contains(logs.String(), "ended them") {
 		t.Errorf("the kill was followed by a sweep:\n%s", logs.String())
