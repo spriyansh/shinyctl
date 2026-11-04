@@ -66,53 +66,24 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 	fmt.Fprintln(w, "NAME\tCOPY\tROLE\tPORT\tPID\tSTATUS\tREADY\tMEM\tSESSIONS\tCRASHES\tSTARTED")
 
 	for _, app := range resp.Apps {
-		// The port is held by something else: no copy was started, and none
-		// of this is a crash.
-		portInUse := app.NotStarted != "" && !slices.ContainsFunc(app.Copies, func(c api.CopyStatus) bool { return c.Alive })
-
 		if len(app.Copies) == 0 {
-			status := "dead"
-			switch {
-			case app.Stopped:
-				status = "stopped"
-			case portInUse:
-				status = "port-in-use"
-			}
-			fmt.Fprintf(w, "%s\t-\t-\t%d\t0\t%s\t-\t-\t-\t-\t-\n", app.Name, app.Port, status)
+			fmt.Fprintf(w, "%s\t-\t-\t%d\t0\t%s\t-\t-\t-\t-\t-\n", app.Name, app.Port, statusWord(app, api.CopyStatus{}))
 			continue
 		}
 
 		for _, c := range app.Copies {
-			status := "dead"
-			ready := "-"
+			status := statusWord(app, c)
+			ready := readyWord(status, c)
+			if ready == "" {
+				ready = "-"
+			}
 			started := "-"
 			crashes := "-"
 			role := "-"
 			sessions := "-"
 
-			switch {
-			case app.Stopped:
-				status = "stopped"
-			case portInUse:
-				status = "port-in-use"
-			case c.Alive:
-				status = "alive"
-				ready = "starting"
-				switch {
-				case c.Ready:
-					ready = "ready"
-				case c.PageProblem != "":
-					ready = "page-failing"
-				}
-			case c.GaveUp:
-				// The process is gone and the restart policy leaves it so.
-				status = "exited"
-			case c.CrashCount > 0:
-				status = "crash-looping"
-			}
-
-			if c.CrashCount > 0 && !portInUse {
-				crashes = fmt.Sprintf("%d", c.CrashCount)
+			if n := crashesShown(app, c); n > 0 {
+				crashes = fmt.Sprintf("%d", n)
 			}
 			if !c.StartedAt.IsZero() {
 				started = c.StartedAt.Format(time.RFC3339)
@@ -137,61 +108,149 @@ func writeStatus(out io.Writer, resp api.StatusResponse) error {
 		return err
 	}
 
-	if line := memoryLine(resp); line != "" {
+	for _, line := range topNotes(resp) {
 		fmt.Fprintf(out, "\n%s\n", line)
-	}
-	if line := machineLine(resp); line != "" {
-		fmt.Fprintf(out, "\n%s\n", line)
-	}
-	if resp.BalancerStarting {
-		fmt.Fprintf(out, "\nThe load balancer is starting or being replaced: copies show as starting until it is done, usually in under a second.\n")
 	}
 
-	// A running app can still be unreachable: its port belongs to something
-	// else. The table can't say so, and the reason is otherwise only in the
-	// log.
-	for _, app := range resp.Apps {
-		if app.NotServed != "" {
-			fmt.Fprintf(out, "\n%s: its port is not served: %s\n", app.Name, app.NotServed)
-		}
-	}
-	for _, app := range resp.Apps {
-		if app.NotStarted != "" {
-			fmt.Fprintf(out, "\n%s: not started: %s\n", app.Name, app.NotStarted)
-		}
-	}
-	for _, app := range resp.Apps {
-		if note := rolloutNote(app); note != "" {
-			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
-		}
-	}
-	for _, app := range resp.Apps {
-		if note := exitedNote(app); note != "" {
-			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
-		}
-	}
-	for _, app := range resp.Apps {
-		for _, line := range pageNote(app) {
-			fmt.Fprintf(out, "\n%s: %s\n", app.Name, line)
-		}
-	}
-	for _, app := range resp.Apps {
-		if note := memoryNote(app); note != "" {
-			fmt.Fprintf(out, "\n%s: %s\n", app.Name, note)
-		}
-	}
+	// Kind by kind across the apps, so the notes about one thing read
+	// together.
 	now := statusNow()
-	for _, app := range resp.Apps {
-		for _, note := range []string{spareNote(app), drainNote(app, now)} {
-			if note != "" {
-				fmt.Fprintf(out, "\n%s: %s.\n", app.Name, note)
+	for _, kind := range appNoteKinds {
+		for _, app := range resp.Apps {
+			for _, line := range kind(app, now) {
+				fmt.Fprintf(out, "\n%s: %s\n", app.Name, line)
 			}
 		}
 	}
 	return nil
 }
 
-// statusNow is the clock of the notes; the tests replace it.
+// portInUse says the app's port is held by something else: no copy was
+// started, and none of this is a crash.
+func portInUse(app api.AppStatus) bool {
+	return app.NotStarted != "" && !slices.ContainsFunc(app.Copies, func(c api.CopyStatus) bool { return c.Alive })
+}
+
+// statusWord is the STATUS column: stopped, port-in-use, alive, exited,
+// crash-looping or dead, in that order. With a zero CopyStatus it is the row
+// of an app that has no copies.
+func statusWord(app api.AppStatus, c api.CopyStatus) string {
+	switch {
+	case app.Stopped:
+		return "stopped"
+	case portInUse(app):
+		return "port-in-use"
+	case c.Alive:
+		return "alive"
+	case c.GaveUp:
+		// The process is gone and the restart policy leaves it so.
+		return "exited"
+	case c.CrashCount > 0:
+		return "crash-looping"
+	}
+	return "dead"
+}
+
+// readyWord is the READY column: ready, page-failing or starting for an alive
+// copy, "" otherwise.
+func readyWord(status string, c api.CopyStatus) string {
+	if status != "alive" {
+		return ""
+	}
+	switch {
+	case c.Ready:
+		return "ready"
+	case c.PageProblem != "":
+		return "page-failing"
+	}
+	return "starting"
+}
+
+// crashesShown is the CRASHES column as a number: the copy's crashes, none
+// while the port is in use.
+func crashesShown(app api.AppStatus, c api.CopyStatus) int {
+	if c.CrashCount > 0 && !portInUse(app) {
+		return c.CrashCount
+	}
+	return 0
+}
+
+// balancerStartingNote is the line under the table while the load balancer
+// starts.
+const balancerStartingNote = "The load balancer is starting or being replaced: copies show as starting until it is done, usually in under a second."
+
+// topNotes are the lines under the table that name no app: memory, the
+// machine, the load balancer starting.
+func topNotes(resp api.StatusResponse) []string {
+	var lines []string
+	if line := memoryLine(resp); line != "" {
+		lines = append(lines, line)
+	}
+	if line := machineLine(resp); line != "" {
+		lines = append(lines, line)
+	}
+	if resp.BalancerStarting {
+		lines = append(lines, balancerStartingNote)
+	}
+	return lines
+}
+
+// appNoteKinds are the lines under the table about one app, kind by kind in
+// the order status prints them, each as printed after "<name>: ": not served,
+// not started, rollout, exited, page, memory, and last one kind spareAndDrain.
+// A running app can still be unreachable (its port belongs to something else):
+// the table can't say so, and the reason is otherwise only in the log.
+var appNoteKinds = []func(app api.AppStatus, now time.Time) []string{
+	func(app api.AppStatus, _ time.Time) []string {
+		if app.NotServed == "" {
+			return nil
+		}
+		return []string{"its port is not served: " + app.NotServed}
+	},
+	func(app api.AppStatus, _ time.Time) []string {
+		if app.NotStarted == "" {
+			return nil
+		}
+		return []string{"not started: " + app.NotStarted}
+	},
+	func(app api.AppStatus, now time.Time) []string { return oneNote(rolloutNote(app, now)) },
+	func(app api.AppStatus, now time.Time) []string { return oneNote(exitedNote(app, now)) },
+	pageNote,
+	func(app api.AppStatus, _ time.Time) []string { return oneNote(memoryNote(app)) },
+	spareAndDrain,
+}
+
+func oneNote(note string) []string {
+	if note == "" {
+		return nil
+	}
+	return []string{note}
+}
+
+// spareAndDrain is the spare note and then the drain note, each with its full
+// stop and each only when there is one. They are one kind, so that one app's
+// two lines stay together and the next app's come after.
+func spareAndDrain(app api.AppStatus, now time.Time) []string {
+	var lines []string
+	for _, note := range []string{spareNote(app), drainNote(app, now)} {
+		if note != "" {
+			lines = append(lines, note+".")
+		}
+	}
+	return lines
+}
+
+// appNotes are one app's lines, every kind in turn.
+func appNotes(app api.AppStatus, now time.Time) []string {
+	var lines []string
+	for _, kind := range appNoteKinds {
+		lines = append(lines, kind(app, now)...)
+	}
+	return lines
+}
+
+// statusNow is the clock of the notes; the tests replace it. Only writeStatus
+// and the command read it: the notes take the time they are given.
 var statusNow = time.Now
 
 func plural(list []int, one, many string) string {
@@ -206,7 +265,7 @@ func plural(list []int, one, many string) string {
 // ready. If a new copy is crashing, has given up, or runs with a page that
 // fails, the takeover won't come by itself, and the note says so and where to
 // look. It is empty when there is nothing of the kind.
-func rolloutNote(app api.AppStatus) string {
+func rolloutNote(app api.AppStatus, now time.Time) string {
 	var old, waiting, failing, gaveUp, pageFailing []int
 	var firstProblem *api.CopyStatus // the lowest copy whose page fails
 	var slowest *api.CopyStatus      // the lowest waiting copy whose page has not answered yet
@@ -271,7 +330,7 @@ func rolloutNote(app api.AppStatus) string {
 	starting := reconcile.ListCopies(waiting)
 	if slowest != nil {
 		starting += fmt.Sprintf(" (copy %d's page has not answered after %s)", slowest.Copy,
-			reconcile.FormatDuration(statusNow().Sub(slowest.PageWaitingSince).Round(time.Second)))
+			reconcile.FormatDuration(now.Sub(slowest.PageWaitingSince).Round(time.Second)))
 	}
 	return fmt.Sprintf("new version starting in %s; %s %s serving the previous version until it is ready, then %s",
 		starting, reconcile.ListCopies(old), plural(old, "keeps", "keep"), then)
@@ -280,8 +339,8 @@ func rolloutNote(app api.AppStatus) string {
 // exitedNote says why copies are down that the restart policy leaves down,
 // and what brings them back. A copy that a note about a redeploy already
 // names is left to that note. It is empty when no copy has exited that way.
-func exitedNote(app api.AppStatus) string {
-	if rolloutNote(app) != "" {
+func exitedNote(app api.AppStatus, now time.Time) string {
+	if rolloutNote(app, now) != "" {
 		return ""
 	}
 	var exited []int
@@ -325,8 +384,8 @@ func exitedNote(app api.AppStatus) string {
 // their page, and, when that leaves the app with no copy serving, what a
 // visitor gets meanwhile. A copy that a note about a redeploy already names
 // is left to that note. It is empty when there is nothing of the kind.
-func pageNote(app api.AppStatus) []string {
-	if rolloutNote(app) != "" {
+func pageNote(app api.AppStatus, now time.Time) []string {
+	if rolloutNote(app, now) != "" {
 		return nil
 	}
 	var lines []string
@@ -339,7 +398,7 @@ func pageNote(app api.AppStatus) []string {
 			lines = append(lines, fmt.Sprintf("copy %d is not ready: its page %s (see shinyctl logs --copy %d)", c.Copy, c.PageProblem, c.Copy))
 		case !c.PageWaitingSince.IsZero():
 			lines = append(lines, fmt.Sprintf("copy %d is not ready: its page has not answered after %s (see shinyctl logs --copy %d)", c.Copy,
-				reconcile.FormatDuration(statusNow().Sub(c.PageWaitingSince).Round(time.Second)), c.Copy))
+				reconcile.FormatDuration(now.Sub(c.PageWaitingSince).Round(time.Second)), c.Copy))
 		}
 	}
 	if len(lines) > 0 && !slices.ContainsFunc(app.Copies, func(c api.CopyStatus) bool { return c.Role != "" }) {
