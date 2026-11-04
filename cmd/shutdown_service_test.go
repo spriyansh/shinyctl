@@ -35,7 +35,7 @@ func TestServiceUnit(t *testing.T) {
 		{"exec pid is another process", map[string]string{"SYSTEMD_EXEC_PID": "41"}, userV2, "", false},
 		{"exec pid is not a number", map[string]string{"SYSTEMD_EXEC_PID": "x"}, userV2, "", false},
 		{"exec pid is ours in a renamed unit", map[string]string{"SYSTEMD_EXEC_PID": "42"}, "0::/user.slice/user-1000.slice/user@1000.service/app.slice/r-apps.service\n", "r-apps.service", true},
-		{"exec pid is ours and the cgroup is unreadable", map[string]string{"SYSTEMD_EXEC_PID": "42"}, "", "shinyctl.service", false},
+		{"exec pid is ours and the cgroup is unreadable", map[string]string{"SYSTEMD_EXEC_PID": "42"}, "", "shinyctl.service", true},
 		{"exec pid is ours in a system service", map[string]string{"SYSTEMD_EXEC_PID": "42"}, systemV2, "shinyctl.service", false},
 		{"before 248, unified hierarchy", map[string]string{"INVOCATION_ID": "abc"}, userV2, "shinyctl.service", true},
 		{"before 248, name=systemd hierarchy", map[string]string{"INVOCATION_ID": "abc"}, userV1, "shinyctl.service", true},

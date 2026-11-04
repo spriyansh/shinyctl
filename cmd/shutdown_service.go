@@ -137,7 +137,9 @@ func serviceUnit(getenv func(string) string, cgroup string, pid int) (unit strin
 		if n, err := strconv.Atoi(execPID); err != nil || n != pid {
 			return "", false
 		}
-		unit = serviceName + ".service"
+		// shinyctl only ever writes a user unit, so a cgroup that can't be
+		// read is taken for one.
+		unit, inUserManager = serviceName+".service", inUserManager || cgroupPath(cgroup) == ""
 		for _, e := range slices.Backward(elements) {
 			if strings.HasSuffix(e, ".service") && !userManagerUnit.MatchString(e) {
 				unit = e
