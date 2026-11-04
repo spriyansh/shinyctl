@@ -71,6 +71,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			// and port would otherwise render as a blank row identifying
 			// nothing.
 			Name:          spec.AppName,
+			Group:         spec.AppGroup,
 			Host:          spec.EffectiveHost(),
 			Port:          spec.Port,
 			Stopped:       appRegistry.IsStopped(spec.AppStateFile),
