@@ -1,0 +1,22 @@
+# An app with worker processes, for watching shinyctl stop and measure a
+# copy's whole process tree. Relative paths resolve from this file's
+# directory, so run from anywhere, e.g.:
+#
+#   shinyctl apply -f examples/workers/shinyctl.yaml
+#
+# Then open http://127.0.0.1:8767. `shinyctl status` shows the copy's MEM as
+# the main process and its workers together. "Run a job that holds 600 MB"
+# takes the copy over max-memory inside a worker: shinyctl kills the main
+# process and the workers together, and the copy comes back. `shinyctl stop`
+# ends the workers with the main process. Needs the future package.
+
+app-group: examples
+app-name: workers
+entrypoint-file: ./app.R
+port: 8767
+app-state-file: ./state.json
+host: 127.0.0.1          # this machine only; 0.0.0.0 makes it reachable from the network
+warm-replicas: 0         # one copy, so the kill is easy to see
+max-memory: 768M         # the main process and two idle workers hold about 300M
+env:
+  WORKERS: "2"
