@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/spriyansh/shinyctl/internal/process"
 	"github.com/spriyansh/shinyctl/internal/proxy"
 	"github.com/spriyansh/shinyctl/internal/reconcile"
+	"github.com/spriyansh/shinyctl/internal/registry"
 )
 
 var statusCmd = &cobra.Command{
@@ -35,7 +37,11 @@ var statusCmd = &cobra.Command{
 		}
 
 		if !process.SocketDialable(socketPath) {
-			fmt.Println("shinyctl-api is not running — nothing is currently being managed")
+			registryPath, err := process.RegistryPath()
+			if err != nil {
+				return err
+			}
+			fmt.Println(notRunningLine(registryPath))
 			return nil
 		}
 
@@ -589,4 +595,32 @@ func formatMem(bytes int64) string {
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+}
+
+// notRunningLine is what status says while shinyctl-api is not running.
+// Nothing is watched then, but the apps it was managing are still
+// registered (shutdown keeps them, stop and delete do not), and they start
+// again with the next shinyctl-api. The line names them so a status after
+// a shutdown does not read as if they were gone. It only reads.
+func notRunningLine(registryPath string) string {
+	const prefix = "shinyctl-api is not running"
+	reg, err := registry.Open(registryPath)
+	if err != nil {
+		return prefix
+	}
+	var names []string
+	for _, spec := range reg.All() {
+		if reg.Managed(spec.AppStateFile) {
+			names = append(names, spec.AppName)
+		}
+	}
+	if len(names) == 0 {
+		return prefix + " and no app is registered"
+	}
+	sort.Strings(names)
+	verb := "starts"
+	if len(names) > 1 {
+		verb = "start"
+	}
+	return fmt.Sprintf("%s; %s %s again with shinyctl serve -d or any apply", prefix, listNames(names), verb)
 }

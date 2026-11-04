@@ -5,6 +5,8 @@ package cmd
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/spriyansh/shinyctl/internal/api"
 	"github.com/spriyansh/shinyctl/internal/manifest"
 	"github.com/spriyansh/shinyctl/internal/reconcile"
+	"github.com/spriyansh/shinyctl/internal/registry"
 )
 
 func TestFormatMem(t *testing.T) {
@@ -544,5 +547,52 @@ func TestWarnIfMachineLow(t *testing.T) {
 		if out.String() != tc.want {
 			t.Errorf("%s:\n got %q\nwant %q", tc.name, out.String(), tc.want)
 		}
+	}
+}
+
+// TestNotRunningLine: with shinyctl-api down, status names the registered
+// apps that start again with the next shinyctl-api, skipping the ones
+// stop left stopped, and says when there are none or no registry can be
+// read.
+func TestNotRunningLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "registry.json")
+
+	if got, want := notRunningLine(path), "shinyctl-api is not running and no app is registered"; got != want {
+		t.Errorf("no registry: got %q, want %q", got, want)
+	}
+
+	reg, err := registry.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"memory", "hello", "old"} {
+		if err := reg.Remember(manifest.AppSpec{AppGroup: "g", AppName: name, AppStateFile: filepath.Join(dir, name+".json")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := reg.Stop(filepath.Join(dir, "old.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := notRunningLine(path), `shinyctl-api is not running; "hello" and "memory" start again with shinyctl serve -d or any apply`; got != want {
+		t.Errorf("two apps: got %q, want %q", got, want)
+	}
+
+	reg, err = registry.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Forget(filepath.Join(dir, "memory.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := notRunningLine(path), `shinyctl-api is not running; "hello" starts again with shinyctl serve -d or any apply`; got != want {
+		t.Errorf("one app: got %q, want %q", got, want)
+	}
+
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := notRunningLine(path), "shinyctl-api is not running"; got != want {
+		t.Errorf("unreadable registry: got %q, want %q", got, want)
 	}
 }
