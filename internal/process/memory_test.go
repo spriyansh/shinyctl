@@ -8,6 +8,15 @@ import (
 	"testing"
 )
 
+// alone makes a tree of each pid by itself.
+func alone(pids []int) [][]int {
+	trees := make([][]int, len(pids))
+	for i, pid := range pids {
+		trees[i] = []int{pid}
+	}
+	return trees
+}
+
 // fakeMeasure replaces the platform's measurement and ps, and records the
 // calls to both.
 type fakeMeasure struct {
@@ -34,12 +43,12 @@ func stubMeasure(t *testing.T, got map[int]int64, err error, ps string) *fakeMea
 func TestMemory_PlatformMeasuresAll(t *testing.T) {
 	f := stubMeasure(t, map[int]int64{1: 100, 2: 200}, nil, "1 1\n2 2\n")
 
-	got, err := Memory([]int{1, 2})
+	got, err := TreeMemory(alone([]int{1, 2}))
 	if err != nil {
-		t.Errorf("Memory() error = %v, want none", err)
+		t.Errorf("TreeMemory() error = %v, want none", err)
 	}
 	if want := (map[int]int64{1: 100, 2: 200}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Memory() = %v, want %v", got, want)
+		t.Errorf("TreeMemory() = %v, want %v", got, want)
 	}
 	if len(f.psCalls) != 0 {
 		t.Errorf("ps calls = %v, want none", f.psCalls)
@@ -49,9 +58,9 @@ func TestMemory_PlatformMeasuresAll(t *testing.T) {
 func TestMemory_PsStandsInForTheMissingOne(t *testing.T) {
 	f := stubMeasure(t, map[int]int64{1: 100}, nil, "2 3\n")
 
-	got, err := Memory([]int{1, 2})
+	got, err := TreeMemory(alone([]int{1, 2}))
 	if want := (map[int]int64{1: 100, 2: 3 * 1024}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Memory() = %v, want %v", got, want)
+		t.Errorf("TreeMemory() = %v, want %v", got, want)
 	}
 	if len(f.psCalls) != 1 || f.psCalls[0][len(f.psCalls[0])-1] != "2" {
 		t.Errorf("ps calls = %v, want exactly one for pid 2 alone", f.psCalls)
@@ -66,9 +75,9 @@ func TestMemory_PsStandsInForTheMissingOne(t *testing.T) {
 func TestMemory_ErrorNamesOnlyWhatPsStoodInFor(t *testing.T) {
 	f := stubMeasure(t, map[int]int64{1: 100}, nil, "2 3\n")
 
-	got, err := Memory([]int{1, 2, 3})
+	got, err := TreeMemory(alone([]int{1, 2, 3}))
 	if want := (map[int]int64{1: 100, 2: 3 * 1024}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Memory() = %v, want %v", got, want)
+		t.Errorf("TreeMemory() = %v, want %v", got, want)
 	}
 	if len(f.psCalls) != 1 {
 		t.Errorf("ps calls = %v, want one", f.psCalls)
@@ -78,7 +87,7 @@ func TestMemory_ErrorNamesOnlyWhatPsStoodInFor(t *testing.T) {
 	}
 
 	stubMeasure(t, nil, nil, "")
-	if _, err := Memory([]int{3}); err != nil {
+	if _, err := TreeMemory(alone([]int{3})); err != nil {
 		t.Errorf("a pid that no one knows: error = %v, want none", err)
 	}
 }
@@ -87,9 +96,9 @@ func TestMemory_PlatformErrorFallsBackForAll(t *testing.T) {
 	boom := errors.New("footprint is not installed")
 	f := stubMeasure(t, nil, boom, "1 1\n2 2\n")
 
-	got, err := Memory([]int{1, 2})
+	got, err := TreeMemory(alone([]int{1, 2}))
 	if want := (map[int]int64{1: 1024, 2: 2048}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Memory() = %v, want %v", got, want)
+		t.Errorf("TreeMemory() = %v, want %v", got, want)
 	}
 	if len(f.psCalls) != 1 || !strings.Contains(strings.Join(f.psCalls[0], " "), "-p 1,2") {
 		t.Errorf("ps calls = %v, want exactly one with -p 1,2", f.psCalls)
@@ -104,9 +113,9 @@ func TestMemory_PlatformErrorFallsBackForAll(t *testing.T) {
 func TestMemory_TimeoutLeavesThePIDsOut(t *testing.T) {
 	f := stubMeasure(t, map[int]int64{1: 100}, context.DeadlineExceeded, "1 1\n2 2\n")
 
-	got, err := Memory([]int{2, 1})
+	got, err := TreeMemory(alone([]int{2, 1}))
 	if len(got) != 0 {
-		t.Errorf("Memory() = %v, want nothing", got)
+		t.Errorf("TreeMemory() = %v, want nothing", got)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error = %v, want the deadline", err)
@@ -121,11 +130,11 @@ func TestMemory_TimeoutLeavesThePIDsOut(t *testing.T) {
 func TestMemory_NoPIDs(t *testing.T) {
 	f := stubMeasure(t, map[int]int64{1: 100}, nil, "")
 
-	if got, err := Memory(nil); got != nil || err != nil {
-		t.Errorf("Memory(nil) = %v, %v, want nil, nil", got, err)
+	if got, err := TreeMemory(nil); got != nil || err != nil {
+		t.Errorf("TreeMemory(nil) = %v, %v, want nil, nil", got, err)
 	}
-	if got, err := ExactMemory(nil); got != nil || err != nil {
-		t.Errorf("ExactMemory(nil) = %v, %v, want nil, nil", got, err)
+	if got, err := ExactTreeMemory(nil); got != nil || err != nil {
+		t.Errorf("ExactTreeMemory(nil) = %v, %v, want nil, nil", got, err)
 	}
 	if len(f.measured) != 0 || len(f.psCalls) != 0 {
 		t.Errorf("measured %v, ps %v, want no calls", f.measured, f.psCalls)
@@ -135,9 +144,9 @@ func TestMemory_NoPIDs(t *testing.T) {
 func TestExactMemory_NeverAsksPs(t *testing.T) {
 	f := stubMeasure(t, map[int]int64{1: 100}, nil, "2 2\n")
 
-	got, err := ExactMemory([]int{1, 2})
+	got, err := ExactTreeMemory(alone([]int{1, 2}))
 	if err != nil || !reflect.DeepEqual(got, map[int]int64{1: 100}) {
-		t.Errorf("ExactMemory() = %v, %v, want only pid 1", got, err)
+		t.Errorf("ExactTreeMemory() = %v, %v, want only pid 1", got, err)
 	}
 	if len(f.psCalls) != 0 {
 		t.Errorf("ps calls = %v, want none", f.psCalls)

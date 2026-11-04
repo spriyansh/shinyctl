@@ -62,11 +62,17 @@ var memorySpells struct {
 	failed     bool
 	unmeasured map[killKey]bool
 	unparsable map[string]bool
+
+	// noTable, applyNoTable and statusNoTable say the log already has a line
+	// about the table of processes not being readable, for the loop, an apply
+	// and status, each of which says it once per spell.
+	noTable, applyNoTable, statusNoTable bool
 }
 
-// measureFunc is process.ExactMemory: the memory of each PID, absent for one
-// it could not measure.
-type measureFunc func(pids []int) (map[int]int64, error)
+// measureFunc is process.ExactTreeMemory: the memory of each copy, given as
+// the pids of its processes with the main process first, keyed by that first
+// pid and absent for a copy it could not measure.
+type measureFunc func(trees [][]int) (map[int]int64, error)
 
 // runMemoryLoop runs enforceMemoryOnce until ctx ends. The next run comes
 // interval after the last, or four times as long as the last took if that is
@@ -137,7 +143,7 @@ func enforceMemoryOnce(ctx context.Context, measure measureFunc) []unwatchedKill
 	})
 
 	var copies []memoryCopy
-	var pids []int
+	var leaders []int
 	for _, listed := range appRegistry.All() {
 		stateFile := listed.AppStateFile
 		spec, ok := appRegistry.ManagedSpec(stateFile)
@@ -156,14 +162,16 @@ func enforceMemoryOnce(ctx context.Context, measure measureFunc) []unwatchedKill
 		recs := st.Copies()
 		for _, rec := range runningCopies(recs) {
 			copies = append(copies, memoryCopy{spec, limit, rec, recs})
-			pids = append(pids, rec.PID)
+			leaders = append(leaders, rec.PID)
 		}
 	}
-	if len(pids) == 0 {
+	// Nothing to measure costs nothing: no table is read either.
+	if len(leaders) == 0 {
 		return nil
 	}
 
-	sizes, err := measure(pids)
+	trees := treesOf(leaders, &memorySpells.noTable, "memory: can't list the processes of the copies")
+	sizes, err := measure(trees)
 
 	memorySpells.Lock()
 	if err != nil {
@@ -198,6 +206,36 @@ func enforceMemoryOnce(ctx context.Context, measure measureFunc) []unwatchedKill
 		}
 	}
 	return pending
+}
+
+// treesOf is the processes of each of leaders, as the measurement takes them:
+// one list per copy, the main process first. When the table of processes can't
+// be read, each copy is measured by its main process alone, as it was before
+// copies had processes of their own, and that is said once per spell in the
+// log: warned is the flag of the caller's spell in memorySpells, which says
+// whether the line was already said, and what starts the line.
+func treesOf(leaders []int, warned *bool, what string) [][]int {
+	listed, err := currentHooks().Trees(leaders)
+
+	memorySpells.Lock()
+	if err != nil {
+		if !*warned {
+			log.Printf("%s: %v; measuring the main process of each copy alone until it can be read", what, err)
+		}
+		*warned = true
+	} else {
+		*warned = false
+	}
+	memorySpells.Unlock()
+
+	trees := make([][]int, len(leaders))
+	for i, leader := range leaders {
+		trees[i] = []int{leader}
+		if tree, ok := listed[leader]; ok && err == nil && len(tree) > 0 {
+			trees[i] = tree
+		}
+	}
+	return trees
 }
 
 // runningCopies picks from recs the copies whose memory is worth measuring:

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -36,28 +37,44 @@ func limitedSpec(t *testing.T, name string, replicas, warm int) manifest.AppSpec
 }
 
 // memoryStub is a measure that answers what the test says and remembers what
-// it was asked.
+// it was asked. It holds a size for each process, and a copy is the sum over
+// the processes of the tree it is handed, present only if its leader has one,
+// as the real measure answers.
 type memoryStub struct {
-	mu    sync.Mutex
-	sizes map[int]int64
-	err   error
-	asked [][]int
+	mu         sync.Mutex
+	sizes      map[int]int64
+	err        error
+	asked      [][]int   // the leaders of each call
+	askedTrees [][][]int // the trees of each call
 }
 
-func (s *memoryStub) measure(pids []int) (map[int]int64, error) {
+func (s *memoryStub) measure(trees [][]int) (map[int]int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.asked = append(s.asked, slices.Clone(pids))
+	leaders := make([]int, len(trees))
+	for i, tree := range trees {
+		leaders[i] = tree[0]
+	}
+	s.asked = append(s.asked, leaders)
+	s.askedTrees = append(s.askedTrees, trees)
 	if s.err != nil {
 		return nil, s.err
 	}
+	return sumTrees(s.sizes, trees), nil
+}
+
+// sumTrees answers a measurement from the size of each process.
+func sumTrees(sizes map[int]int64, trees [][]int) map[int]int64 {
 	out := map[int]int64{}
-	for _, pid := range pids {
-		if size, ok := s.sizes[pid]; ok {
-			out[pid] = size
+	for _, tree := range trees {
+		if _, ok := sizes[tree[0]]; !ok {
+			continue
+		}
+		for _, pid := range tree {
+			out[tree[0]] += sizes[pid]
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (s *memoryStub) set(sizes map[int]int64, err error) {
@@ -209,6 +226,11 @@ func TestMemory_NothingToMeasureCostsNothing(t *testing.T) {
 	resetMemoryState(t)
 	logs := captureLog(t)
 	stub := &memoryStub{err: errors.New("must not be asked")}
+	var tableReads atomic.Int32
+	useHooks(t, hooks{Trees: func([]int) (map[int][]int, error) {
+		tableReads.Add(1)
+		return nil, nil
+	}})
 
 	// No app at all, an app with no limit, and an app with a limit whose
 	// process is gone.
@@ -223,6 +245,9 @@ func TestMemory_NothingToMeasureCostsNothing(t *testing.T) {
 
 	if stub.calls() != 0 {
 		t.Errorf("the measure was called %d time(s), want none", stub.calls())
+	}
+	if n := tableReads.Load(); n != 0 {
+		t.Errorf("the table of processes was read %d time(s), want none", n)
 	}
 	if strings.Contains(logs.String(), "memory:") {
 		t.Errorf("the log says something about memory:\n%s", logs.String())
@@ -556,7 +581,7 @@ func TestMemory_LoopWaitsFourTimesAsLongAsARunTook(t *testing.T) {
 	const run = 100 * time.Millisecond
 	var mu sync.Mutex
 	var starts []time.Time
-	slow := func(pids []int) (map[int]int64, error) {
+	slow := func(trees [][]int) (map[int]int64, error) {
 		mu.Lock()
 		starts = append(starts, time.Now())
 		mu.Unlock()
@@ -610,11 +635,13 @@ func TestMemory_ReplyCarriesTheLimitInBytes(t *testing.T) {
 
 // holding is a Measure hook that says the given copies hold size each.
 func holding(size int64, recs ...state.AppState) measureFunc {
-	return func(pids []int) (map[int]int64, error) {
+	return func(trees [][]int) (map[int]int64, error) {
 		out := map[int]int64{}
 		for _, rec := range recs {
-			if slices.Contains(pids, rec.PID) {
-				out[rec.PID] = size
+			for _, tree := range trees {
+				if tree[0] == rec.PID {
+					out[rec.PID] = size
+				}
 			}
 		}
 		return out, nil
@@ -719,7 +746,7 @@ func loadCopiesNow(spec manifest.AppSpec) []state.AppState {
 func TestMemory_AFirstApplyMeasuresNothing(t *testing.T) {
 	useFakeRscript(t)
 	resetMemoryState(t)
-	useHooks(t, hooks{Measure: func([]int) (map[int]int64, error) {
+	useHooks(t, hooks{Measure: func([][]int) (map[int]int64, error) {
 		t.Error("an apply of an app nobody knew measured its copies")
 		return nil, nil
 	}})
@@ -760,4 +787,97 @@ func TestMemory_LoopReconcilesAfterAnUnwatchedKill(t *testing.T) {
 		rec, _ := loadCopyRecord(spec, 1)
 		return rec.CrashCount == 1 && rec.LastExitReason == "oom"
 	})
+}
+
+// A copy is over its limit by what its workers hold: the main process is small,
+// and a worker that left the group (callr) is counted too.
+func TestMemory_CountsTheCopysProcesses(t *testing.T) {
+	useFakeRscript(t)
+	resetMemoryState(t)
+	logs := captureLog(t)
+	spec := workersSpec(t, "app")
+	spec.MaxMemory = fmt.Sprintf("%dM", limitMB)
+	cleanupApp(t, spec)
+	rec := applyOK(t, spec)
+	waitReady(t, process.InternalHost, rec.Port)
+	workers, detached := workersOf(t, rec)
+	all := append([]int{rec.PID, detached}, workers...)
+	killOnCleanup(t, all...)
+
+	// 10M in the main process and 50M in each of three others: under the limit
+	// for any one process, over it together, and only if the detached worker
+	// is counted.
+	stub := &memoryStub{sizes: map[int]int64{rec.PID: 10 * mib, workers[0]: 50 * mib, workers[1]: 50 * mib}}
+	runOnce(t, stub)
+	if !process.IsAlive(spec, rec) {
+		t.Fatal("a copy with 110M in its group and a 128M limit was killed")
+	}
+	stub.set(map[int]int64{rec.PID: 10 * mib, workers[0]: 50 * mib, workers[1]: 50 * mib, detached: 50 * mib}, nil)
+	runOnce(t, stub)
+
+	if len(stub.askedTrees) != 2 || len(stub.askedTrees[1]) != 1 || len(stub.askedTrees[1][0]) != 4 {
+		t.Fatalf("the measure was asked %v, want one tree of four processes", stub.askedTrees)
+	}
+	if stub.askedTrees[1][0][0] != rec.PID {
+		t.Errorf("the tree starts with pid %d, want the main process %d first", stub.askedTrees[1][0][0], rec.PID)
+	}
+	waitGoneAll(t, "the copy, its workers and the detached one to be gone after the kill", all...)
+	waitUntil(t, "the exit to be recorded", 5*time.Second, func() bool {
+		r, _ := loadCopyRecord(spec, rec.Copy)
+		return r.CrashCount == 1
+	})
+	if r, _ := loadCopyRecord(spec, rec.Copy); r.LastExitReason != "oom" {
+		t.Errorf("record = %+v, want the reason oom", r)
+	}
+	want := fmt.Sprintf(`copy %d (pid %d) holds 160M, over max-memory 128M; killed it and its 3 other processes`, rec.Copy, rec.PID)
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("log = %q, want it to contain %q", logs.String(), want)
+	}
+	// A kill is not a crash that leaves workers: the sweep has nothing to say.
+	if strings.Contains(logs.String(), "ended them") {
+		t.Errorf("the kill was followed by a sweep:\n%s", logs.String())
+	}
+}
+
+// Without the table of processes each copy is measured by its main process,
+// and the log says so once per spell.
+func TestMemory_NoTableMeasuresTheLeader(t *testing.T) {
+	useFakeRscript(t)
+	resetMemoryState(t)
+	logs := captureLog(t)
+	var failing atomic.Bool
+	failing.Store(true)
+	useHooks(t, hooks{Trees: func(leaders []int) (map[int][]int, error) {
+		if failing.Load() {
+			return nil, errors.New("the process table can't be read")
+		}
+		return process.CopyTrees(leaders)
+	}})
+	spec := limitedSpec(t, "app", 1, 0)
+	cleanupApp(t, spec)
+	a := applyOK(t, spec)
+
+	stub := &memoryStub{sizes: map[int]int64{a.PID: 10 * mib}}
+	for i := 0; i < 3; i++ {
+		runOnce(t, stub)
+	}
+	if len(stub.askedTrees) != 3 || len(stub.askedTrees[0]) != 1 || !slices.Equal(stub.askedTrees[0][0], []int{a.PID}) {
+		t.Errorf("the measure was asked %v, want the main process alone", stub.askedTrees)
+	}
+	said := "memory: can't list the processes of the copies: the process table can't be read; measuring the main process of each copy alone until it can be read"
+	if got := strings.Count(logs.String(), said); got != 1 {
+		t.Errorf("the log has the line %d times after three runs, want once:\n%s", got, logs.String())
+	}
+
+	// A run that reads the table ends the spell; the next failure is a new one.
+	failing.Store(false)
+	runOnce(t, stub)
+	failing.Store(true)
+	runOnce(t, stub)
+	if got := strings.Count(logs.String(), said); got != 2 {
+		t.Errorf("the log has the line %d times after a second spell, want 2", got)
+	}
+	if !process.IsAlive(spec, a) {
+		t.Error("the copy was killed")
+	}
 }

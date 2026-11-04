@@ -92,7 +92,7 @@ func TestPlatformMemory_ReadsTheStatusOfEachProcess(t *testing.T) {
 	}
 	want := map[int]int64{1: 3 << 20, 2: 512 * 1024}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("platformMemory() = %v, want %v", got, want)
+		t.Errorf("platformTreeMemory() = %v, want %v", got, want)
 	}
 }
 
@@ -122,9 +122,9 @@ func TestMemory_PsStandsInForAProcessWithoutMemoryLines(t *testing.T) {
 		return []byte("2 7\n"), nil
 	}
 
-	got, err := Memory([]int{1, 2})
+	got, err := TreeMemory(alone([]int{1, 2}))
 	if want := (map[int]int64{1: 3 << 20, 2: 7 * 1024}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Memory() = %v, want %v", got, want)
+		t.Errorf("TreeMemory() = %v, want %v", got, want)
 	}
 	if len(calls) != 1 || calls[0][len(calls[0])-1] != "2" {
 		t.Errorf("ps calls = %v, want exactly one for pid 2 alone", calls)
@@ -189,7 +189,7 @@ func TestPlatformMemory_PrefersPssAndFallsBackToTheStatus(t *testing.T) {
 	}
 	want := map[int]int64{1: 312 << 10, 2: 3 << 20, 3: 2 << 20, 4: 10 << 10}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("platformMemory() = %v, want %v", got, want)
+		t.Errorf("platformTreeMemory() = %v, want %v", got, want)
 	}
 }
 

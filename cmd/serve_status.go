@@ -20,9 +20,10 @@ import (
 	"github.com/spriyansh/shinyctl/internal/state"
 )
 
-// memoryOf measures the processes status shows; a variable so that the tests
-// can make it fail.
-var memoryOf = process.Memory
+// memoryOf measures the copies status shows, each as the list of its
+// processes with the main one first; a variable so that the tests can make it
+// fail.
+var memoryOf = process.TreeMemory
 
 // memoryWarned says the log already has a line about memory that could not be
 // measured. Status is asked for every few seconds by a watching CLI, and a
@@ -146,11 +147,12 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	// recorded PID that now belongs to something else never shows that
 	// process's memory. One measurement for all of them and the load
 	// balancer, so that a process spawn per app doesn't add up.
+	trees := treesOf(alivePIDs, &memorySpells.statusNoTable, "memory: can't list the processes of the copies")
 	balancer := gateway.BalancerPID()
 	if balancer > 0 {
-		alivePIDs = append(alivePIDs, balancer)
+		trees = append(trees, []int{balancer})
 	}
-	memory, err := memoryOf(alivePIDs)
+	memory, err := memoryOf(trees)
 	if err != nil {
 		// Handlers run concurrently, one goroutine per connection.
 		if memoryWarned.CompareAndSwap(false, true) {

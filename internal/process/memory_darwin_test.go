@@ -228,9 +228,9 @@ func TestPlatformMemory_TimeoutIsTheDeadlineAndNotPs(t *testing.T) {
 		t.Errorf("took %v, want it cut off at %v", elapsed, footprintTimeout)
 	}
 
-	got, err = Memory([]int{os.Getpid()})
+	got, err = TreeMemory(alone([]int{os.Getpid()}))
 	if !errors.Is(err, context.DeadlineExceeded) || len(got) != 0 {
-		t.Errorf("Memory() = %v, %v, want nothing and the deadline", got, err)
+		t.Errorf("TreeMemory() = %v, %v, want nothing and the deadline", got, err)
 	}
 	if psCalls != 0 {
 		t.Errorf("ps was called %d times after a timeout, want none", psCalls)

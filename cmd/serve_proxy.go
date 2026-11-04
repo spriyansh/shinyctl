@@ -84,10 +84,14 @@ type hooks struct {
 	// Signal0 is kill(pid, 0), the ready-watcher's "is it still there".
 	Signal0 func(pid int) error
 
-	// Measure is process.ExactMemory, which an apply asks to tell which copies
-	// a new max-memory is going to kill. The memory loop is given its own
-	// measure as a parameter and does not read this.
+	// Measure is process.ExactTreeMemory, which an apply asks to tell which
+	// copies a new max-memory is going to kill. The memory loop is given its
+	// own measure as a parameter and does not read this.
 	Measure measureFunc
+
+	// Trees is process.CopyTrees, the processes of each copy, which the
+	// measurements of the loop, an apply and status are made over.
+	Trees func(leaders []int) (map[int][]int, error)
 
 	// NoteGroup is process.NoteGroup, which reads the members of a copy's group
 	// the moment its exit is seen. A hook, not a package variable, because the
@@ -122,7 +126,8 @@ func currentHooks() hooks {
 		PortStart:      defaultPortStart,
 		Signal0:        func(pid int) error { return syscall.Kill(pid, 0) },
 		DrainSettle:    reconcile.DrainSettle,
-		Measure:        process.ExactMemory,
+		Measure:        process.ExactTreeMemory,
+		Trees:          process.CopyTrees,
 		NoteGroup:      process.NoteGroup,
 	}
 	if o := activeHooks.Load(); o != nil {
@@ -181,6 +186,9 @@ func currentHooks() hooks {
 		}
 		if o.Measure != nil {
 			h.Measure = o.Measure
+		}
+		if o.Trees != nil {
+			h.Trees = o.Trees
 		}
 		if o.NoteGroup != nil {
 			h.NoteGroup = o.NoteGroup

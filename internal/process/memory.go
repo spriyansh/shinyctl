@@ -68,9 +68,6 @@ func ExactTreeMemory(trees [][]int) (map[int]int64, error) {
 	return measureTrees(trees)
 }
 
-// ExactMemory is ExactTreeMemory for processes taken one by one.
-func ExactMemory(pids []int) (map[int]int64, error) { return ExactTreeMemory(alone(pids)) }
-
 // TreeMemory is what status shows: ExactTreeMemory, with ps's resident size of
 // the leader standing in for every copy the platform could not measure, in one
 // ps call. After a timeout there is no ps and no result: a machine that makes
@@ -126,18 +123,6 @@ func TreeMemory(trees [][]int) (map[int]int64, error) {
 		return result, fmt.Errorf("%w; ps's resident size stands in for pid %s", err, list)
 	}
 	return result, fmt.Errorf("ps's resident size stands in for pid %s", list)
-}
-
-// Memory is TreeMemory for processes taken one by one.
-func Memory(pids []int) (map[int]int64, error) { return TreeMemory(alone(pids)) }
-
-// alone makes a tree of each pid by itself.
-func alone(pids []int) [][]int {
-	trees := make([][]int, len(pids))
-	for i, pid := range pids {
-		trees[i] = []int{pid}
-	}
-	return trees
 }
 
 func nonEmpty(trees [][]int) [][]int {

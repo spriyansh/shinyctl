@@ -163,7 +163,7 @@ func TestStatusJSON_Document(t *testing.T) {
     "pressure": "normal"
   },
   "notes": [
-    "Memory: 281M in 2 R processes (1 draining), plus 41M for the load balancer."
+    "Memory: 281M in 2 copies (1 draining), plus 41M for the load balancer."
   ]
 }
 `
