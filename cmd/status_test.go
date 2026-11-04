@@ -63,6 +63,9 @@ func TestWriteStatus(t *testing.T) {
 				{Copy: 2, Role: "warm", PID: 12, Alive: true, Ready: true, Outdated: true},
 				{Copy: 3, PID: 13, Alive: true},
 			}},
+			{Name: "closing", Port: 8095, Copies: []api.CopyStatus{
+				{Copy: 1, Role: "draining", PID: 95, Alive: true, Ready: true, Sessions: &zero, DrainEndsAt: now.Add(15*time.Minute - time.Second)},
+			}},
 			{Name: "draining", Port: 8086, Replicas: 1, WarmReplicas: 1, Copies: []api.CopyStatus{
 				{Copy: 1, Role: "draining", PID: 21, Alive: true, Ready: true, Outdated: true, Sessions: &two, DrainEndsAt: now.Add(15*time.Minute - time.Second)},
 				{Copy: 2, Role: "draining", PID: 22, Alive: true, Ready: true, Outdated: true, Sessions: &zero, DrainEndsAt: now.Add(15*time.Minute - time.Second)},
@@ -90,6 +93,8 @@ func TestWriteStatus(t *testing.T) {
 			{Name: "slow", Port: 8092, Replicas: 1, Copies: []api.CopyStatus{
 				{Copy: 1, PID: 81, Alive: true, PageWaitingSince: now.Add(-25 * time.Second)},
 			}},
+			{Name: "gone", Port: 8093},
+			{Name: "quiet", Port: 8094, Copies: []api.CopyStatus{{Copy: 1, PID: 91}}},
 		},
 	}
 
@@ -108,6 +113,7 @@ taken     -     -         8084  0      port-in-use    -             -     -     
 rolling   1     active    8085  11     alive          ready         -     -         -        -
 rolling   2     warm      8085  12     alive          ready         -     -         -        -
 rolling   3     -         8085  13     alive          starting      -     -         -        -
+closing   1     draining  8095  95     alive          ready         -     0         -        -
 draining  1     draining  8086  21     alive          ready         -     2         -        -
 draining  2     draining  8086  22     alive          ready         -     0         -        -
 draining  3     active    8086  23     alive          ready         -     2         -        -
@@ -121,8 +127,10 @@ upgrade   1     active    8090  61     alive          ready         -     -     
 upgrade   2     -         8090  62     crash-looping  -             -     -         1        -
 broken    1     -         8091  71     alive          page-failing  -     -         -        -
 slow      1     -         8092  81     alive          starting      -     -         -        -
+gone      -     -         8093  0      dead           -             -     -         -        -
+quiet     1     -         8094  91     dead           -             -     -         -        -
 
-Memory: 281M in 15 R processes (2 warm, 2 draining), plus 41M for the load balancer.
+Memory: 281M in 16 R processes (2 warm, 3 draining), plus 41M for the load balancer.
 
 blocked: its port is not served: 127.0.0.1:8083 is not available (taken) — pick a different port
 
@@ -147,6 +155,8 @@ slow: no copy serves yet: a visitor waits up to 15s, then gets a page saying the
 hungry: copy 2 was killed for going over max-memory (512M); it starts again after its backoff.
 
 upgrade: copy 2 was killed for going over max-memory (512M); it starts again after its backoff.
+
+closing: copy 1 is draining with no sessions; it stops within seconds.
 
 draining: copy 4, the new spare, is starting; until it is ready the app has no spare.
 
