@@ -63,8 +63,8 @@ mkdir -p ~/.local/bin && cp shinyctl_0.1.0_linux_arm64/shinyctl ~/.local/bin/
 
 The other archives are `linux_amd64`, `darwin_arm64` (Apple silicon) and
 `darwin_amd64`. Each unpacks into a folder of its own with `shinyctl`, this
-README, the license and notices, and the examples in `examples/hello` and
-`examples/memory`.
+README, the license and notices, and the examples in `examples/hello`,
+`examples/memory` and `examples/workers`.
 
 - On Debian and Ubuntu, `~/.local/bin` is on your `PATH` after your next
   login. On macOS, add `export PATH="$HOME/.local/bin:$PATH"` to
@@ -91,7 +91,7 @@ NAME    COPY  ROLE    PORT  PID    STATUS  READY  MEM   SESSIONS  CRASHES  START
 my-app  1     active  8080  61429  alive   ready  142M  3         -        2026-10-11T20:20:21+02:00
 my-app  2     warm    8080  61430  alive   ready  139M  0         -        2026-10-11T20:20:22+02:00
 
-Memory: 281M in 2 R processes (1 warm), plus 41M for the load balancer.
+Memory: 281M in 2 copies (1 warm), plus 41M for the load balancer.
 ```
 
 Open `http://127.0.0.1:8080` (the `port` in your manifest).
@@ -134,6 +134,25 @@ back as the new spare after its backoff. **Add 1 GB** goes over in one step.
 `MAX_MB` in the example's manifest (1024 MB) is where the app stops growing
 by itself if you raise or remove `max-memory`; keep it below the machine's
 free memory.
+
+`examples/workers` is an app whose slow jobs run in worker processes (two
+[future](https://future.futureverse.org) workers, started with the app), for
+watching shinyctl treat the workers as part of the copy. It needs the
+future package.
+
+```sh
+shinyctl apply -f examples/workers/shinyctl.yaml
+```
+
+`shinyctl status` shows the copy's `MEM` as the main process and its
+workers together, about 250M. Open http://127.0.0.1:8767 and click **Run a
+15 second job**: the page stays responsive and then names the worker that
+ran it. **Run a job that holds 600 MB** takes the copy over its
+`max-memory: 768M` inside a worker while the main process stays small:
+shinyctl kills the main process and both workers together, and the copy
+comes back with new workers. `shinyctl stop` ends the workers with the main
+process; `ps -o pid,ppid,pgid,command` shows them sharing its process group
+before, and nothing after.
 
 ## How it works
 
@@ -207,7 +226,7 @@ free memory.
   hello  3     active    8765  61501  alive   ready  140M  1         -        2026-10-27T11:30:05+02:00
   hello  4     warm      8765  61502  alive   ready  138M  0         -        2026-10-27T11:30:05+02:00
 
-  Memory: 420M in 3 R processes (1 warm, 1 draining), plus 41M for the load balancer.
+  Memory: 420M in 3 copies (1 warm, 1 draining), plus 41M for the load balancer.
 
   hello: copy 1 is draining with 2 sessions; it stops when they end, or in 15m at the latest.
   ```
@@ -240,9 +259,11 @@ free memory.
   switch. On a small machine, set `warm-replicas: 0`, a shorter
   `drain-timeout`, or use `--now`. `status` shows the total.
 - **Memory limit.** With `max-memory` set, `shinyctl-api` measures each of
-  the app's copies about once a second, the same number `MEM` shows, and
-  kills a copy that holds more at once, with SIGKILL and no drain: a process
-  that keeps growing could take the machine down before a drain ended.
+  the app's copies about once a second, the main R process and every process
+  it started together, the same number `MEM` shows, and kills a copy that
+  holds more at once, all of its processes, with SIGKILL and no drain: a
+  process that keeps growing could take the machine down before a drain
+  ended.
   - The kill counts as a crash. The load balancer sends the copy's visitors
     to a warm copy at once, and `restart-policy` and the backoff decide when
     the copy comes back. A draining copy is not restarted.
@@ -250,11 +271,12 @@ free memory.
     example's script reloads by itself onto the warm copy. If every copy
     goes over, visitors get the restarting page until one is back.
   - `status`, `api.log` and the copy's log say the copy was killed for going
-    over `max-memory`.
-  - Apps without a limit are not measured. On Linux measuring costs next to
-    nothing; on macOS it takes a few percent of a core for an app with one
-    copy and a spare, and about a third of a core with 16 copies and a
-    spare.
+    over `max-memory`, and how many other processes went with it.
+  - Apps without a limit are not measured. On Linux measuring costs about a
+    percent of a core for a copy with three workers (a few milliseconds a
+    second on a Raspberry Pi 5), on macOS a few percent of a core for an
+    app with one copy and a spare, about a third of a core with 16 copies
+    and a spare, and one more call a second for each copy with workers.
 
 ## Manifest
 
@@ -316,13 +338,13 @@ max-memory: 2G                  # a copy that holds more is killed and restarted
 | `init` | Writes a starter manifest. `-o` sets the path, `--force` overwrites. |
 | `apply -f <file>` | Starts the app, or updates it if the manifest changed (see below). Starts `shinyctl-api` on first use. Also resumes a stopped app. `--now` stops copies that are replaced or no longer wanted without waiting for their visitors. |
 | `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. `--json` prints the same facts as one JSON document for scripts and monitoring (see Reading `status`). |
-| `stop -f <file>` | Sends SIGTERM to each of the app's processes, waits 10 seconds, then SIGKILL, and closes the app's port. The app stays down until the next `apply` or `restart`. |
+| `stop -f <file>` | Sends SIGTERM to each copy's processes, the main R process and every process it started, waits 10 seconds, then SIGKILL, and closes the app's port. The app stays down until the next `apply` or `restart`. |
 | `restart -f <file>` | Starts new copies from the manifest as it is now, so new code in `app.R` and other app files takes effect, and returns at once. Once they are ready they take new visitors; the old copies keep theirs until those leave or `drain-timeout` passes (see Redeploys). `--now` stops the old copies as soon as the new ones are ready. Also starts a stopped or crash-looping app right away. |
 | `logs -f <file>` | Prints the last 100 lines of the app's log. `--copy N` shows one copy; without it every copy is shown. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
 | `delete -f <file>` | Stops the app, forgets it and removes its state file. Logs are kept. |
 | `shutdown` | Stops every app, the load balancer and `shinyctl-api`, after asking when apps are running (`--yes` skips the question). On Linux it stops the systemd service first. The apps stay registered and come back with the next `serve -d`, any `apply`, or at boot. Starts `shinyctl-api` only when it is not running but left something behind. |
 | `startup` | Prints a systemd user unit that starts `shinyctl-api` at boot (Linux), and on stderr how to install it. |
-| `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. |
+| `serve` | Runs `shinyctl-api` in the foreground. `-d` runs it in the background. The apps keep running when it ends, Ctrl-C included. |
 | `version` | Prints the version: `v0.1.0` for a release or `go install ...@v0.1.0`, `dev (abc1234)` for a build from a checkout (`, modified` when it has uncommitted changes). |
 
 `apply` replaces the copies of a running app, as `restart` does, when a
@@ -334,10 +356,14 @@ processes (copies are started, or drained, as needed). A `max-memory` below
 what a copy already holds kills that copy, and `apply` says which. `apply`
 never looks at `app.R` or other app files: run `restart` for code changes.
 
-`stop`, `restart`, `delete` and a re-apply signal a process only if its
-command line contains the app's `entrypoint-file`. If the recorded process
-ID now belongs to something else, shinyctl leaves it alone, and `stop`,
-`restart` or `delete` names it in the reply.
+`stop`, `restart`, `delete` and a re-apply recognise a copy's main R
+process by its command line, which must contain the app's
+`entrypoint-file`, and signal it together with the processes it started:
+every process in its process group, which is where workers from future,
+mirai, parallel or a shell land, and every child outside the group, which
+is where callr puts its workers. If the recorded process ID now belongs to
+something else, shinyctl leaves it alone, and `stop`, `restart` or `delete`
+names it in the reply.
 
 ## Reading `status`
 
@@ -368,13 +394,16 @@ The columns:
   for: the copy stays `starting`, and after 10 seconds `status` says how long
   it has been waiting. `api.log` notes a failing or slow page once per copy,
   and when it answers. Only ready copies get visitors.
-- `MEM` is the memory the copy's main R process takes, counting what the
-  system has compressed or swapped out: on macOS the number Activity Monitor
-  shows, on Linux resident plus swapped memory (`VmRSS` + `VmSwap`). On an
-  idle Mac it can be lower than `ps` shows, and under memory pressure much
-  higher. Worker processes the copy started aren't counted. When the number
-  can't be read, `MEM` falls back to resident memory from `ps`, or shows `-`,
-  and `api.log` says why.
+- `MEM` is the memory the copy's processes take together, the main R
+  process and every process it started, counting what the system has
+  compressed or swapped out: on macOS the number Activity Monitor shows,
+  with pages the processes share counted once; on Linux resident plus
+  swapped memory in proportion to how many processes share each page
+  (`Pss` + `SwapPss`), so the pages forked workers share with their parent
+  count once between them. On an idle Mac it can be lower than `ps` shows,
+  and under memory pressure much higher. When the number can't be read,
+  `MEM` falls back to resident memory from `ps`, or shows `-`, and `api.log`
+  says why.
 - `SESSIONS` is the number of requests open to the copy, a Shiny session
   being one open WebSocket.
 - `CRASHES` counts crashes in a row: it goes back to `-` once the copy has
@@ -442,7 +471,8 @@ unknown or not applicable, where the table prints `-`. Lists are never
   column: `ready`, `starting`, `page-failing`, or `null` unless `alive`),
   `pid` (`null` unless `alive`), `alive`, `started_at`, `crashes` (0
   under `port-in-use`, as the table), `sessions` (`null` when the load
-  balancer did not say), `memory_bytes`, `outdated`, `skip_drain`,
+  balancer did not say), `memory_bytes` (the copy's processes together),
+  `outdated`, `skip_drain`,
   `drain_ends_at`, `last_exit_reason` (`oom`, or `null`), `page_problem`,
   `page_waiting_since`.
 - `load_balancer`: `starting`, `memory_bytes`. `null` while
@@ -640,21 +670,26 @@ Logs rotate at 1 GiB, keeping one previous copy as `.log.1`.
 - **Logging out can kill everything on systemd servers.** Enable
   lingering with `loginctl enable-linger $USER` if your server allows it.
   `shinyctl-api` writes a warning to `api.log` when lingering is off.
-- **`stop` signals only the main R process.** Worker processes the app
-  started, for example through callr or future, can outlive it.
-- **`max-memory` measures and kills only the main R process.** Workers it
-  started aren't counted, and they outlive the kill.
+- **A process that leaves the copy's process group and is no longer a child
+  of the copy's processes outlives it**, for example a daemon the app
+  started with `setsid`. Everything else the copy started, workers from
+  future, mirai, parallel, callr or a shell, is stopped, killed and
+  measured with it.
+- **After a copy crashes on its own, its workers in a session of their
+  own run on**, which is how callr starts them; the others are ended. The
+  workers of a copy that crashed while `shinyctl-api` was down run on too.
 - **`max-memory` is checked about once a second, not enforced by the
   system.** A copy can hold more for a second or so before it is killed,
   and a spike faster than that can use up the machine's memory first. When
   measuring is slow, the gap between checks grows to four times what it
   took. While memory can't be measured, nothing is killed, and `api.log`
   says why.
-- **A copy killed for going over `max-memory` leaves its R temporary folder
-  behind**, uploads included: SIGKILL gives R no chance to clean up.
+- **A copy killed for going over `max-memory` leaves its R temporary
+  folders behind**, the workers' too, uploads included: SIGKILL gives R no
+  chance to clean up.
 - **On Linux, `MEM` counts the files and libraries a copy has mapped too**,
-  which the system can reclaim, so leave `max-memory` some room above what
-  the app needs.
+  in proportion to how many processes share them, which the system can
+  reclaim, so leave `max-memory` some room above what the app needs.
 - **A copy the Linux kernel kills for lack of memory** is a crash like any
   other: `status` doesn't say it was memory.
 - **The low-memory line goes by the system's own figures**, read about once
