@@ -153,7 +153,7 @@ func shutdownApp(spec manifest.AppSpec) appShutdown {
 		}
 	}
 
-	if err := state.Save(spec.AppStateFile, state.State{AppGroup: spec.AppGroup, Apps: keptRecords(recs, results)}); err != nil {
+	if err := state.Save(spec.AppStateFile, keptState(spec.AppGroup, st, results)); err != nil {
 		out.problems = append(out.problems, fmt.Sprintf("%q: %v", spec.AppName, err))
 	}
 	return out
@@ -166,6 +166,12 @@ func copyNumber(rec state.AppState, i int) int {
 		return rec.Copy
 	}
 	return i + 1
+}
+
+// keptState is what is saved after the stops: the records that are kept, and
+// the revision, so a kept copy that was due a restart still counts as outdated.
+func keptState(group string, st state.State, results []copyStop) state.State {
+	return state.State{AppGroup: group, Revision: st.Revision, Apps: keptRecords(st.Copies(), results)}
 }
 
 // keptRecords are the records of the copies that could not be stopped, as

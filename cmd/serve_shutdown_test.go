@@ -200,6 +200,10 @@ func TestHandleShutdown_KeepsTheRecordOfACopyThatDidNotStop(t *testing.T) {
 	if got := keptRecords(recs, make([]copyStop, 3)); len(got) != 0 {
 		t.Errorf("kept %+v with no errors, want none", got)
 	}
+	st := keptState("g", state.State{Revision: 3, Apps: recs}, results)
+	if st.Revision != 3 || st.AppGroup != "g" || len(st.Apps) != 1 || st.Apps[0].PID != 200 {
+		t.Errorf("keptState = %+v, want copy 2 only, revision 3", st)
+	}
 	if got := copyNumber(state.AppState{}, 1); got != 2 {
 		t.Errorf("copyNumber of an unnumbered record in place 1 = %d, want 2", got)
 	}
