@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -139,7 +140,7 @@ func fakeFootprint(t *testing.T, out string, err error) *[][]string {
 	var calls [][]string
 	orig := footprintRun
 	t.Cleanup(func() { footprintRun = orig })
-	footprintRun = func(args ...string) ([]byte, error) {
+	footprintRun = func(_ context.Context, args ...string) ([]byte, error) {
 		calls = append(calls, args)
 		return []byte(out), err
 	}
@@ -149,12 +150,12 @@ func fakeFootprint(t *testing.T, out string, err error) *[][]string {
 func TestPlatformMemory_OneCallWithAPidFlagForEach(t *testing.T) {
 	calls := fakeFootprint(t, footprintSample, nil)
 
-	got, err := platformMemory([]int{1104, 85910, 4242})
+	got, err := platformTreeMemory(alone([]int{1104, 85910, 4242}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := (map[int]int64{1104: 500000, 85910: 1671504}); !reflect.DeepEqual(got, want) {
-		t.Errorf("platformMemory() = %v, want %v", got, want)
+		t.Errorf("platformTreeMemory() = %v, want %v", got, want)
 	}
 	want := [][]string{{"-f", "bytes", "--pid", "1104", "--pid", "85910", "--pid", "4242"}}
 	if !reflect.DeepEqual(*calls, want) {
@@ -172,12 +173,12 @@ func TestPlatformMemory_ExitErrorStillYieldsTheBlocksRead(t *testing.T) {
 	}
 	fakeFootprint(t, footprintSample, failed)
 
-	got, err := platformMemory([]int{85910, 1})
+	got, err := platformTreeMemory(alone([]int{85910, 1}))
 	if err != nil {
 		t.Fatalf("error = %v, want none", err)
 	}
 	if want := (map[int]int64{85910: 1671504}); !reflect.DeepEqual(got, want) {
-		t.Errorf("platformMemory() = %v, want %v", got, want)
+		t.Errorf("platformTreeMemory() = %v, want %v", got, want)
 	}
 }
 
@@ -185,15 +186,15 @@ func TestPlatformMemory_FailureToRunIsAnError(t *testing.T) {
 	boom := errors.New("fork/exec /usr/bin/footprint: no such file or directory")
 	fakeFootprint(t, footprintSample, boom)
 
-	got, err := platformMemory([]int{85910})
+	got, err := platformTreeMemory(alone([]int{85910}))
 	if !errors.Is(err, boom) || got != nil {
-		t.Errorf("platformMemory() = %v, %v, want nothing and %v", got, err, boom)
+		t.Errorf("platformTreeMemory() = %v, %v, want nothing and %v", got, err, boom)
 	}
 
 	fakeFootprint(t, "", context.DeadlineExceeded)
-	got, err = platformMemory([]int{85910})
+	got, err = platformTreeMemory(alone([]int{85910}))
 	if !errors.Is(err, context.DeadlineExceeded) || got != nil {
-		t.Errorf("platformMemory() = %v, %v, want nothing and the deadline", got, err)
+		t.Errorf("platformTreeMemory() = %v, %v, want nothing and the deadline", got, err)
 	}
 }
 
@@ -206,12 +207,12 @@ func TestPlatformMemory_TimeoutIsTheDeadlineAndNotPs(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	origPath, origTimeout, origMeasure, origPS := footprintPath, footprintTimeout, measure, psOutput
+	origPath, origTimeout, origMeasure, origPS := footprintPath, footprintTimeout, measureTrees, psOutput
 	t.Cleanup(func() {
-		footprintPath, footprintTimeout, measure, psOutput = origPath, origTimeout, origMeasure, origPS
+		footprintPath, footprintTimeout, measureTrees, psOutput = origPath, origTimeout, origMeasure, origPS
 	})
 	footprintPath, footprintTimeout = script, 50*time.Millisecond
-	measure = platformMemory
+	measureTrees = platformTreeMemory
 	psCalls := 0
 	psOutput = func(args ...string) ([]byte, error) {
 		psCalls++
@@ -219,9 +220,9 @@ func TestPlatformMemory_TimeoutIsTheDeadlineAndNotPs(t *testing.T) {
 	}
 
 	start := time.Now()
-	got, err := platformMemory([]int{os.Getpid()})
+	got, err := platformTreeMemory(alone([]int{os.Getpid()}))
 	if !errors.Is(err, context.DeadlineExceeded) || got != nil {
-		t.Errorf("platformMemory() = %v, %v, want nothing and the deadline", got, err)
+		t.Errorf("platformTreeMemory() = %v, %v, want nothing and the deadline", got, err)
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("took %v, want it cut off at %v", elapsed, footprintTimeout)
@@ -261,16 +262,148 @@ func TestPlatformMemory_RealFootprint(t *testing.T) {
 	}
 	gone := exited.Process.Pid
 
-	got, err := platformMemory(append(pids, gone))
+	got, err := platformTreeMemory(alone(append(pids, gone)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, pid := range pids {
 		if got[pid] <= 0 {
-			t.Errorf("platformMemory()[%d] = %d, want a positive size", pid, got[pid])
+			t.Errorf("platformTreeMemory()[%d] = %d, want a positive size", pid, got[pid])
 		}
 	}
 	if _, ok := got[gone]; ok {
-		t.Errorf("platformMemory() has an entry for the exited pid %d", gone)
+		t.Errorf("platformTreeMemory() has an entry for the exited pid %d", gone)
+	}
+}
+
+func TestParseFootprintOutput_Summary(t *testing.T) {
+	blocks, summary, ok := parseFootprintOutput([]byte(footprintSample), map[int]bool{85910: true, 1104: true})
+	if !ok || summary != 92155120 {
+		t.Errorf("summary = %d, %v, want 92155120", summary, ok)
+	}
+	if want := (map[int]int64{85910: 1671504, 1104: 500000}); !reflect.DeepEqual(blocks, want) {
+		t.Errorf("blocks = %v, want %v", blocks, want)
+	}
+
+	// One process read, as footprint prints it: no total.
+	one := footprintSample[:strings.Index(footprintSample, "R [x]")]
+	if _, _, ok := parseFootprintOutput([]byte(one), map[int]bool{713: true}); ok {
+		t.Error("a Summary was found in output that has none")
+	}
+}
+
+// footprintByCall stands in for footprint: out is chosen from the pids named
+// in the arguments, and each call is recorded.
+func footprintByCall(t *testing.T, answer func(args []string) (string, error)) *[][]string {
+	t.Helper()
+	var calls [][]string
+	orig := footprintRun
+	t.Cleanup(func() { footprintRun = orig })
+	footprintRun = func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		out, err := answer(args)
+		return []byte(out), err
+	}
+	return &calls
+}
+
+// Copies of one process are measured together in one call; a copy with workers
+// has a call of its own and takes the de-duplicated total.
+func TestExactTreeMemory_Darwin(t *testing.T) {
+	calls := footprintByCall(t, func(args []string) (string, error) { return footprintSample, nil })
+
+	got, err := ExactTreeMemory([][]int{{713}, {85910, 1104}, {4242}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 713 and 4242 are singles, in one call; 4242 has no block. The copy with a
+	// worker is the Summary, not 1671504 + 500000.
+	if want := (map[int]int64{713: 91000000, 85910: 92155120}); !reflect.DeepEqual(got, want) {
+		t.Errorf("ExactTreeMemory() = %v, want %v", got, want)
+	}
+	want := [][]string{
+		{"-f", "bytes", "--pid", "713", "--pid", "4242"},
+		{"-f", "bytes", "--pid", "85910", "--pid", "1104"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Errorf("footprint calls = %v, want %v", *calls, want)
+	}
+}
+
+// footprint reads one process only when the other is gone: it prints no total,
+// and the copy is that one block. If it is the worker that was read and the
+// leader is gone, the copy is not measured.
+func TestExactTreeMemory_DarwinOneBlockAndMissingLeader(t *testing.T) {
+	leaderOnly := footprintSample[strings.Index(footprintSample, "R [x]"):strings.Index(footprintSample, "zsh [1104]: 64-bit")]
+	workerOnly := footprintSample[strings.Index(footprintSample, "zsh [1104]: 64-bit"):strings.Index(footprintSample, "Shared Cache")]
+	footprintByCall(t, func(args []string) (string, error) {
+		if args[3] == "85910" {
+			return "======\n" + leaderOnly, nil
+		}
+		return "======\n" + workerOnly, nil
+	})
+
+	got, err := ExactTreeMemory([][]int{{85910, 1104}})
+	if err != nil || !reflect.DeepEqual(got, map[int]int64{85910: 1671504}) {
+		t.Errorf("leader read alone: %v, %v, want its phys_footprint", got, err)
+	}
+	got, err = ExactTreeMemory([][]int{{9999, 1104}})
+	if err != nil || len(got) != 0 {
+		t.Errorf("leader not read: %v, %v, want the copy absent", got, err)
+	}
+}
+
+// A measurement is cut off as a whole: copies with workers are one call each,
+// and the calls share one deadline, so a slow machine costs footprintTimeout
+// and not footprintTimeout per copy.
+func TestExactTreeMemory_DarwinOneDeadline(t *testing.T) {
+	origTimeout := footprintTimeout
+	t.Cleanup(func() { footprintTimeout = origTimeout })
+	footprintTimeout = 150 * time.Millisecond
+
+	orig := footprintRun
+	t.Cleanup(func() { footprintRun = orig })
+	var calls int
+	footprintRun = func(ctx context.Context, args ...string) ([]byte, error) {
+		calls++
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	start := time.Now()
+	got, err := ExactTreeMemory([][]int{{1, 11}, {2, 21}, {3, 31}})
+	if !errors.Is(err, context.DeadlineExceeded) || got != nil {
+		t.Errorf("ExactTreeMemory() = %v, %v, want nothing and the deadline", got, err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*footprintTimeout {
+		t.Errorf("took %s for three copies, want about one timeout (%s)", elapsed, footprintTimeout)
+	}
+	if calls != 1 {
+		t.Errorf("%d calls, want the measurement to end at the first that was cut off", calls)
+	}
+}
+
+// The real footprint over a process and a child of it: the total is at least
+// the parent's, and the copy is present.
+func TestExactTreeMemory_RealFootprint(t *testing.T) {
+	if _, err := os.Stat(footprintPath); err != nil {
+		t.Skipf("no footprint here: %v", err)
+	}
+	child := exec.Command("sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { child.Process.Kill(); child.Wait() })
+
+	got, err := ExactTreeMemory([][]int{{os.Getpid(), child.Process.Pid}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alone, err := ExactTreeMemory([][]int{{os.Getpid()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[os.Getpid()] <= 0 || got[os.Getpid()] < alone[os.Getpid()]/2 {
+		t.Errorf("tree = %d, process alone = %d, want a total of the same order or more", got[os.Getpid()], alone[os.Getpid()])
 	}
 }
