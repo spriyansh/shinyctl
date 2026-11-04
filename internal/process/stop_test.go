@@ -263,3 +263,66 @@ func TestKill(t *testing.T) {
 		}
 	})
 }
+
+// A leader that leads a group but is no longer recognised by the identity
+// check is not killed through its group, though the table still shows it live.
+func TestStop_ALeaderThatFailsTheCheckGetsNoGroupKill(t *testing.T) {
+	tr := startTree(t, true, "ignore", "plain")
+	calls := 0
+	ours := func() bool {
+		calls++
+		return calls == 1
+	}
+	if signaled, _, err := stopCopy(tr.pid(), ours, 300*time.Millisecond, 300*time.Millisecond, sysLook); err != nil || !signaled {
+		t.Fatalf("stopCopy = (%v, %v), want (true, nil)", signaled, err)
+	}
+	if !running(t, tr.pid()) {
+		t.Errorf("the leader was killed after losing identity")
+	}
+}
+
+// A group that holds only a zombie of this process answers EPERM on macOS: it
+// is not an error to signal it.
+func TestSignalGroup_OnlyAZombieIsNotAnError(t *testing.T) {
+	exe, _ := os.Executable()
+	leader := exec.Command(exe, "sleep", "zombie-group")
+	leader.Env = append(os.Environ(), sleeperEnv+"=1")
+	leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := leader.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := leader.Process.Pid
+	t.Cleanup(func() { syscall.Kill(-pgid, syscall.SIGKILL) })
+
+	y := exec.Command("true")
+	y.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	if err := y.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { y.Wait() })
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if table, _ := readTable(); func() bool {
+			for _, p := range table {
+				if p.pid == y.Process.Pid {
+					return p.zombie
+				}
+			}
+			return false
+		}() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the short-lived process never became a zombie")
+		}
+	}
+	leader.Process.Kill()
+	leader.Wait() // reaped: only the zombie is left in the group
+
+	if err := signalGroup(pgid, syscall.SIGTERM); err != nil {
+		t.Errorf("signalGroup(only a zombie) = %v, want nil", err)
+	}
+	y.Wait()
+	if err := signalGroup(pgid, syscall.SIGTERM); err != syscall.ESRCH {
+		t.Errorf("signalGroup(empty group) = %v, want ESRCH", err)
+	}
+}

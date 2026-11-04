@@ -92,16 +92,18 @@ func Kill(app state.AppState, beforeSignal func(), fallbacks ...string) (signale
 	if beforeSignal != nil {
 		beforeSignal()
 	}
-	target := pid
+	var kerr error
 	if group {
-		target = -pid
+		kerr = signalGroup(pid, syscall.SIGKILL)
+	} else {
+		kerr = syscall.Kill(pid, syscall.SIGKILL)
 	}
-	if err := syscall.Kill(target, syscall.SIGKILL); err != nil {
+	if kerr != nil {
 		release()
-		if err == syscall.ESRCH {
+		if kerr == syscall.ESRCH {
 			return false, 0, nil
 		}
-		return false, 0, err
+		return false, 0, kerr
 	}
 	for _, p := range outside {
 		syscall.Kill(p.pid, syscall.SIGKILL) // gone already is fine
@@ -113,6 +115,18 @@ func Kill(app state.AppState, beforeSignal func(), fallbacks ...string) (signale
 		}
 	}
 	return true, others + len(outside), nil
+}
+
+// signalGroup sends sig to the process group pgid. A group that holds only
+// zombies answers EPERM on macOS (no process there can be signalled), which
+// is a group with nothing left to do and not a failure: a leader that exits
+// between the identity check and the signal must not turn a stop into an
+// error. ESRCH, no such group, is returned for the callers to judge.
+func signalGroup(pgid int, sig syscall.Signal) error {
+	if err := syscall.Kill(-pgid, sig); err != nil && err != syscall.EPERM {
+		return err
+	}
+	return nil
 }
 
 // ending holds the pids of the copies that Stop or Kill is ending, with how
@@ -277,11 +291,13 @@ func stopCopy(pid int, ours func() bool, grace, kgrace time.Duration, l look) (b
 	}
 	noted, others := membersOf(inGroup), membersOf(outside)
 
-	target := pid
+	var serr error
 	if group {
-		target = -pid
+		serr = signalGroup(pid, syscall.SIGTERM)
+	} else {
+		serr = syscall.Kill(pid, syscall.SIGTERM)
 	}
-	if err := syscall.Kill(target, syscall.SIGTERM); err != nil {
+	if err := serr; err != nil {
 		if err != syscall.ESRCH {
 			return true, 0, err
 		}
@@ -307,11 +323,15 @@ func stopCopy(pid int, ours func() bool, grace, kgrace time.Duration, l look) (b
 	if group {
 		killGroup = leaderOurs
 		if !killGroup && terr == nil {
-			// The leader is gone: the group is signalled only while a process
-			// noted at the first read is still in it, which also proves that
-			// group id is still the copy's (a live member keeps it from being
-			// handed out).
+			// The group is signalled only while a process noted at the first
+			// read is still in it, which also proves that group id is still
+			// the copy's (a live member keeps it from being handed out). The
+			// leader is not one of them while it is up: it is the identity
+			// check's to vouch for, as in D3, and it has just failed.
 			for _, m := range noted {
+				if leaderUp && m.pid == pid {
+					continue
+				}
 				if live(table, m) && groupOf(table, m.pid) == pid {
 					killGroup = true
 					break
@@ -321,7 +341,7 @@ func stopCopy(pid int, ours func() bool, grace, kgrace time.Duration, l look) (b
 	}
 	switch {
 	case killGroup:
-		syscall.Kill(-pid, syscall.SIGKILL)
+		signalGroup(pid, syscall.SIGKILL)
 	case !group && leaderOurs:
 		syscall.Kill(pid, syscall.SIGKILL)
 	}
