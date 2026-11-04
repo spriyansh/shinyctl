@@ -329,3 +329,18 @@ func TestHandleStatus_CarriesTheMachinesMemory(t *testing.T) {
 		t.Errorf("cleared, but the body has the key: %s", got)
 	}
 }
+
+// The app's group travels in the status, so two apps of one name can be told
+// apart.
+func TestHandleStatus_SendsTheGroup(t *testing.T) {
+	spec := newTestSpec(t, t.TempDir(), "grouped", "app.R", freePorts(t, 1)[0])
+	spec.AppGroup = "lab"
+	if err := appRegistry.Remember(spec); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { postJSON(t, handleDelete, spec) })
+
+	if got := statusOf(t, "grouped").Group; got != "lab" {
+		t.Errorf("group = %q, want lab", got)
+	}
+}

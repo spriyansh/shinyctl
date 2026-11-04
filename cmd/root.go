@@ -23,7 +23,7 @@ over without cutting off the visitors of the old one.
 
   shinyctl init                        scaffold a manifest to fill in
   shinyctl apply -f shinyctl.yaml      declare an app, start/reconcile it
-  shinyctl status                      see what's running right now
+  shinyctl status                      see what's running right now (--json for scripts)
   shinyctl stop -f shinyctl.yaml       take it down and keep it down
   shinyctl delete -f shinyctl.yaml     stop it and forget it entirely
   shinyctl shutdown                    stop every app, the load balancer and shinyctl-api

@@ -100,7 +100,12 @@ type CopyStatus struct {
 
 // AppStatus is one app's current, observed status, with a row per copy.
 type AppStatus struct {
-	Name         string       `json:"name"`
+	Name string `json:"name"`
+
+	// Group is the app's app-group, which tells two apps of the same name
+	// apart. An older shinyctl-api does not send it.
+	Group string `json:"group,omitempty"`
+
 	Host         string       `json:"host"`
 	Port         int          `json:"port"`
 	Stopped      bool         `json:"stopped"`

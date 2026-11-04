@@ -63,6 +63,9 @@ func TestWriteStatus(t *testing.T) {
 				{Copy: 2, Role: "warm", PID: 12, Alive: true, Ready: true, Outdated: true},
 				{Copy: 3, PID: 13, Alive: true},
 			}},
+			{Name: "closing", Port: 8095, Copies: []api.CopyStatus{
+				{Copy: 1, Role: "draining", PID: 95, Alive: true, Ready: true, Sessions: &zero, DrainEndsAt: now.Add(15*time.Minute - time.Second)},
+			}},
 			{Name: "draining", Port: 8086, Replicas: 1, WarmReplicas: 1, Copies: []api.CopyStatus{
 				{Copy: 1, Role: "draining", PID: 21, Alive: true, Ready: true, Outdated: true, Sessions: &two, DrainEndsAt: now.Add(15*time.Minute - time.Second)},
 				{Copy: 2, Role: "draining", PID: 22, Alive: true, Ready: true, Outdated: true, Sessions: &zero, DrainEndsAt: now.Add(15*time.Minute - time.Second)},
@@ -90,6 +93,8 @@ func TestWriteStatus(t *testing.T) {
 			{Name: "slow", Port: 8092, Replicas: 1, Copies: []api.CopyStatus{
 				{Copy: 1, PID: 81, Alive: true, PageWaitingSince: now.Add(-25 * time.Second)},
 			}},
+			{Name: "gone", Port: 8093},
+			{Name: "quiet", Port: 8094, Copies: []api.CopyStatus{{Copy: 1, PID: 91}}},
 		},
 	}
 
@@ -108,6 +113,7 @@ taken     -     -         8084  0      port-in-use    -             -     -     
 rolling   1     active    8085  11     alive          ready         -     -         -        -
 rolling   2     warm      8085  12     alive          ready         -     -         -        -
 rolling   3     -         8085  13     alive          starting      -     -         -        -
+closing   1     draining  8095  95     alive          ready         -     0         -        -
 draining  1     draining  8086  21     alive          ready         -     2         -        -
 draining  2     draining  8086  22     alive          ready         -     0         -        -
 draining  3     active    8086  23     alive          ready         -     2         -        -
@@ -121,8 +127,10 @@ upgrade   1     active    8090  61     alive          ready         -     -     
 upgrade   2     -         8090  62     crash-looping  -             -     -         1        -
 broken    1     -         8091  71     alive          page-failing  -     -         -        -
 slow      1     -         8092  81     alive          starting      -     -         -        -
+gone      -     -         8093  0      dead           -             -     -         -        -
+quiet     1     -         8094  91     dead           -             -     -         -        -
 
-Memory: 281M in 15 R processes (2 warm, 2 draining), plus 41M for the load balancer.
+Memory: 281M in 16 R processes (2 warm, 3 draining), plus 41M for the load balancer.
 
 blocked: its port is not served: 127.0.0.1:8083 is not available (taken) — pick a different port
 
@@ -148,6 +156,8 @@ hungry: copy 2 was killed for going over max-memory (512M); it starts again afte
 
 upgrade: copy 2 was killed for going over max-memory (512M); it starts again after its backoff.
 
+closing: copy 1 is draining with no sessions; it stops within seconds.
+
 draining: copy 4, the new spare, is starting; until it is ready the app has no spare.
 
 draining: copies 1 and 2 are draining with 2 sessions; each stops when its sessions end, or in 15m at the latest.
@@ -165,8 +175,6 @@ func TestRolloutNote(t *testing.T) {
 	draining := func(c api.CopyStatus) api.CopyStatus { c.Role = "draining"; return c }
 	pageFails := func(c api.CopyStatus) api.CopyStatus { c.PageProblem = "answers HTTP 500"; return c }
 	now := time.Date(2026, 10, 11, 19, 0, 0, 0, time.UTC)
-	t.Cleanup(func() { statusNow = time.Now })
-	statusNow = func() time.Time { return now }
 	waitsFor := func(c api.CopyStatus, d time.Duration) api.CopyStatus { c.PageWaitingSince = now.Add(-d); return c }
 	cases := []struct {
 		name string
@@ -212,7 +220,7 @@ func TestRolloutNote(t *testing.T) {
 		{"a draining copy is not serving", api.AppStatus{Copies: []api.CopyStatus{draining(copyOf(1, true, true, true)), copyOf(2, false, true, false)}}, ""},
 	}
 	for _, tc := range cases {
-		if got := rolloutNote(tc.app); got != tc.want {
+		if got := rolloutNote(tc.app, now); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -296,8 +304,6 @@ func TestSpareNote(t *testing.T) {
 
 func TestPageNote(t *testing.T) {
 	now := time.Date(2026, 10, 11, 19, 0, 0, 0, time.UTC)
-	t.Cleanup(func() { statusNow = time.Now })
-	statusNow = func() time.Time { return now }
 	const noServe = "no copy serves yet: a visitor waits up to 15s, then gets a page saying the app is restarting, until a copy's page answers"
 	fails := func(n int, role string) api.CopyStatus {
 		return api.CopyStatus{Copy: n, Role: role, Alive: true, PageProblem: "answers HTTP 500"}
@@ -322,7 +328,7 @@ func TestPageNote(t *testing.T) {
 			{Copy: 1, Role: "active", Alive: true, Ready: true, Outdated: true}, fails(2, "")}}, nil},
 	}
 	for _, tc := range cases {
-		if got := pageNote(tc.app); !slices.Equal(got, tc.want) {
+		if got := pageNote(tc.app, now); !slices.Equal(got, tc.want) {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -373,7 +379,7 @@ func TestExitedNote(t *testing.T) {
 			{Copy: 1, Alive: true, Ready: true, Outdated: true, Role: "active"}, gone(2)}}, ""},
 	}
 	for _, c := range cases {
-		if got := exitedNote(c.app); got != c.want {
+		if got := exitedNote(c.app, time.Time{}); got != c.want {
 			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
 		}
 	}
@@ -594,5 +600,112 @@ func TestNotRunningLine(t *testing.T) {
 	}
 	if got, want := notRunningLine(path), "shinyctl-api is not running"; got != want {
 		t.Errorf("unreadable registry: got %q, want %q", got, want)
+	}
+}
+
+func TestStatusWord(t *testing.T) {
+	blocked := api.AppStatus{NotStarted: "port taken"}
+	cases := []struct {
+		name    string
+		app     api.AppStatus
+		c       api.CopyStatus
+		status  string
+		ready   string
+		crashes int
+	}{
+		{"no copies, stopped", api.AppStatus{Stopped: true}, api.CopyStatus{}, "stopped", "", 0},
+		{"no copies, port in use", blocked, api.CopyStatus{}, "port-in-use", "", 0},
+		{"no copies, dead", api.AppStatus{}, api.CopyStatus{}, "dead", "", 0},
+		{"a copy of a stopped app", api.AppStatus{Stopped: true}, api.CopyStatus{Copy: 1, Alive: true, Ready: true, CrashCount: 2}, "stopped", "", 2},
+		{"port in use with an old crash record", blocked, api.CopyStatus{Copy: 1, CrashCount: 2}, "port-in-use", "", 0},
+		{"alive and ready", api.AppStatus{}, api.CopyStatus{Alive: true, Ready: true}, "alive", "ready", 0},
+		{"alive and starting", api.AppStatus{}, api.CopyStatus{Alive: true}, "alive", "starting", 0},
+		{"alive with a failing page", api.AppStatus{}, api.CopyStatus{Alive: true, PageProblem: "answers HTTP 500"}, "alive", "page-failing", 0},
+		{"alive beats a not-started note", api.AppStatus{NotStarted: "port taken", Copies: []api.CopyStatus{{Copy: 1, Alive: true, Ready: true}}},
+			api.CopyStatus{Copy: 1, Alive: true, Ready: true}, "alive", "ready", 0},
+		{"exited", api.AppStatus{}, api.CopyStatus{GaveUp: true, CrashCount: 1}, "exited", "", 1},
+		{"crash-looping", api.AppStatus{}, api.CopyStatus{CrashCount: 3}, "crash-looping", "", 3},
+		{"dead", api.AppStatus{}, api.CopyStatus{Copy: 1, PID: 91}, "dead", "", 0},
+	}
+	for _, tc := range cases {
+		status := statusWord(tc.app, tc.c)
+		if status != tc.status {
+			t.Errorf("%s: status %q, want %q", tc.name, status, tc.status)
+		}
+		if got := readyWord(status, tc.c); got != tc.ready {
+			t.Errorf("%s: ready %q, want %q", tc.name, got, tc.ready)
+		}
+		if got := crashesShown(tc.app, tc.c); got != tc.crashes {
+			t.Errorf("%s: crashes %d, want %d", tc.name, got, tc.crashes)
+		}
+	}
+}
+
+func TestReadyWord(t *testing.T) {
+	ready := api.CopyStatus{Alive: true, Ready: true, PageProblem: "answers HTTP 500"}
+	if got := readyWord("alive", ready); got != "ready" {
+		t.Errorf("ready beats a page problem: %q", got)
+	}
+	for _, status := range []string{"stopped", "port-in-use", "exited", "crash-looping", "dead"} {
+		if got := readyWord(status, ready); got != "" {
+			t.Errorf("readyWord(%q) = %q, want none", status, got)
+		}
+	}
+}
+
+// One app's lines come in the order of the kinds, without its name.
+func TestAppNotes(t *testing.T) {
+	now := time.Date(2026, 10, 11, 19, 0, 0, 0, time.UTC)
+	two, zero := 2, 0
+	ends := now.Add(15*time.Minute - time.Second)
+
+	upgrade := api.AppStatus{Name: "upgrade", Replicas: 1, MaxMemoryBytes: 512 << 20, Copies: []api.CopyStatus{
+		{Copy: 1, Role: "active", Alive: true, Ready: true, Outdated: true},
+		{Copy: 2, CrashCount: 1, LastExitReason: "oom"},
+	}}
+	want := []string{
+		"copy 1 keeps serving the previous version: copy 2 does not start (see shinyctl logs --copy 2)",
+		"copy 2 was killed for going over max-memory (512M); it starts again after its backoff.",
+	}
+	if got := appNotes(upgrade, now); !slices.Equal(got, want) {
+		t.Errorf("upgrade:\n got %q\nwant %q", got, want)
+	}
+
+	draining := api.AppStatus{Name: "draining", WarmReplicas: 1, Copies: []api.CopyStatus{
+		{Copy: 1, Role: "draining", Alive: true, Ready: true, Outdated: true, Sessions: &two, DrainEndsAt: ends},
+		{Copy: 2, Role: "draining", Alive: true, Ready: true, Outdated: true, Sessions: &zero, DrainEndsAt: ends},
+		{Copy: 3, Role: "active", Alive: true, Ready: true},
+		{Copy: 4, Alive: true},
+	}}
+	want = []string{
+		"copy 4, the new spare, is starting; until it is ready the app has no spare.",
+		"copies 1 and 2 are draining with 2 sessions; each stops when its sessions end, or in 15m at the latest.",
+	}
+	if got := appNotes(draining, now); !slices.Equal(got, want) {
+		t.Errorf("draining:\n got %q\nwant %q", got, want)
+	}
+
+	both := api.AppStatus{Name: "both", NotServed: "a", NotStarted: "b"}
+	want = []string{"its port is not served: a", "not started: b"}
+	if got := appNotes(both, now); !slices.Equal(got, want) {
+		t.Errorf("both:\n got %q\nwant %q", got, want)
+	}
+	if got := appNotes(api.AppStatus{Name: "fine"}, now); len(got) != 0 {
+		t.Errorf("fine: %q", got)
+	}
+}
+
+func TestTopNotes(t *testing.T) {
+	resp := api.StatusResponse{
+		BalancerStarting: true,
+		MachineMemory:    &api.MachineMemory{Low: true, TotalBytes: 2000 << 20, AvailableBytes: 120 << 20},
+		Apps:             []api.AppStatus{{Name: "a", Copies: []api.CopyStatus{{Alive: true, Ready: true, MemoryBytes: 10 << 20}}}},
+	}
+	got := topNotes(resp)
+	if len(got) != 3 || got[0] != memoryLine(resp) || got[1] != machineLine(resp) || got[2] != balancerStartingNote {
+		t.Errorf("topNotes = %q", got)
+	}
+	if got := topNotes(api.StatusResponse{}); len(got) != 0 {
+		t.Errorf("empty response: %q", got)
 	}
 }

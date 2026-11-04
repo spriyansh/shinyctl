@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spriyansh/shinyctl/internal/manifest"
+	"github.com/spriyansh/shinyctl/internal/reconcile"
 )
 
 // unixClient builds an http.Client that dials socketPath for every
@@ -134,11 +135,32 @@ func Shutdown(socketPath string) (ShutdownResponse, error) {
 	return out, nil
 }
 
+// statusTimeout bounds a whole status request, body included. A shinyctl-api
+// that accepts the connection and never answers would otherwise hang status
+// (and anything that waits on it, like a cron check) forever. A variable so
+// the test can shorten it.
+var statusTimeout = 60 * time.Second
+
+// statusError words an error from the status request: a timeout says that
+// shinyctl-api did not answer, anything else reads as it did.
+func statusError(err error) error {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return fmt.Errorf("shinyctl-api did not answer within %s", reconcile.FormatDuration(statusTimeout))
+	}
+	return nil
+}
+
 // Status fetches shinyctl-api's /status endpoint over the Unix socket at
 // socketPath.
 func Status(socketPath string) (StatusResponse, error) {
-	resp, err := unixClient(socketPath).Get("http://unix/status")
+	client := unixClient(socketPath)
+	client.Timeout = statusTimeout
+	resp, err := client.Get("http://unix/status")
 	if err != nil {
+		if terr := statusError(err); terr != nil {
+			return StatusResponse{}, terr
+		}
 		return StatusResponse{}, fmt.Errorf("calling shinyctl-api: %w", err)
 	}
 	defer resp.Body.Close()
@@ -150,6 +172,9 @@ func Status(socketPath string) (StatusResponse, error) {
 
 	var out StatusResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		if terr := statusError(err); terr != nil {
+			return StatusResponse{}, terr
+		}
 		return StatusResponse{}, err
 	}
 

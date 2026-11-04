@@ -30,6 +30,12 @@ var memoryOf = process.Memory
 // with the next call that measures everything.
 var memoryWarned atomic.Bool
 
+// specOrder is the order status lists apps in: by name, group, port and state
+// file.
+func specOrder(a, b manifest.AppSpec) int {
+	return cmp.Or(strings.Compare(a.AppName, b.AppName), strings.Compare(a.AppGroup, b.AppGroup), cmp.Compare(a.Port, b.Port), strings.Compare(a.AppStateFile, b.AppStateFile))
+}
+
 // handleStatus reports on every app appRegistry knows about — every spec
 // ever applied to this user's shinyctl-api and not since forgotten, across
 // restarts, since the registry persists to ~/.shinyctl/registry.json — with a
@@ -45,9 +51,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	// The registry keeps its apps in a map: a fixed order is what makes two
 	// calls to status comparable.
 	specs := appRegistry.All()
-	slices.SortFunc(specs, func(a, b manifest.AppSpec) int {
-		return cmp.Or(strings.Compare(a.AppName, b.AppName), strings.Compare(a.AppGroup, b.AppGroup), cmp.Compare(a.Port, b.Port), strings.Compare(a.AppStateFile, b.AppStateFile))
-	})
+	slices.SortFunc(specs, specOrder)
 
 	for _, spec := range specs {
 		currentState, err := state.Load(spec.AppStateFile)
@@ -67,6 +71,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			// and port would otherwise render as a blank row identifying
 			// nothing.
 			Name:          spec.AppName,
+			Group:         spec.AppGroup,
 			Host:          spec.EffectiveHost(),
 			Port:          spec.Port,
 			Stopped:       appRegistry.IsStopped(spec.AppStateFile),

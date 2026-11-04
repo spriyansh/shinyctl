@@ -32,6 +32,7 @@ func TestREADMEDescribesCopies(t *testing.T) {
 	for _, want := range []string{
 		"warm-replicas", "lb-policy", "lb_<port>", "--copy N", "port-in-use", "drain-timeout", "--now", "draining",
 		"exited", "THIRD_PARTY_NOTICES", "host: 127.0.0.1", "proxy_http_version 1.1", "Upgrade $http_upgrade", "proxy_read_timeout",
+		"--json", "readiness",
 	} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("README.md does not mention %q", want)

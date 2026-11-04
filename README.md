@@ -315,7 +315,7 @@ max-memory: 2G                  # a copy that holds more is killed and restarted
 |---|---|
 | `init` | Writes a starter manifest. `-o` sets the path, `--force` overwrites. |
 | `apply -f <file>` | Starts the app, or updates it if the manifest changed (see below). Starts `shinyctl-api` on first use. Also resumes a stopped app. `--now` stops copies that are replaced or no longer wanted without waiting for their visitors. |
-| `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. |
+| `status` | Lists every app `shinyctl-api` manages. Never starts `shinyctl-api`. `--json` prints the same facts as one JSON document for scripts and monitoring (see Reading `status`). |
 | `stop -f <file>` | Sends SIGTERM to each of the app's processes, waits 10 seconds, then SIGKILL, and closes the app's port. The app stays down until the next `apply` or `restart`. |
 | `restart -f <file>` | Starts new copies from the manifest as it is now, so new code in `app.R` and other app files takes effect, and returns at once. Once they are ready they take new visitors; the old copies keep theirs until those leave or `drain-timeout` passes (see Redeploys). `--now` stops the old copies as soon as the new ones are ready. Also starts a stopped or crash-looping app right away. |
 | `logs -f <file>` | Prints the last 100 lines of the app's log. `--copy N` shows one copy; without it every copy is shown. `--follow` keeps printing until Ctrl-C, `-n` sets the number of lines, `--api` shows `shinyctl-api`'s log instead. Never starts `shinyctl-api`. |
@@ -405,6 +405,59 @@ Under the table, `status` says what the table can't:
 - copies killed for going over `max-memory`, and whether they are back;
 - an app without a spare for the seconds between a switch and its new spare
   being ready.
+
+### As JSON
+
+`shinyctl status --json` prints what `status` knows as one JSON document,
+for a cron check, an exporter or a dashboard. Like `status`, it never
+starts `shinyctl-api`. Check `.api.running` first: when `shinyctl-api` is
+not running, the document still lists the registered apps, read from
+`registry.json`, with empty `copies` and `serving: null`, and the command
+exits 0. An error, including `shinyctl-api` not answering within a minute,
+goes to stderr with exit 1 and nothing on stdout.
+
+```sh
+shinyctl status --json | jq -r '.apps[] | "\(.name)\t\(.serving)"'          # is each app serving
+shinyctl status --json | jq -r '.apps[] as $a | $a.copies[]
+  | select(.status == "crash-looping") | "\($a.name) copy \(.copy)"'        # for a cron alert
+shinyctl status --json | jq -r '.apps[].copies[] | select(.role == "draining")
+  | "copy \(.copy): \(.sessions) sessions, ends \(.drain_ends_at)"'
+shinyctl status --json | jq -r '.notes[], .apps[].notes[]'                     # the lines under the table
+```
+
+The keys are the table's columns and the manifest's fields, with `_` for
+`-`. Times are RFC 3339 in UTC, memory is in bytes, and `null` means
+unknown or not applicable, where the table prints `-`. Lists are never
+`null`.
+
+- `schema` (`1`), `time`, `api.running`.
+- `apps[]`: `name`, `group`, `host`, `port`, `stopped`, `serving` (true
+  when an active copy is alive and ready; `null` while `shinyctl-api` is
+  down), `replicas`, `warm_replicas`, `restart_policy`,
+  `max_memory_bytes` (`null` for no limit), `not_served`, `not_started`,
+  `copies[]`, `notes[]`.
+- `copies[]`: `copy`, `role` (`active`, `warm`, `draining` or `null`),
+  `status` (the `STATUS` column: `alive`, `dead`, `stopped`,
+  `crash-looping`, `exited` or `port-in-use`), `readiness` (the `READY`
+  column: `ready`, `starting`, `page-failing`, or `null` unless `alive`),
+  `pid` (`null` unless `alive`), `alive`, `started_at`, `crashes` (0
+  under `port-in-use`, as the table), `sessions` (`null` when the load
+  balancer did not say), `memory_bytes`, `outdated`, `skip_drain`,
+  `drain_ends_at`, `last_exit_reason` (`oom`, or `null`), `page_problem`,
+  `page_waiting_since`.
+- `load_balancer`: `starting`, `memory_bytes`. `null` while
+  `shinyctl-api` is down.
+- `machine`: `low`, `total_bytes`, `available_bytes`, `swap_total_bytes`,
+  `swap_used_bytes`, `stall_percent` (Linux), `pressure` (macOS). `null`
+  while `shinyctl-api` is down.
+- `notes[]`: the lines `status` prints under the table, the ones about
+  one app under that app, the rest at the top level.
+
+These keys stay. New keys may be added, and the listed words may gain
+values, so a script ignores keys it does not know and treats a word it
+does not know as not healthy. The wording of `notes`, `not_served`,
+`not_started` and `page_problem` is for people and may change. `schema`
+changes only when a listed key changes meaning or goes away.
 
 ## HTTPS and the internet
 
