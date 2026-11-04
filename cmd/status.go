@@ -36,7 +36,6 @@ var statusCmd = &cobra.Command{
 		}
 
 		out := cmd.OutOrStdout()
-		now := statusNow()
 
 		if !process.SocketDialable(socketPath) {
 			registryPath, err := process.RegistryPath()
@@ -44,7 +43,7 @@ var statusCmd = &cobra.Command{
 				return err
 			}
 			if statusAsJSON {
-				doc, err := notRunningJSON(registryPath, now)
+				doc, err := notRunningJSON(registryPath, statusNow())
 				if err != nil {
 					return err
 				}
@@ -60,7 +59,7 @@ var statusCmd = &cobra.Command{
 		}
 
 		if statusAsJSON {
-			return writeStatusJSON(out, statusJSON(resp, now))
+			return writeStatusJSON(out, statusJSON(resp, statusNow()))
 		}
 
 		if len(resp.Apps) == 0 {
