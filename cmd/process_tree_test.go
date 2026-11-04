@@ -140,3 +140,147 @@ func TestReplace_EndsOldWorkers(t *testing.T) {
 	waitStopped(t, spec, old)
 	waitGoneAll(t, "the old copy's workers to be gone", all...)
 }
+
+// crashingSpec is an app of one copy that never restarts, whose fake Rscript
+// starts workers and then crashes after a while.
+func crashingSpec(t *testing.T, after string) manifest.AppSpec {
+	t.Helper()
+	spec := workersSpec(t, "app")
+	spec.RestartPolicy = manifest.RestartNever
+	spec.Env["FAKE_RSCRIPT_EXIT_AFTER"] = after
+	return spec
+}
+
+// killOnCleanup ends pids when the test does, whatever the test found.
+func killOnCleanup(t *testing.T, pids ...int) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, pid := range pids {
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+}
+
+// A copy that crashes leaves its workers in its group: they are ended, and the
+// log says so. The detached one is not found (its parent is gone) and runs on.
+func TestSweep_AfterACrash(t *testing.T) {
+	useFakeRscript(t)
+	buf := captureLog(t)
+	spec := crashingSpec(t, "2s")
+	cleanupApp(t, spec)
+	rec := applyOK(t, spec)
+	waitReady(t, process.InternalHost, rec.Port)
+	workers, detached := workersOf(t, rec)
+	killOnCleanup(t, append(workers, detached)...)
+
+	waitGoneAll(t, "the workers of the crashed copy to be swept", append(workers, rec.PID)...)
+	if syscall.Kill(detached, 0) != nil {
+		t.Errorf("the detached worker %d was ended; it is no longer anyone's descendant and runs on", detached)
+	}
+	waitUntil(t, "the sweep line", 5*time.Second, func() bool { return strings.Contains(buf.String(), "ended them") })
+	want := "copy 1 (pid " + strconv.Itoa(rec.PID) + ") exited and left 2 processes; ended them"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("log = %q, want a line with %q", buf.String(), want)
+	}
+	if again := loadApp(t, spec); again.PID != rec.PID || again.CrashCount != 1 {
+		t.Errorf("record = %+v, want the crash counted once and no restart (restart-policy never)", again)
+	}
+}
+
+// The members are noted the moment the exit is seen, while recordExit still
+// waits for the state lock: a cycle can hold it for seconds, and the note is
+// what proves the group is the copy's.
+func TestSweep_NoteBeforeTheLock(t *testing.T) {
+	useFakeRscript(t)
+	buf := captureLog(t) // the sweep's own line, which ends the test: no goroutine outlives it
+	taken := make(chan int, 16)
+	useHooks(t, hooks{NoteGroup: func(pgid int) (process.Note, bool) {
+		n, ok := process.NoteGroup(pgid)
+		select {
+		case taken <- pgid:
+		default:
+		}
+		return n, ok
+	}})
+	spec := crashingSpec(t, "2s")
+	cleanupApp(t, spec)
+	rec := applyOK(t, spec)
+	waitReady(t, process.InternalHost, rec.Port)
+	workers, detached := workersOf(t, rec)
+	killOnCleanup(t, append(workers, detached)...)
+
+	unlock := state.Lock(spec.AppStateFile)
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			unlock()
+		}
+	}()
+	deadline := time.After(15 * time.Second)
+	for noted := false; !noted; {
+		select {
+		case pgid := <-taken:
+			noted = pgid == rec.PID
+		case <-deadline:
+			t.Fatal("the group was not noted while the state lock was held")
+		}
+	}
+	for _, pid := range workers {
+		if syscall.Kill(pid, 0) != nil {
+			t.Errorf("worker %d was ended before the exit was recorded", pid)
+		}
+	}
+	unlock()
+	unlocked = true
+	waitGoneAll(t, "the workers to be swept under the note", workers...)
+	waitUntil(t, "the sweep line", 5*time.Second, func() bool { return strings.Contains(buf.String(), "ended them") })
+}
+
+// A stop is not an exit the copy chose: its workers go with it, and the log has
+// no sweep line.
+func TestSweep_NotAfterStop(t *testing.T) {
+	useFakeRscript(t)
+	buf := captureLog(t)
+	spec := workersSpec(t, "app")
+	cleanupApp(t, spec)
+	rec := applyOK(t, spec)
+	waitReady(t, process.InternalHost, rec.Port)
+	workers, detached := workersOf(t, rec)
+	killOnCleanup(t, append(workers, detached)...)
+
+	if r := postJSON(t, handleStop, spec); r.Code != http.StatusOK {
+		t.Fatalf("stop: status %d: %s", r.Code, r.Body.String())
+	}
+	waitGoneAll(t, "the copy and its workers", append(workers, detached, rec.PID)...)
+	time.Sleep(500 * time.Millisecond)
+	if strings.Contains(buf.String(), "ended them") {
+		t.Errorf("a stop was logged as a sweep:\n%s", buf.String())
+	}
+}
+
+// A copy adopted from an earlier daemon is swept too, when its leader led its
+// group and exits without a stop.
+func TestSweep_AdoptedCopy(t *testing.T) {
+	skipWithoutWatching(t)
+	useFakeRscript(t)
+	buf := captureLog(t)
+	spec := workersSpec(t, "app")
+	spec.RestartPolicy = manifest.RestartNever
+	var a state.AppState
+	t.Cleanup(func() {
+		postJSON(t, handleDelete, spec)
+		killIfAlive(spec, a)
+	})
+	a = startCopy(t, spec)
+	waitServed(t, spec, a.PID)
+	workers, detached := workersOf(t, a)
+	killOnCleanup(t, append(workers, detached)...)
+	reconcileApp(spec.AppStateFile) // sees it, and starts watching it
+	if _, ok := adoptedWatched.Load(a.PID); !ok {
+		t.Fatal("no watcher on the adopted copy")
+	}
+
+	syscall.Kill(a.PID, syscall.SIGKILL)
+	waitGoneAll(t, "the adopted copy's workers to be swept", workers...)
+	waitUntil(t, "the sweep line", 5*time.Second, func() bool { return strings.Contains(buf.String(), "ended them") })
+}

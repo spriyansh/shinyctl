@@ -62,10 +62,24 @@ func watchAdopted(spec manifest.AppSpec, rec state.AppState) {
 		return
 	}
 	stateFile := spec.AppStateFile
+	// Only a copy that leads its own group has one to sweep; a copy from a
+	// daemon before groups shares its group with the daemon's other children.
+	leads := process.IsGroupLeader(pid)
 	go func() {
 		<-exited
+		// The group is read at once, as for a copy this daemon started. A stop
+		// or a kill that is ending the copy is noted in the read, and Sweep
+		// leaves such a copy to it.
+		var note process.Note
+		var noted bool
+		if leads {
+			note, noted = currentHooks().NoteGroup(pid)
+		}
 		adoptedWatched.Delete(pid)
 		triggerReconcile(stateFile)
+		if noted {
+			go sweepLeftovers(spec, rec.Copy, pid, note)
+		}
 	}()
 }
 

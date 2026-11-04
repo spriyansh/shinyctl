@@ -89,6 +89,11 @@ type hooks struct {
 	// measure as a parameter and does not read this.
 	Measure measureFunc
 
+	// NoteGroup is process.NoteGroup, which reads the members of a copy's group
+	// the moment its exit is seen. A hook, not a package variable, because the
+	// exit-watchers of earlier tests still read it.
+	NoteGroup func(pgid int) (process.Note, bool)
+
 	// Ready waits for the load balancer when it is being started or replaced
 	// (up to a handover's time), before a check of what it serves: during a
 	// handover it serves, but the gateway can't say so, and its own sockets
@@ -118,6 +123,7 @@ func currentHooks() hooks {
 		Signal0:        func(pid int) error { return syscall.Kill(pid, 0) },
 		DrainSettle:    reconcile.DrainSettle,
 		Measure:        process.ExactMemory,
+		NoteGroup:      process.NoteGroup,
 	}
 	if o := activeHooks.Load(); o != nil {
 		if o.Served != nil {
@@ -175,6 +181,9 @@ func currentHooks() hooks {
 		}
 		if o.Measure != nil {
 			h.Measure = o.Measure
+		}
+		if o.NoteGroup != nil {
+			h.NoteGroup = o.NoteGroup
 		}
 	}
 	return h

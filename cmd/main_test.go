@@ -288,6 +288,11 @@ func runFakeRscript(args string) {
 	// reached through the load balancer. /hold keeps the request open until
 	// the client goes: a session, as far as the load balancer can tell.
 	body := fmt.Sprintf("pid=%d", os.Getpid())
+	// FAKE_RSCRIPT_EXIT_AFTER makes it crash, the way an app does that runs for
+	// a while, with its workers still running.
+	if d, err := time.ParseDuration(os.Getenv("FAKE_RSCRIPT_EXIT_AFTER")); err == nil {
+		time.AfterFunc(d, func() { os.Exit(1) })
+	}
 	http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/workers" {
 			io.WriteString(w, workers)

@@ -458,6 +458,11 @@ func launchCopy(spec manifest.AppSpec, st *state.State, n int) error {
 	watched.Store(pid, struct{}{})
 	go func() {
 		exit := <-done
+		// The members of the copy's group are read at once, before anything
+		// that can wait: recordExit waits for the state lock, which a cycle
+		// can hold for seconds, and the group is only known to be the copy's
+		// by a read taken while its members pin the group id.
+		note, noted := currentHooks().NoteGroup(pid)
 		if _, ours := killed.LoadAndDelete(killKeyOf(newApp)); ours && exit.Signal == syscall.SIGKILL {
 			exit.Reason = process.ExitOOM
 		}
@@ -465,6 +470,12 @@ func launchCopy(spec manifest.AppSpec, st *state.State, n int) error {
 		watched.Delete(pid)
 		if recorded {
 			triggerReconcile(spec.AppStateFile)
+			// An exit that a stop, a delete or a replacement caused records
+			// nothing, and one that a memory kill caused has ended the group
+			// already; what is left is an exit the copy chose.
+			if noted && exit.Reason != process.ExitOOM {
+				go sweepLeftovers(spec, n, pid, note)
+			}
 		}
 	}()
 	// A fresh process starts with no record of its page, whatever pid and
@@ -472,6 +483,23 @@ func launchCopy(spec manifest.AppSpec, st *state.State, n int) error {
 	forgetPage(newApp)
 	go watchReady(spec, newApp)
 	return nil
+}
+
+// sweepLeftovers ends the workers a copy left behind when it exited on its own.
+// It runs in a goroutine and never under the state lock: it waits up to the
+// SIGTERM grace for what ignores the signal. It says something only when it
+// signalled live processes, so the ordinary exit of a copy with no workers
+// costs the log nothing.
+func sweepLeftovers(spec manifest.AppSpec, n, pid int, note process.Note) {
+	swept, left := process.Sweep(note)
+	if swept == 0 {
+		return
+	}
+	line := fmt.Sprintf("reconcile: %q: copy %d (pid %d) exited and left %d processes; ended them", spec.AppName, n, pid, swept)
+	if left > 0 {
+		line += fmt.Sprintf(", but %d are still running", left)
+	}
+	log.Print(line)
 }
 
 // recordExit persists exit into spec's state.json ahead of the
