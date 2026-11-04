@@ -264,7 +264,7 @@ func killOverLimit(ctx context.Context, c memoryCopy, size int64) (unwatchedKill
 
 	key := killKeyOf(c.rec)
 	killed.Store(key, time.Now())
-	signaled, err := process.Kill(c.rec, func() {
+	signaled, others, err := process.Kill(c.rec, func() {
 		if !isWatched(c.rec.PID) {
 			markSeen(stateFile, c.rec)
 		}
@@ -278,6 +278,11 @@ func killOverLimit(ctx context.Context, c memoryCopy, size int64) (unwatchedKill
 	}
 
 	line := fmt.Sprintf("memory: %q: copy %d (pid %d) holds %s, over max-memory %s; killed it", c.spec.AppName, c.rec.Copy, c.rec.PID, formatMem(size), formatMem(c.limit))
+	if others == 1 {
+		line += " and its 1 other process"
+	} else if others > 1 {
+		line += fmt.Sprintf(" and its %d other processes", others)
+	}
 	if pool, changed := gateway.Withdraw(stateFile, dialOf(c.rec)); changed {
 		// The next reconcile's roles line stays silent, as it finds this pool
 		// already in place, so this is the line that says who took over.

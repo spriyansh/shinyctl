@@ -150,7 +150,9 @@ func moveTakenPorts(spec manifest.AppSpec, st *state.State, views []reconcile.Co
 			continue
 		}
 		log.Printf("reconcile: %q: copy %d: port %d is held by another program; stopping the copy to start it again on another port", spec.AppName, rec.Copy, rec.Port)
-		if _, err := process.Stop(rec, identityFallbacks(spec)...); err != nil {
+		_, left, err := process.Stop(rec, identityFallbacks(spec)...)
+		logLeftBehind("reconcile", spec, rec, left)
+		if err != nil {
 			log.Printf("reconcile: %q: copy %d: stopping it: %v", spec.AppName, rec.Copy, err)
 			continue
 		}

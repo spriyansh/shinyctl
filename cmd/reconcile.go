@@ -359,7 +359,9 @@ func stopCopies(spec manifest.AppSpec, st *state.State, stops []reconcile.Step) 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, errs[i] = process.Stop(rec, identityFallbacks(spec)...)
+			var left int
+			_, left, errs[i] = process.Stop(rec, identityFallbacks(spec)...)
+			logLeftBehind("reconcile", spec, rec, left)
 		}()
 	}
 	wg.Wait()
