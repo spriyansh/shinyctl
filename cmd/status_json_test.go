@@ -6,8 +6,11 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,4 +297,154 @@ func TestStatusJSON_NotRunning(t *testing.T) {
 	if _, err := notRunningJSON(path, now); err == nil {
 		t.Error("a corrupt registry gave no error")
 	}
+}
+
+// statusCommandHome points HOME at a directory short enough for a socket path
+// on macOS, and returns the directory shinyctl keeps its files in.
+func statusCommandHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.MkdirTemp("", "sj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".shinyctl")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// serveStatus answers on the api socket in dir with handler until the test ends.
+func serveStatus(t *testing.T, dir string, handler http.HandlerFunc) {
+	t.Helper()
+	ln, err := net.Listen("unix", filepath.Join(dir, "api.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: handler}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+}
+
+// runStatusJSON runs shinyctl status --json with buffers of its own.
+func runStatusJSON(t *testing.T) (stdout, stderr string, err error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	statusAsJSON = false
+	rootCmd.SetArgs([]string{"status", "--json"})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&errOut)
+	err = rootCmd.Execute()
+	return out.String(), errOut.String(), err
+}
+
+func TestStatusCommand_JSON(t *testing.T) {
+	t.Cleanup(func() {
+		statusAsJSON = false
+		statusCmd.Flags().Lookup("json").Changed = false
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetArgs(nil)
+	})
+	prev := ensureAPIRunning
+	t.Cleanup(func() { ensureAPIRunning = prev })
+	ensureAPIRunning = func() error {
+		t.Error("status started shinyctl-api")
+		return nil
+	}
+
+	topKeys := []string{"schema", "time", "api", "apps", "load_balancer", "machine", "notes"}
+	decode := func(t *testing.T, out string) map[string]any {
+		t.Helper()
+		if !strings.HasSuffix(out, "\n") {
+			t.Errorf("output does not end in a newline: %q", out)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("output is not one JSON document: %v\n%s", err, out)
+		}
+		for _, k := range topKeys {
+			if _, ok := doc[k]; !ok {
+				t.Errorf("document lacks %q", k)
+			}
+		}
+		if len(doc) != len(topKeys) {
+			t.Errorf("document has %d keys, want %d", len(doc), len(topKeys))
+		}
+		return doc
+	}
+
+	t.Run("running", func(t *testing.T) {
+		dir := statusCommandHome(t)
+		serveStatus(t, dir, func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(api.StatusResponse{Apps: []api.AppStatus{
+				{Name: "my-app", Group: "lab", Port: 8080, Copies: []api.CopyStatus{{Copy: 1, Role: "active", PID: 7, Alive: true, Ready: true}}},
+			}})
+		})
+		stdout, stderr, err := runStatusJSON(t)
+		if err != nil || stderr != "" {
+			t.Fatalf("err = %v, stderr = %q", err, stderr)
+		}
+		doc := decode(t, stdout)
+		if running := doc["api"].(map[string]any)["running"]; running != true {
+			t.Errorf("api.running = %v", running)
+		}
+		apps := doc["apps"].([]any)
+		if len(apps) != 1 || apps[0].(map[string]any)["serving"] != true {
+			t.Errorf("apps = %v", apps)
+		}
+	})
+
+	t.Run("running with no apps is still a document", func(t *testing.T) {
+		dir := statusCommandHome(t)
+		serveStatus(t, dir, func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(api.StatusResponse{Apps: []api.AppStatus{}})
+		})
+		stdout, _, err := runStatusJSON(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if apps := decode(t, stdout)["apps"].([]any); len(apps) != 0 {
+			t.Errorf("apps = %v", apps)
+		}
+	})
+
+	t.Run("not running starts nothing", func(t *testing.T) {
+		dir := statusCommandHome(t)
+		stdout, stderr, err := runStatusJSON(t)
+		if err != nil || stderr != "" {
+			t.Fatalf("err = %v, stderr = %q", err, stderr)
+		}
+		doc := decode(t, stdout)
+		if running := doc["api"].(map[string]any)["running"]; running != false {
+			t.Errorf("api.running = %v", running)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "api.sock")); !os.IsNotExist(err) {
+			t.Errorf("api.sock after status: %v", err)
+		}
+	})
+
+	t.Run("a 500 is an error and no document", func(t *testing.T) {
+		dir := statusCommandHome(t)
+		serveStatus(t, dir, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		})
+		stdout, stderr, err := runStatusJSON(t)
+		if err == nil || stdout != "" || !strings.Contains(stderr, "shinyctl-api:") {
+			t.Errorf("err = %v, stdout = %q, stderr = %q", err, stdout, stderr)
+		}
+	})
+
+	t.Run("an unreadable registry is an error and no document", func(t *testing.T) {
+		dir := statusCommandHome(t)
+		if err := os.WriteFile(filepath.Join(dir, "registry.json"), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := runStatusJSON(t)
+		if err == nil || stdout != "" || !strings.Contains(stderr, "Error:") {
+			t.Errorf("err = %v, stdout = %q, stderr = %q", err, stdout, stderr)
+		}
+	})
 }
