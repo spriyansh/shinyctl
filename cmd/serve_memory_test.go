@@ -789,6 +789,48 @@ func TestMemory_LoopReconcilesAfterAnUnwatchedKill(t *testing.T) {
 	})
 }
 
+// A copy the loop has killed is not judged on its port while its exit is on
+// its way: as the kernel tears the process down its socket still accepts, and
+// the load balancer has dropped the copy already, so the port would read as
+// another program's. Moving the copy replaces the record before the watcher
+// records the exit, and the kill never counts.
+func TestMemory_AKilledCopyIsNotMovedOffItsPort(t *testing.T) {
+	forgetPortCaches(t)
+	useFakeRscript(t)
+	resetMemoryState(t)
+	logs := captureLog(t)
+	var armed atomic.Bool
+	useHooks(t, hooks{Owner: func(int, int) process.Owner {
+		if armed.Load() {
+			return process.OwnerOther
+		}
+		return process.OwnerSelf
+	}})
+	spec := limitedSpec(t, "app", 1, 0)
+	cleanupApp(t, spec)
+	applyOK(t, spec)
+	pool := waitRoles(t, spec, 1, 0)
+	rec := copyByDial(t, spec, pool.Active[0])
+
+	// The moment after the kill: the loop has noted it, the load balancer has
+	// dropped the copy, the process is still there, and a lookup would call
+	// the port another program's.
+	key := killKeyOf(rec)
+	killed.Store(key, time.Now())
+	t.Cleanup(func() { killed.Delete(key) })
+	gateway.Withdraw(spec.AppStateFile, dialOf(rec))
+	armed.Store(true)
+	ownedPorts.Delete(pidPort{rec.PID, rec.Port})
+	reconcileApp(spec.AppStateFile)
+
+	if after, _ := loadCopyRecord(spec, rec.Copy); after.PID != rec.PID {
+		t.Errorf("copy %d is pid %d, want pid %d still: the copy was moved", rec.Copy, after.PID, rec.PID)
+	}
+	if strings.Contains(logs.String(), "held by another program") {
+		t.Errorf("the copy was judged on its port:\n%s", logs.String())
+	}
+}
+
 // A copy is over its limit by what its workers hold: the main process is small,
 // and a worker that left the group (callr) is counted too.
 func TestMemory_CountsTheCopysProcesses(t *testing.T) {

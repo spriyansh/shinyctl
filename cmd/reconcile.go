@@ -76,6 +76,15 @@ func observe(spec manifest.AppSpec, st *state.State, mode observeMode) (views []
 				markSeen(spec.AppStateFile, rec)
 				watchAdopted(spec, rec)
 			}
+			// The memory loop has killed this process and its exit is on its
+			// way to the record: nothing about it is judged meanwhile. While
+			// the kernel tears the process down its socket still accepts,
+			// and the load balancer has dropped the copy already, so its port
+			// would read as another program's and the copy be moved, which
+			// replaces the record before the watcher can record the exit.
+			if _, dying := killed.Load(killKeyOf(rec)); dying {
+				break
+			}
 			if rec.Copy >= 1 {
 				listening := currentHooks().ObserveProbe(process.InternalHost, rec.Port)
 				if listening && !servedNow(spec.AppStateFile, rec) && !portIsOurs(spec.AppStateFile, rec) {
