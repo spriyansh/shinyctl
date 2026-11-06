@@ -68,8 +68,8 @@ func TestStop(t *testing.T) {
 	t.Run("SIGTERM, and only returns once the process is gone", func(t *testing.T) {
 		pid := startSleeper(t, false)
 
-		if signaled, err := Stop(sleeperApp(pid, "sleep")); err != nil || !signaled {
-			t.Fatalf("Stop = (%v, %v), want (true, nil)", signaled, err)
+		if signaled, left, err := Stop(sleeperApp(pid, "sleep")); err != nil || !signaled || left != 0 {
+			t.Fatalf("Stop = (%v, %d, %v), want (true, 0, nil)", signaled, left, err)
 		}
 
 		// No sleep here on purpose: Stop's contract is that the PID is
@@ -84,8 +84,8 @@ func TestStop(t *testing.T) {
 
 		app := sleeperApp(pid, "sleep")
 		started := time.Now()
-		if signaled, err := stop(pid, func() bool { return isOurs(app) }, 300*time.Millisecond); err != nil || !signaled {
-			t.Fatalf("stop = (%v, %v), want (true, nil)", signaled, err)
+		if signaled, left, err := stopCopy(pid, func() bool { return isOurs(app) }, 300*time.Millisecond, killGrace, sysLook); err != nil || !signaled || left != 0 {
+			t.Fatalf("stopCopy = (%v, %d, %v), want (true, 0, nil)", signaled, left, err)
 		}
 
 		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
@@ -97,13 +97,13 @@ func TestStop(t *testing.T) {
 	})
 
 	t.Run("already-dead PID is not an error", func(t *testing.T) {
-		if signaled, err := Stop(sleeperApp(999999999, "sleep")); err != nil || signaled {
+		if signaled, _, err := Stop(sleeperApp(999999999, "sleep")); err != nil || signaled {
 			t.Errorf("Stop(dead pid) = (%v, %v), want (false, nil)", signaled, err)
 		}
 	})
 
 	t.Run("zero/negative PID is a no-op, not an error", func(t *testing.T) {
-		if signaled, err := Stop(state.AppState{}); err != nil || signaled {
+		if signaled, _, err := Stop(state.AppState{}); err != nil || signaled {
 			t.Errorf("Stop(zero) = (%v, %v), want (false, nil)", signaled, err)
 		}
 	})
@@ -111,7 +111,7 @@ func TestStop(t *testing.T) {
 	t.Run("a process running something else is left alone", func(t *testing.T) {
 		pid := startSleeper(t, false)
 
-		if signaled, err := Stop(sleeperApp(pid, "some-other-app.R")); err != nil || signaled {
+		if signaled, _, err := Stop(sleeperApp(pid, "some-other-app.R")); err != nil || signaled {
 			t.Fatalf("Stop = (%v, %v), want (false, nil)", signaled, err)
 		}
 		if err := syscall.Kill(pid, 0); err != nil {
@@ -137,6 +137,22 @@ func TestStop(t *testing.T) {
 		}
 		if calls < 2 {
 			t.Errorf("ours called %d time(s), want at least 2", calls)
+		}
+	})
+
+	t.Run("a copy re-checks identity before SIGKILL too", func(t *testing.T) {
+		pid := startSleeper(t, true)
+
+		calls := 0
+		ours := func() bool {
+			calls++
+			return calls == 1
+		}
+		if signaled, left, err := stopCopy(pid, ours, 300*time.Millisecond, killGrace, sysLook); err != nil || !signaled || left != 0 {
+			t.Fatalf("stopCopy = (%v, %d, %v), want (true, 0, nil)", signaled, left, err)
+		}
+		if err := syscall.Kill(pid, 0); err != nil {
+			t.Errorf("process %d was killed after losing identity: %v", pid, err)
 		}
 	})
 }
@@ -191,8 +207,8 @@ func TestKill(t *testing.T) {
 				t.Errorf("the hook ran after the signal: %v", err)
 			}
 		}
-		if signaled, err := Kill(sleeperApp(pid, "sleep"), hook); err != nil || !signaled {
-			t.Fatalf("Kill = (%v, %v), want (true, nil)", signaled, err)
+		if signaled, others, err := Kill(sleeperApp(pid, "sleep"), hook); err != nil || !signaled || others != 0 {
+			t.Fatalf("Kill = (%v, %d, %v), want (true, 0, nil)", signaled, others, err)
 		}
 		if calls != 1 {
 			t.Errorf("the hook was called %d times, want 1", calls)
@@ -204,7 +220,7 @@ func TestKill(t *testing.T) {
 
 	t.Run("a nil hook is allowed", func(t *testing.T) {
 		pid := startSleeper(t, false)
-		if signaled, err := Kill(sleeperApp(pid, "sleep"), nil); err != nil || !signaled {
+		if signaled, _, err := Kill(sleeperApp(pid, "sleep"), nil); err != nil || !signaled {
 			t.Fatalf("Kill = (%v, %v), want (true, nil)", signaled, err)
 		}
 		if !waitGone(pid, 2*time.Second) {
@@ -221,7 +237,7 @@ func TestKill(t *testing.T) {
 			syscall.Kill(pid, syscall.SIGKILL)
 			waitGone(pid, 2*time.Second)
 		}
-		if signaled, err := Kill(sleeperApp(pid, "sleep"), hook); err != nil || signaled {
+		if signaled, _, err := Kill(sleeperApp(pid, "sleep"), hook); err != nil || signaled {
 			t.Errorf("Kill = (%v, %v), want (false, nil)", signaled, err)
 		}
 	})
@@ -230,7 +246,7 @@ func TestKill(t *testing.T) {
 		pid := startSleeper(t, false)
 
 		hook := func() { t.Error("the hook was called for a stranger") }
-		if signaled, err := Kill(sleeperApp(pid, "some-other-app.R"), hook); err != nil || signaled {
+		if signaled, _, err := Kill(sleeperApp(pid, "some-other-app.R"), hook); err != nil || signaled {
 			t.Fatalf("Kill = (%v, %v), want (false, nil)", signaled, err)
 		}
 		if err := syscall.Kill(pid, 0); err != nil {
@@ -241,9 +257,72 @@ func TestKill(t *testing.T) {
 	t.Run("no process, no hook", func(t *testing.T) {
 		hook := func() { t.Error("the hook was called with nothing to kill") }
 		for _, app := range []state.AppState{{}, sleeperApp(999999999, "sleep")} {
-			if signaled, err := Kill(app, hook); err != nil || signaled {
+			if signaled, _, err := Kill(app, hook); err != nil || signaled {
 				t.Errorf("Kill(%+v) = (%v, %v), want (false, nil)", app, signaled, err)
 			}
 		}
 	})
+}
+
+// A leader that leads a group but is no longer recognised by the identity
+// check is not killed through its group, though the table still shows it live.
+func TestStop_ALeaderThatFailsTheCheckGetsNoGroupKill(t *testing.T) {
+	tr := startTree(t, true, "ignore", "plain")
+	calls := 0
+	ours := func() bool {
+		calls++
+		return calls == 1
+	}
+	if signaled, _, err := stopCopy(tr.pid(), ours, 300*time.Millisecond, 300*time.Millisecond, sysLook); err != nil || !signaled {
+		t.Fatalf("stopCopy = (%v, %v), want (true, nil)", signaled, err)
+	}
+	if !running(t, tr.pid()) {
+		t.Errorf("the leader was killed after losing identity")
+	}
+}
+
+// A group that holds only a zombie of this process answers EPERM on macOS: it
+// is not an error to signal it.
+func TestSignalGroup_OnlyAZombieIsNotAnError(t *testing.T) {
+	exe, _ := os.Executable()
+	leader := exec.Command(exe, "sleep", "zombie-group")
+	leader.Env = append(os.Environ(), sleeperEnv+"=1")
+	leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := leader.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := leader.Process.Pid
+	t.Cleanup(func() { syscall.Kill(-pgid, syscall.SIGKILL) })
+
+	y := exec.Command("true")
+	y.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	if err := y.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { y.Wait() })
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if table, _ := readTable(); func() bool {
+			for _, p := range table {
+				if p.pid == y.Process.Pid {
+					return p.zombie
+				}
+			}
+			return false
+		}() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the short-lived process never became a zombie")
+		}
+	}
+	leader.Process.Kill()
+	leader.Wait() // reaped: only the zombie is left in the group
+
+	if err := signalGroup(pgid, syscall.SIGTERM); err != nil {
+		t.Errorf("signalGroup(only a zombie) = %v, want nil", err)
+	}
+	y.Wait()
+	if err := signalGroup(pgid, syscall.SIGTERM); err != syscall.ESRCH {
+		t.Errorf("signalGroup(empty group) = %v, want ESRCH", err)
+	}
 }

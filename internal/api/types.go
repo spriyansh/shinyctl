@@ -77,11 +77,11 @@ type CopyStatus struct {
 	// one killed for going over max-memory; empty for an exit nobody caused.
 	LastExitReason string `json:"last-exit-reason,omitempty"`
 
-	// MemoryBytes is the memory of the copy's main process; zero when it
-	// isn't running or couldn't be measured. The wire name is historical: it
-	// was once the resident size, and is kept because the CLI and
-	// shinyctl-api of different builds are common between replacing the
-	// binary and restarting shinyctl-api.
+	// MemoryBytes is the memory of the copy's processes, the main one and
+	// the workers it started; zero when it isn't running or couldn't be
+	// measured. The wire name is historical: it was once the resident size,
+	// and is kept because the CLI and shinyctl-api of different builds are
+	// common between replacing the binary and restarting shinyctl-api.
 	MemoryBytes int64 `json:"rss-bytes,omitempty"`
 
 	// Sessions is the number of requests open to the copy through the load

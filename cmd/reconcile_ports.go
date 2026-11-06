@@ -149,9 +149,23 @@ func moveTakenPorts(spec manifest.AppSpec, st *state.State, views []reconcile.Co
 			views[i].Ready, views[i].PortTaken = pageReady(rec), false
 			continue
 		}
+		// The lookup took time, and the memory loop may have killed the copy
+		// meanwhile (observe asks this too, before the lookup): its exit is
+		// on its way to the record, which must still name the process when
+		// the watcher brings it. The same goes for a copy that Stop finds
+		// gone or no longer the copy's: nothing is moved, and the next cycle
+		// sees what became of it.
+		if _, dying := killed.Load(killKeyOf(rec)); dying {
+			continue
+		}
 		log.Printf("reconcile: %q: copy %d: port %d is held by another program; stopping the copy to start it again on another port", spec.AppName, rec.Copy, rec.Port)
-		if _, err := process.Stop(rec, identityFallbacks(spec)...); err != nil {
+		signaled, left, err := process.Stop(rec, identityFallbacks(spec)...)
+		logLeftBehind("reconcile", spec, rec, left)
+		if err != nil {
 			log.Printf("reconcile: %q: copy %d: stopping it: %v", spec.AppName, rec.Copy, err)
+			continue
+		}
+		if !signaled {
 			continue
 		}
 		portMoves.Store(ck, n+1)

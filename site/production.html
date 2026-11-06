@@ -149,7 +149,7 @@ rm -rf ~/.shinyctl</code></pre>
   <li><b>Copies don't share memory.</b> Anything a session keeps in R lives in its copy.</li>
   <li><b>The load balancer is in the path of every request.</b> If it dies, <code>shinyctl-api</code> restarts it within about a second, and the apps are unreachable until then.</li>
   <li><b>Apps keep running if <code>shinyctl-api</code> dies, but nothing restarts a crashed copy</b> until it is back. Any <code>apply</code>, or <code>shinyctl serve -d</code>, brings it back; on Linux the service restarts it by itself. <code>shinyctl shutdown</code> is the one thing that stops everything on purpose.</li>
-  <li><b><code>stop</code> signals only the main R process.</b> Workers the app started, for example through callr or future, can outlive it.</li>
+  <li><b><code>stop</code> ends the copy's processes together:</b> the main R process and the workers it started through future, mirai, parallel, callr or a shell, and <code>max-memory</code> measures and kills them together. A process that left the copy's process group and is no longer a child of its processes, such as a daemon started with <code>setsid</code>, outlives it.</li>
   <li><b>A drain ends at <code>drain-timeout</code>.</b> Sessions still open then are cut, and a tab left open counts as a session.</li>
   <li><b>Readiness is the page, asked once per process.</b> An error in <code>server</code>, which happens per session, and a page that breaks after the copy became ready are not seen.</li>
 </ul>

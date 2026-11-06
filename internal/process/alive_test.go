@@ -148,6 +148,10 @@ func TestIsOurs(t *testing.T) {
 const sleeperEnv = "SHINYCTL_TEST_SLEEPER"
 
 func TestMain(m *testing.M) {
+	if os.Getenv(helperEnv) != "" {
+		runHelper(os.Getenv(helperEnv))
+		return
+	}
 	if os.Getenv(sleeperEnv) == "1" {
 		time.Sleep(30 * time.Second)
 		return

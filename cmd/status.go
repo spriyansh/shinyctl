@@ -559,9 +559,9 @@ func formatLeft(d time.Duration) string {
 }
 
 // memoryLine says what the running copies and the load balancer take
-// together, since every copy is a whole R process: "Memory: 281M in 2 R
-// processes (1 warm), plus 41M for the load balancer." It is empty when
-// nothing runs, or nothing could be measured.
+// together, each copy being its main R process and the workers it started:
+// "Memory: 281M in 2 copies (1 warm), plus 41M for the load balancer." It is
+// empty when nothing runs, or nothing could be measured.
 func memoryLine(resp api.StatusResponse) string {
 	var total int64
 	var running, warm, draining int
@@ -584,11 +584,11 @@ func memoryLine(resp api.StatusResponse) string {
 		return ""
 	}
 
-	noun := "processes"
+	noun := "copies"
 	if running == 1 {
-		noun = "process"
+		noun = "copy"
 	}
-	line := fmt.Sprintf("Memory: %s in %d R %s", formatMem(total), running, noun)
+	line := fmt.Sprintf("Memory: %s in %d %s", formatMem(total), running, noun)
 	switch {
 	case warm > 0 && draining > 0:
 		line += fmt.Sprintf(" (%d warm, %d draining)", warm, draining)

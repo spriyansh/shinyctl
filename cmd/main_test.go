@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -62,6 +63,11 @@ const fakeRscriptEnv = "SHINYCTL_TEST_FAKE_RSCRIPT"
 const testParentEnv = "SHINYCTL_TEST_PARENT"
 
 func TestMain(m *testing.M) {
+	// A worker of a fake Rscript comes first of all: it inherits the fake
+	// Rscript's environment, and would otherwise become a fake Rscript itself.
+	if v := os.Getenv(workerEnv); v != "" {
+		runFakeWorker(v)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "proxy" {
 		if v := os.Getenv(testParentEnv); v != "" {
 			// A load balancer of the tests exits when the test binary that
@@ -169,6 +175,71 @@ func readTail(path string) string {
 
 var fakeRscriptArgs = regexp.MustCompile(`port=(\d+), host="([^"]+)"`)
 
+// A fake Rscript with FAKE_RSCRIPT_WORKERS=n starts n workers, the way R starts
+// them with mclapply or a cluster: the test binary again, in a mode that
+// sleeps until the test binary, whose pid testParentEnv names, is gone (so the
+// fake Rscript dying, or the workers being re-parented to init, does not end
+// them: only the code under test can). FAKE_RSCRIPT_DETACHED=1 adds one
+// worker that calls setsid, as a callr worker does. GET /workers answers with
+// their pids.
+const (
+	workerEnv       = "SHINYCTL_TEST_WORKER"
+	workerDetachEnv = "SHINYCTL_TEST_WORKER_DETACH"
+)
+
+func runFakeWorker(string) {
+	ppid, _ := strconv.Atoi(os.Getenv(testParentEnv))
+	if os.Getenv(workerDetachEnv) == "1" {
+		syscall.Setsid()
+	}
+	if f := os.NewFile(3, "ready"); f != nil {
+		f.Write([]byte("x"))
+		f.Close()
+	}
+	for syscall.Kill(ppid, 0) != syscall.ESRCH {
+		time.Sleep(100 * time.Millisecond)
+	}
+	os.Exit(0)
+}
+
+// startFakeWorkers starts the workers the environment asks for and returns
+// the body GET /workers answers with: "workers=1,2 detached=3". Each worker
+// is ready (its session made) when this returns.
+func startFakeWorkers() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	start := func(detach bool) int {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return 0
+		}
+		defer r.Close()
+		cmd := exec.Command(exe)
+		cmd.Env = append(os.Environ(), workerEnv+"=1", workerDetachEnv+"="+map[bool]string{true: "1", false: "0"}[detach])
+		cmd.ExtraFiles = []*os.File{w}
+		err = cmd.Start()
+		w.Close()
+		if err != nil {
+			return 0
+		}
+		go cmd.Wait()
+		io.ReadAll(r) // returns when the worker closes its end
+		return cmd.Process.Pid
+	}
+	var workers []string
+	n, _ := strconv.Atoi(os.Getenv("FAKE_RSCRIPT_WORKERS"))
+	for i := 0; i < n; i++ {
+		workers = append(workers, strconv.Itoa(start(false)))
+	}
+	body := "workers=" + strings.Join(workers, ",")
+	if os.Getenv("FAKE_RSCRIPT_DETACHED") == "1" {
+		body += " detached=" + strconv.Itoa(start(true))
+	}
+	return body
+}
+
 // runFakeRscript binds exactly the address process.Start asks for and
 // serves until killed. It never returns.
 func runFakeRscript(args string) {
@@ -200,6 +271,8 @@ func runFakeRscript(args string) {
 		time.Sleep(d)
 	}
 
+	workers := startFakeWorkers()
+
 	network := "tcp4"
 	if net.ParseIP(m[2]).To4() == nil {
 		network = "tcp6"
@@ -215,7 +288,16 @@ func runFakeRscript(args string) {
 	// reached through the load balancer. /hold keeps the request open until
 	// the client goes: a session, as far as the load balancer can tell.
 	body := fmt.Sprintf("pid=%d", os.Getpid())
+	// FAKE_RSCRIPT_EXIT_AFTER makes it crash, the way an app does that runs for
+	// a while, with its workers still running.
+	if d, err := time.ParseDuration(os.Getenv("FAKE_RSCRIPT_EXIT_AFTER")); err == nil {
+		time.AfterFunc(d, func() { os.Exit(1) })
+	}
 	http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/workers" {
+			io.WriteString(w, workers)
+			return
+		}
 		if r.URL.Path == "/hold" {
 			w.WriteHeader(http.StatusOK)
 			w.(http.Flusher).Flush()
@@ -407,9 +489,13 @@ func newestApp(t *testing.T, spec manifest.AppSpec) state.AppState {
 }
 
 // killIfAlive is test cleanup: it only signals a PID that still passes the
-// identity check, so a reused PID is never hit.
+// identity check, so a reused PID is never hit. A copy that leads a group
+// takes its workers with it.
 func killIfAlive(spec manifest.AppSpec, app state.AppState) {
 	if app.PID > 0 && process.IsAlive(spec, app) {
+		if process.IsGroupLeader(app.PID) {
+			syscall.Kill(-app.PID, syscall.SIGKILL) // its workers too
+		}
 		syscall.Kill(app.PID, syscall.SIGKILL)
 	}
 }

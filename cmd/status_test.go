@@ -130,7 +130,7 @@ slow      1     -         8092  81     alive          starting      -     -     
 gone      -     -         8093  0      dead           -             -     -         -        -
 quiet     1     -         8094  91     dead           -             -     -         -        -
 
-Memory: 281M in 16 R processes (2 warm, 3 draining), plus 41M for the load balancer.
+Memory: 281M in 16 copies (2 warm, 3 draining), plus 41M for the load balancer.
 
 blocked: its port is not served: 127.0.0.1:8083 is not available (taken) — pick a different port
 
@@ -343,9 +343,9 @@ func TestMemoryLine_Draining(t *testing.T) {
 		copies []api.CopyStatus
 		want   string
 	}{
-		{"only draining", []api.CopyStatus{active, draining}, "Memory: 200M in 2 R processes (1 draining)."},
-		{"warm and draining", []api.CopyStatus{active, {Copy: 4, Role: "warm", Alive: true, Ready: true, MemoryBytes: 100 << 20}, draining}, "Memory: 300M in 3 R processes (1 warm, 1 draining)."},
-		{"a dead draining copy is not counted", []api.CopyStatus{active, {Copy: 1, Role: "draining"}}, "Memory: 100M in 1 R process."},
+		{"only draining", []api.CopyStatus{active, draining}, "Memory: 200M in 2 copies (1 draining)."},
+		{"warm and draining", []api.CopyStatus{active, {Copy: 4, Role: "warm", Alive: true, Ready: true, MemoryBytes: 100 << 20}, draining}, "Memory: 300M in 3 copies (1 warm, 1 draining)."},
+		{"a dead draining copy is not counted", []api.CopyStatus{active, {Copy: 1, Role: "draining"}}, "Memory: 100M in 1 copy."},
 	} {
 		if got := memoryLine(api.StatusResponse{Apps: []api.AppStatus{{Name: "a", Copies: tc.copies}}}); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
@@ -519,7 +519,7 @@ func TestWriteStatus_MachineLow(t *testing.T) {
 	want := `NAME    COPY  ROLE    PORT  PID    STATUS  READY  MEM   SESSIONS  CRASHES  STARTED
 my-app  1     active  8080  61429  alive   ready  142M  -         -        -
 
-Memory: 142M in 1 R process, plus 41M for the load balancer.
+Memory: 142M in 1 copy, plus 41M for the load balancer.
 
 This machine is low on memory: 120M of 2.0G available and no swap. Stop an app, or set max-memory so a copy that grows is killed before the machine is out of memory.
 `

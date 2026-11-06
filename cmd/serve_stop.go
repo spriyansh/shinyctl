@@ -105,7 +105,8 @@ func identityFallbacks(spec manifest.AppSpec) []string {
 // signaled says whether the process was ours and has been stopped. The
 // caller holds the state lock.
 func stopRecorded(op string, spec manifest.AppSpec, app state.AppState) (signaled bool, note string, err error) {
-	signaled, err = process.Stop(app, identityFallbacks(spec)...)
+	signaled, left, err := process.Stop(app, identityFallbacks(spec)...)
+	logLeftBehind(op, spec, app, left)
 	if err != nil {
 		return false, "", err
 	}
@@ -115,6 +116,24 @@ func stopRecorded(op string, spec manifest.AppSpec, app state.AppState) (signale
 
 	log.Printf("%s: %q: recorded pid %d is not running this app; not signaling it", op, spec.AppName, app.PID)
 	return false, fmt.Sprintf(" (recorded pid %d is not running this app, so it was not signaled)", app.PID), nil
+}
+
+// processes is "1 process" or "N processes", for the log lines.
+func processes(n int) string {
+	if n == 1 {
+		return "1 process"
+	}
+	return fmt.Sprintf("%d processes", n)
+}
+
+// logLeftBehind says, once per stop, how many processes of a copy that was
+// stopped could not be ended. The stop itself succeeded: a worker that no
+// signal ends (it sleeps in the kernel on a stalled mount) is not a reason to
+// keep the record or to fail the request. The wording is the sweep line's.
+func logLeftBehind(op string, spec manifest.AppSpec, rec state.AppState, left int) {
+	if left > 0 {
+		log.Printf("%s: %q: copy %d (pid %d) stopped and left %s running", op, spec.AppName, rec.Copy, rec.PID, processes(left))
+	}
 }
 
 // copyStop is what stopping one recorded copy came to: whether the process
