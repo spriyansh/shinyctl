@@ -673,7 +673,8 @@ func init() {
 // Nothing is watched then, but the apps it was managing are still
 // registered (shutdown keeps them, stop and delete do not), and they start
 // again with the next shinyctl-api. The line names them so a status after
-// a shutdown does not read as if they were gone. It only reads.
+// a shutdown does not read as if they were gone, and tells apart an empty
+// registry from one whose apps are all stopped. It only reads.
 func notRunningLine(registryPath string) string {
 	const prefix = "shinyctl-api is not running"
 	reg, err := registry.Open(registryPath)
@@ -687,7 +688,10 @@ func notRunningLine(registryPath string) string {
 		}
 	}
 	if len(names) == 0 {
-		return prefix + " and no app is registered"
+		if len(reg.All()) == 0 {
+			return prefix + " and no app is registered"
+		}
+		return prefix + " and no app is set to start"
 	}
 	sort.Strings(names)
 	verb := "starts"
