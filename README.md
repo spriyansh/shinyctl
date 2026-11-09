@@ -316,7 +316,7 @@ max-memory: 2G                  # a copy that holds more is killed and restarted
 | `max-memory` | no limit | The most memory one copy may hold, such as `512M`, `1.5G` or `2Gi`: K, M, G or T, in powers of 1024 as `MEM` shows them. At least `128M`; a number alone is refused. A copy that holds more is killed at once (see Memory limit). |
 
 - **Relative paths resolve from the manifest's folder**, so commands work
-  from any directory. `~` is not expanded.
+  from any directory. A leading `~` is your home directory.
 - **`port` can't be between 20000 and 29999.** shinyctl runs each app's R
   process on a port in that range, on 127.0.0.1, behind the load balancer
   that listens on `port`. Your app sees requests coming from 127.0.0.1; the
