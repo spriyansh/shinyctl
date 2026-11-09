@@ -96,7 +96,7 @@ curl -LO https://github.com/spriyansh/shinyctl/releases/download/v0.1.0/checksum
 sha256sum --ignore-missing -c checksums.txt     <span class="c"># macOS: shasum -a 256 --ignore-missing -c checksums.txt</span>
 tar -xzf shinyctl_0.1.0_linux_arm64.tar.gz
 mkdir -p ~/.local/bin &amp;&amp; cp shinyctl_0.1.0_linux_arm64/shinyctl ~/.local/bin/</code></pre>
-<p>The other archives are <code>linux_amd64</code>, <code>darwin_arm64</code> (Apple silicon) and <code>darwin_amd64</code>. Each unpacks into a folder of its own with <code>shinyctl</code>, the README, the licence and notices, and the example apps in <code>examples/hello</code> and <code>examples/memory</code>.</p>
+<p>The other archives are <code>linux_amd64</code>, <code>darwin_arm64</code> (Apple silicon) and <code>darwin_amd64</code>. Each unpacks into a folder of its own with <code>shinyctl</code>, the README, the licence and notices, and the example apps in <code>examples/hello</code>, <code>examples/memory</code> and <code>examples/workers</code>.</p>
 <p>A file downloaded with a browser on macOS is quarantined. <code>curl</code> doesn't do that, and <code>xattr -d com.apple.quarantine shinyctl</code> lifts it.</p>
 
 <h2 id="go">With Go</h2>
@@ -118,7 +118,7 @@ shinyctl status</code></pre>
 hello  1     active  8765  77713  alive   ready  97M  0         -        2026-10-29T22:05:11+01:00
 hello  2     warm    8765  77714  alive   ready  97M  0         -        2026-10-29T22:05:11+01:00
 
-Memory: 195M in 2 R processes (1 warm), plus 37M for the load balancer.</code></pre>
+Memory: 195M in 2 copies (1 warm), plus 37M for the load balancer.</code></pre>
 <p>Open the port from your manifest, for example <code>http://127.0.0.1:8080</code>. Every field of the manifest is in the <a href="https://github.com/spriyansh/shinyctl#manifest">reference</a>.</p>
 
 <h2 id="example">Try the examples</h2>
@@ -130,6 +130,9 @@ Memory: 195M in 2 R processes (1 warm), plus 37M for the load balancer.</code></
 <p><code>examples/memory</code> is an app whose memory grows when you ask it to, with <code>max-memory: 512M</code>, for watching a copy go over its limit:</p>
 <pre><code>shinyctl apply -f examples/memory/shinyctl.yaml</code></pre>
 <p>Open <code>http://127.0.0.1:8766</code> and click <b>Grow until stopped</b>: the copy serving the page grows by 100 MB a second, and <code>status</code> shows its <code>MEM</code> go up while the other copy stays as it was. Once it holds more than 512M, shinyctl kills it. The page reloads on the warm copy, holding 0 MB; <code>status</code> says the copy was killed for going over <code>max-memory</code>, and it comes back as the new spare after its backoff. <b>Add 1 GB</b> goes over in one step. <code>MAX_MB</code> in the example's manifest (1024 MB) is where the app stops growing by itself if you raise or remove <code>max-memory</code>; keep it below the machine's free memory.</p>
+<p><code>examples/workers</code> is an app whose slow jobs run in two <a href="https://future.futureverse.org">future</a> workers started with the app, for watching shinyctl treat the workers as part of the copy. It needs the future package.</p>
+<pre><code>shinyctl apply -f examples/workers/shinyctl.yaml</code></pre>
+<p><code>status</code> shows the copy's <code>MEM</code> as the main process and its workers together, about 250M. Open <code>http://127.0.0.1:8767</code> and click <b>Run a 15 second job</b>: the page stays responsive and then names the worker that ran it. <b>Run a job that holds 600 MB</b> takes the copy over its <code>max-memory: 768M</code> inside a worker while the main process stays small: shinyctl kills the main process and both workers together, and the copy comes back with new workers. <code>shinyctl stop</code> ends the workers with the main process.</p>
 
 <nav class="pager" aria-label="Next page">
   <a class="next" href="how-it-works.html"><span>Next</span><b>How it works</b></a>

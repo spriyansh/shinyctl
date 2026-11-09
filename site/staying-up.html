@@ -127,19 +127,19 @@
 memory  1     -       8766  98990  crash-looping  -      -     -         1        2026-10-31T18:38:12+01:00
 memory  2     active  8766  98992  alive          ready  137M  1         -        2026-10-31T18:38:12+01:00
 
-Memory: 137M in 1 R process, plus 12M for the load balancer.
+Memory: 137M in 1 copy, plus 12M for the load balancer.
 
 memory: copy 1 was killed for going over max-memory (512M); it starts again after its backoff.</code></pre>
 <p>What the limit doesn't do:</p>
 <ul>
   <li><b>It is a check, not a wall.</b> A copy can hold more for a second or so before it is killed, and a spike faster than that can use up the machine's memory first. While memory can't be measured, nothing is killed, and <code>api.log</code> says why.</li>
-  <li><b>Only the main R process</b> is measured and killed. Workers it started, through callr or future for example, aren't counted and outlive it.</li>
-  <li><b>A killed copy leaves its R temporary folder behind</b>, uploads included: the kill gives R no chance to clean up.</li>
-  <li><b>On Linux, <code>MEM</code> counts the files and libraries a copy has mapped too</b>, which the system can reclaim, so leave the limit some room above what the app needs.</li>
-  <li><b>Measuring costs CPU on macOS:</b> a few percent of a core for an app with one copy and a spare, about a third of a core with 16 copies and a spare. On Linux it costs next to nothing, and apps without a limit are not measured.</li>
+  <li><b>The copy's processes count together:</b> <code>MEM</code> and the limit cover the main R process and every process it started, workers from future, mirai, parallel or callr included, and the kill ends them all. On Linux the pages forked workers share with their parent count once between them. A process that left the copy's process group and is no longer a child of its processes is not counted and outlives the copy.</li>
+  <li><b>A killed copy leaves its R temporary folders behind</b>, the workers' too, uploads included: the kill gives R no chance to clean up.</li>
+  <li><b>On Linux, <code>MEM</code> counts the files and libraries a copy has mapped too</b>, in proportion to how many processes share them, which the system can reclaim, so leave the limit some room above what the app needs.</li>
+  <li><b>Measuring costs some CPU:</b> on Linux about a percent of a core for a copy with three workers (a few milliseconds a second on a Raspberry Pi 5); on macOS a few percent of a core for an app with one copy and a spare, about a third of a core with 16 copies and a spare, and one more call a second for each copy with workers. Apps without a limit are not measured.</li>
 </ul>
 <p>When the whole machine runs low on memory, whatever holds it, <code>status</code> says so under the <code>Memory:</code> line (<a href="production.html#memory">more</a>).</p>
-<p>The <a href="install.html#example">memory example</a> grows until it goes over its limit of 512M.</p>
+<p>The <a href="install.html#example">memory example</a> grows until it goes over its limit of 512M, and the <a href="install.html#example">workers example</a> goes over its limit inside a worker.</p>
 
 <h2 id="redeploy">Redeploys</h2>
 <p><code>restart</code> starts new copies from the manifest as it is now, so new code in <code>app.R</code> takes effect. An <code>apply</code> does the same when it changes how the app starts: <code>env</code>, <code>working-dir</code>, <code>app-group</code>, <code>app-name</code> or <code>entrypoint-file</code>. Both return at once.</p>
@@ -202,7 +202,7 @@ hello  1     draining  8765  61429  alive   ready  142M  2         -        2026
 hello  3     active    8765  61501  alive   ready  140M  1         -        2026-10-27T11:30:05+02:00
 hello  4     warm      8765  61502  alive   ready  138M  0         -        2026-10-27T11:30:05+02:00
 
-Memory: 420M in 3 R processes (1 warm, 1 draining), plus 41M for the load balancer.
+Memory: 420M in 3 copies (1 warm, 1 draining), plus 41M for the load balancer.
 
 hello: copy 1 is draining with 2 sessions; it stops when they end, or in 15m at the latest.</code></pre>
 <p>Both versions run side by side until the drain ends, so a change to shared data, such as a database schema or files, must suit both.</p>

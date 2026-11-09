@@ -18,21 +18,82 @@ var footprintPath = "/usr/bin/footprint"
 // milliseconds, and status asks for it on every query.
 var footprintTimeout = lsofTimeout
 
-// footprintRun runs footprint and returns what it printed; a variable so that
-// the tests can stand in for it.
+// footprintRun runs footprint under ctx and returns what it printed; a
+// variable so that the tests can stand in for it.
 var footprintRun = runFootprint
 
-// platformMemory is each process's footprint: the number Activity Monitor
+// platformTreeMemory is each copy's footprint: the number Activity Monitor
 // shows as Memory. Unlike the resident size from ps it counts what macOS
 // compressed or swapped out of a process, which is most of a process once the
 // machine is short of memory, so it doesn't shrink by itself under pressure.
 //
-// One call covers all of pids. footprint prints a block per process it can
-// read and a message on stderr for each one it can't, and exits non-zero only
-// when it read none, so a PID is simply absent when it could not be measured.
-// Each PID is behind its own --pid: a bare number is taken for a name to
-// match. It reads the process through its task port and never stops it.
-func platformMemory(pids []int) (map[int]int64, error) {
+// The copies of one process each are measured in one call, taking each
+// process's phys_footprint. A copy with workers is measured in a call of its
+// own, taking footprint's de-duplicated total over its processes (the
+// "Summary Footprint"): a forked worker that only reads the pages it shares
+// with its parent is charged them in full by its own phys_footprint, so a sum
+// over the processes would count them once per worker, and the total counts
+// them once. All the calls of one measurement run under one deadline
+// (footprintTimeout), whatever the number of copies: a measurement that
+// cannot finish in it fails as a whole, with the deadline's error.
+//
+// footprint prints a block per process it can read and a message on stderr
+// for each one it can't, and exits non-zero only when it read none, so a
+// process is simply absent when it could not be measured. Each PID is behind
+// its own --pid: a bare number is taken for a name to match. It reads the
+// process through its task port and never stops it.
+func platformTreeMemory(trees [][]int) (map[int]int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), footprintTimeout)
+	defer cancel()
+
+	result := make(map[int]int64, len(trees))
+	var singles []int
+	for _, tree := range trees {
+		if len(tree) == 1 {
+			singles = append(singles, tree[0])
+		}
+	}
+	if len(singles) > 0 {
+		blocks, _, _, err := footprintOf(ctx, singles)
+		if err != nil {
+			return nil, err
+		}
+		for _, pid := range singles {
+			if size, ok := blocks[pid]; ok {
+				result[pid] = size
+			}
+		}
+	}
+
+	for _, tree := range trees {
+		if len(tree) < 2 {
+			continue
+		}
+		blocks, summary, hasSummary, err := footprintOf(ctx, tree)
+		if err != nil {
+			return nil, err
+		}
+		// Present only if the leader was read. With the Summary the copy is
+		// the de-duplicated total; without it footprint could read one block
+		// only (it prints no total for one process), and that is the figure.
+		if _, ok := blocks[tree[0]]; !ok {
+			continue
+		}
+		if hasSummary {
+			result[tree[0]] = summary
+			continue
+		}
+		var sum int64
+		for _, size := range blocks {
+			sum += size
+		}
+		result[tree[0]] = sum
+	}
+	return result, nil
+}
+
+// footprintOf runs one footprint call over pids and parses it.
+func footprintOf(ctx context.Context, pids []int) (blocks map[int]int64, summary int64, hasSummary bool, err error) {
 	args := []string{"-f", "bytes"}
 	want := make(map[int]bool, len(pids))
 	for _, pid := range pids {
@@ -40,22 +101,21 @@ func platformMemory(pids []int) (map[int]int64, error) {
 		want[pid] = true
 	}
 
-	out, err := footprintRun(args...)
+	out, err := footprintRun(ctx, args...)
 	if err != nil {
 		// A non-zero exit still comes with the blocks it did read. Not
 		// starting, or being cut off, comes with nothing worth reading.
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
-			return nil, err
+			return nil, 0, false, err
 		}
 	}
-	return parseFootprint(out, want), nil
+	blocks, summary, hasSummary = parseFootprintOutput(out, want)
+	return blocks, summary, hasSummary, nil
 }
 
 // runFootprint runs footprint with a fixed environment, as run does for lsof.
-func runFootprint(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), footprintTimeout)
-	defer cancel()
+func runFootprint(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, footprintPath, args...)
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 	cmd.WaitDelay = time.Second // and not for a child of it that holds the pipe
@@ -81,6 +141,12 @@ var (
 	// data, which is what top and Activity Monitor show. The header's
 	// number is only the sum of the dirty regions.
 	footprintLedger = regexp.MustCompile(`^\s+phys_footprint: (\d+) B`)
+
+	// footprintSummary is the de-duplicated total over all the processes
+	// asked for, on a line of its own that starts in the first column:
+	// `Summary Footprint: 211649328 B`. It is printed only when footprint read
+	// more than one process.
+	footprintSummary = regexp.MustCompile(`^Summary Footprint: (\d+) B`)
 )
 
 // parseFootprint reads footprint's default output, in bytes, for the PIDs in
@@ -89,7 +155,14 @@ var (
 // block has none. Anything else is skipped, so the usage text footprint
 // prints for an option it doesn't know gives an empty result.
 func parseFootprint(out []byte, want map[int]bool) map[int]int64 {
-	result := make(map[int]int64)
+	result, _, _ := parseFootprintOutput(out, want)
+	return result
+}
+
+// parseFootprintOutput is parseFootprint with the Summary Footprint too, and
+// whether there was one.
+func parseFootprintOutput(out []byte, want map[int]bool) (result map[int]int64, summary int64, hasSummary bool) {
+	result = make(map[int]int64)
 	current := 0 // the PID of the block being read, or 0 for none we want
 	for _, line := range bytes.Split(out, []byte("\n")) {
 		if m := footprintHeader.FindSubmatch(line); m != nil {
@@ -104,6 +177,11 @@ func parseFootprint(out []byte, want map[int]bool) map[int]int64 {
 		}
 		if bytes.HasPrefix(line, []byte("Summary")) {
 			current = 0
+			if m := footprintSummary.FindSubmatch(line); m != nil {
+				if size, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
+					summary, hasSummary = size, true
+				}
+			}
 			continue
 		}
 		if m := footprintLedger.FindSubmatch(line); m != nil && current != 0 {
@@ -112,5 +190,5 @@ func parseFootprint(out []byte, want map[int]bool) map[int]int64 {
 			}
 		}
 	}
-	return result
+	return result, summary, hasSummary
 }

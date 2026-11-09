@@ -3,7 +3,6 @@ package process
 import (
 	"os"
 	"strconv"
-	"strings"
 )
 
 func portOwner(pid, port int) Owner { return portOwnerIn(procDir, pid, port) }
@@ -33,20 +32,11 @@ func portOwnerIn(root string, pid, port int) Owner {
 		want["socket:["+in+"]"] = true
 	}
 
-	entries, err := os.ReadDir(root)
+	table, err := tableIn(root)
 	if err != nil {
 		return OwnerUnknown
 	}
-	parent := map[int]int{}
-	for _, e := range entries {
-		n, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		if pp, ok := parentOf(root, n); ok {
-			parent[n] = pp
-		}
-	}
+	parent := parents(table)
 	unreadable := false
 	for _, p := range descendants(pid, parent) {
 		fds, err := readFDs(root + "/" + strconv.Itoa(p) + "/fd")
@@ -70,24 +60,4 @@ func portOwnerIn(root string, pid, port int) Owner {
 		return OwnerUnknown
 	}
 	return OwnerOther
-}
-
-// parentOf reads the parent of process n from its stat line: the fields after
-// the command name, which is in parentheses and may hold spaces.
-func parentOf(root string, n int) (int, bool) {
-	data, err := os.ReadFile(root + "/" + strconv.Itoa(n) + "/stat")
-	if err != nil {
-		return 0, false
-	}
-	s := string(data)
-	i := strings.LastIndexByte(s, ')')
-	if i < 0 {
-		return 0, false
-	}
-	f := strings.Fields(s[i+1:])
-	if len(f) < 2 {
-		return 0, false
-	}
-	pp, err := strconv.Atoi(f[1])
-	return pp, err == nil
 }

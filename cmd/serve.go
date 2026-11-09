@@ -168,7 +168,7 @@ var serveCmd = &cobra.Command{
 		}()
 
 		go runReconcileLoop(loopCtx)
-		go runMemoryLoop(loopCtx, memoryInterval, process.ExactMemory)
+		go runMemoryLoop(loopCtx, memoryInterval, process.ExactTreeMemory)
 		go runMachineLoop(loopCtx, machineInterval, process.ReadMachineMemory, &machine)
 
 		log.Printf("listening on %s, reconciling every %s", socketPath, reconcileInterval)

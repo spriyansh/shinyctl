@@ -15,7 +15,8 @@ const lsofTimeout = 5 * time.Second
 
 // listenersRun runs a command and returns its output; a variable so that the
 // tests can stand in for lsof, which as an ordinary user sees only this
-// user's processes.
+// user's processes. The copy's tree comes from the process table (readTable),
+// which the tests stand in for too.
 var listenersRun = run
 
 // portOwner decides from what is always visible, the copy's own process tree:
@@ -29,12 +30,12 @@ func portOwner(pid, port int) Owner {
 	if !accepts(port) {
 		return OwnerNone
 	}
-	parent, ok := psParents()
-	if !ok {
+	table, err := readTable()
+	if err != nil {
 		return OwnerUnknown
 	}
 	var pids []string
-	for _, p := range descendants(pid, parent) {
+	for _, p := range descendants(pid, parents(table)) {
 		pids = append(pids, strconv.Itoa(p))
 	}
 	mine, ok := lsofListeners(port, strings.Join(pids, ","))
@@ -55,27 +56,6 @@ func accepts(port int) bool {
 	}
 	c.Close()
 	return true
-}
-
-// psParents maps every process to its parent.
-func psParents() (map[int]int, bool) {
-	out, err := listenersRun("ps", "-ax", "-o", "pid=,ppid=")
-	if err != nil {
-		return nil, false
-	}
-	parent := map[int]int{}
-	for _, line := range strings.Split(out, "\n") {
-		f := strings.Fields(line)
-		if len(f) != 2 {
-			continue
-		}
-		p, e1 := strconv.Atoi(f[0])
-		pp, e2 := strconv.Atoi(f[1])
-		if e1 == nil && e2 == nil {
-			parent[p] = pp
-		}
-	}
-	return parent, true
 }
 
 // lsofListeners returns the processes among pids (a comma list) that listen on

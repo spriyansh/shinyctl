@@ -135,14 +135,14 @@ func copiesOver(spec manifest.AppSpec, limit int64) []heavyCopy {
 		return nil
 	}
 	running := runningCopies(st.Copies())
-	pids := make([]int, len(running))
+	leaders := make([]int, len(running))
 	for i, rec := range running {
-		pids[i] = rec.PID
+		leaders[i] = rec.PID
 	}
-	if len(pids) == 0 {
+	if len(leaders) == 0 {
 		return nil
 	}
-	sizes, err := currentHooks().Measure(pids)
+	sizes, err := currentHooks().Measure(treesOf(leaders, &memorySpells.applyNoTable, "apply: can't list the processes of the copies"))
 	if err != nil {
 		log.Printf("apply: %q: can't measure the copies to see which a new max-memory kills: %v", spec.AppName, err)
 		return nil

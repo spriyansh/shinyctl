@@ -73,6 +73,14 @@ func Start(spec manifest.AppSpec, copy, port, revision int) (state.AppState, <-c
 	proc.Dir = spec.WorkingDir
 	proc.Env = buildEnv(spec.Env)
 
+	// Each copy is the leader of a process group of its own, so that what it
+	// forks (workers, shells, helpers) can be signalled and measured with it,
+	// and so that a Ctrl-C at the terminal of a foreground shinyctl-api does
+	// not reach the copies: they outlive their daemon, as they do for any
+	// other end of it. Go returns from Start only once the child has exec'd,
+	// so the group id is the recorded PID by the time the record is written.
+	proc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	logPath, err := CopyLogPath(spec, copy)
 	if err != nil {
 		return state.AppState{}, nil, err

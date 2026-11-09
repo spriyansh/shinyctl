@@ -48,6 +48,10 @@ archives:
         info: *info
       - src: examples/memory/shinyctl.yaml
         info: *info
+      - src: examples/workers/app.R
+        info: *info
+      - src: examples/workers/shinyctl.yaml
+        info: *info
 
 checksum:
   name_template: "checksums.txt"

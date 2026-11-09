@@ -690,7 +690,7 @@ func TestHandleStatus_PerCopy(t *testing.T) {
 	if !regexp.MustCompile(`^NAME\s+COPY\s+ROLE\s+PORT\s+PID\s+STATUS\s+READY\s+MEM\s+SESSIONS\s+CRASHES\s+STARTED$`).MatchString(lines[0]) {
 		t.Errorf("header = %q", lines[0])
 	}
-	if !strings.Contains(out.String(), "Memory: ") || !strings.Contains(out.String(), "in 2 R processes (1 warm), plus ") || !strings.Contains(out.String(), "for the load balancer.") {
+	if !strings.Contains(out.String(), "Memory: ") || !strings.Contains(out.String(), "in 2 copies (1 warm), plus ") || !strings.Contains(out.String(), "for the load balancer.") {
 		t.Errorf("no memory line in:\n%s", out.String())
 	}
 }

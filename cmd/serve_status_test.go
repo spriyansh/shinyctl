@@ -114,7 +114,7 @@ func TestHandleStatus_LogsUnmeasuredMemoryOncePerSpell(t *testing.T) {
 	buf := captureLog(t)
 
 	fail := true
-	memoryOf = func(pids []int) (map[int]int64, error) {
+	memoryOf = func(trees [][]int) (map[int]int64, error) {
 		if fail {
 			return nil, errors.New("footprint is not installed")
 		}

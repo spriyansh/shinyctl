@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -35,10 +36,8 @@ func TestPortOwnerDarwin_ALeaderInvisibleToLsofIsAnotherProgramsWhenItAccepts(t 
 	exit1 := func() error { return exec.Command("false").Run() }() // an *exec.ExitError with code 1
 	old := listenersRun
 	defer func() { listenersRun = old }()
+	fakeTable(t, procInfo{pid: os.Getpid(), ppid: 1, pgid: os.Getpid()})
 	listenersRun = func(name string, args ...string) (string, error) {
-		if name == "ps" {
-			return strconv.Itoa(os.Getpid()) + " 1\n", nil
-		}
 		return "", exit1 // lsof finds no listener of ours
 	}
 	if got := portOwner(os.Getpid(), port); got != OwnerOther {
@@ -55,9 +54,6 @@ func TestPortOwnerDarwin_ALeaderInvisibleToLsofIsAnotherProgramsWhenItAccepts(t 
 
 	// lsof sees the copy's listener: ours.
 	listenersRun = func(name string, args ...string) (string, error) {
-		if name == "ps" {
-			return strconv.Itoa(os.Getpid()) + " 1\n", nil
-		}
 		return "p" + strconv.Itoa(os.Getpid()) + "\n", nil
 	}
 	if got := portOwner(os.Getpid(), port); got != OwnerSelf {
@@ -66,9 +62,6 @@ func TestPortOwnerDarwin_ALeaderInvisibleToLsofIsAnotherProgramsWhenItAccepts(t 
 
 	// lsof broken: can't tell.
 	listenersRun = func(name string, args ...string) (string, error) {
-		if name == "ps" {
-			return strconv.Itoa(os.Getpid()) + " 1\n", nil
-		}
 		return "", errors.New("no such file")
 	}
 	if got := portOwner(os.Getpid(), port); got != OwnerUnknown {
@@ -94,6 +87,7 @@ func TestPortOwnerDarwin_ConnectsBeforeLookingUp(t *testing.T) {
 	exit1 := exec.Command("false").Run()
 	old := listenersRun
 	defer func() { listenersRun = old }()
+	fakeTable(t, procInfo{pid: os.Getpid(), ppid: 1, pgid: os.Getpid()})
 	var looked int
 	listenersRun = func(name string, args ...string) (string, error) {
 		looked++
@@ -102,12 +96,63 @@ func TestPortOwnerDarwin_ConnectsBeforeLookingUp(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		if name == "ps" {
-			return strconv.Itoa(os.Getpid()) + " 1\n", nil
-		}
 		return "", exit1
 	}
 	if got := portOwner(os.Getpid(), port); got != OwnerNone || looked != 0 {
 		t.Errorf("portOwner = %v after %d lookups, want none with no lookup: nothing accepted when it was asked", got, looked)
+	}
+}
+
+// fakeTable stands in for the process table until the test ends.
+func fakeTable(t *testing.T, procs ...procInfo) {
+	t.Helper()
+	old := readTable
+	t.Cleanup(func() { readTable = old })
+	readTable = func() ([]procInfo, error) { return procs, nil }
+}
+
+// The copy's tree is read from the process table: a listener of a worker the
+// copy started is the copy's, one of a process outside the tree is not, and a
+// table that can't be read is "can't tell".
+func TestPortOwnerDarwin_TheTreeComesFromTheTable(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	old := listenersRun
+	defer func() { listenersRun = old }()
+	var asked string
+	listenersRun = func(name string, args ...string) (string, error) {
+		asked = strings.Join(args, " ")
+		return "p301\n", nil
+	}
+	fakeTable(t,
+		procInfo{pid: 300, ppid: 1, pgid: 300},
+		procInfo{pid: 301, ppid: 300, pgid: 300},
+		procInfo{pid: 302, ppid: 301, pgid: 302},
+		procInfo{pid: 400, ppid: 1, pgid: 400},
+	)
+	if got := portOwner(300, port); got != OwnerSelf {
+		t.Errorf("a worker of the copy listens = %v, want self", got)
+	}
+	if !strings.Contains(asked, "-p 300,301,302 ") {
+		t.Errorf("lsof was asked about %q, want exactly the copy's tree 300,301,302", asked)
+	}
+
+	readTable = func() ([]procInfo, error) { return nil, errors.New("no table") }
+	if got := portOwner(300, port); got != OwnerUnknown {
+		t.Errorf("an unreadable table = %v, want unknown", got)
 	}
 }
