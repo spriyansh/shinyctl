@@ -21,6 +21,8 @@ func writeManifest(t *testing.T, dir, body string) string {
 func TestLoad_ResolvesRelativePathsFromManifestDir(t *testing.T) {
 	dir := t.TempDir()
 	other := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	cases := []struct {
 		name           string
@@ -61,14 +63,25 @@ app-state-file: ./state.json
 			wantWorkingDir: filepath.Join(filepath.Dir(dir), "shared"),
 		},
 		{
-			name: "tilde is not expanded",
+			name: "tilde is the home directory",
 			body: `
-entrypoint-file: ~/app.R
+entrypoint-file: ~/apps/app.R
+app-state-file: ~/state.json
+working-dir: "~"
+`,
+			wantEntrypoint: filepath.Join(home, "apps/app.R"),
+			wantStateFile:  filepath.Join(home, "state.json"),
+			wantWorkingDir: home,
+		},
+		{
+			name: "another user's tilde is not expanded",
+			body: `
+entrypoint-file: ~someone/app.R
 app-state-file: ./state.json
 `,
-			wantEntrypoint: filepath.Join(dir, "~/app.R"),
+			wantEntrypoint: filepath.Join(dir, "~someone/app.R"),
 			wantStateFile:  filepath.Join(dir, "state.json"),
-			wantWorkingDir: filepath.Join(dir, "~"),
+			wantWorkingDir: filepath.Join(dir, "~someone"),
 		},
 		{
 			name:           "absolute paths are only cleaned",

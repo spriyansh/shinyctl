@@ -3,6 +3,7 @@ package process
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,7 +24,9 @@ import (
 //
 //	worker   sleeps; helperFlags lists what it does first: setsid (a session
 //	         and group of its own, as processx does), ignore (shrugs off
-//	         SIGTERM), then it tells its parent it is ready through descriptor 3
+//	         SIGTERM), listen (holds a listening socket on 127.0.0.1 and the
+//	         port in helperPort, as a worker that serves does), then it tells
+//	         its parent it is ready through descriptor 3
 //	leader   starts the children named by helperChildren, waits until each is
 //	         ready, writes "kind pid" lines to helperOut, and sleeps
 //	middle   starts a setsid worker, prints its pid and exits at once, so the
@@ -37,6 +40,7 @@ const (
 	helperFlags    = "SHINYCTL_TEST_FLAGS"
 	helperChildren = "SHINYCTL_TEST_CHILDREN"
 	helperOut      = "SHINYCTL_TEST_OUT"
+	helperPort     = "SHINYCTL_TEST_PORT"
 )
 
 func runHelper(mode string) {
@@ -48,6 +52,14 @@ func runHelper(mode string) {
 		}
 		if strings.Contains(flags, "ignore") {
 			signal.Ignore(syscall.SIGTERM)
+		}
+		if strings.Contains(flags, "listen") {
+			ln, err := net.Listen("tcp4", "127.0.0.1:"+os.Getenv(helperPort))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "worker:", err)
+				os.Exit(2)
+			}
+			defer ln.Close()
 		}
 		if f := os.NewFile(3, "ready"); f != nil {
 			f.Write([]byte("x"))
@@ -92,7 +104,7 @@ func runHelper(mode string) {
 }
 
 // startHelperChild starts the child of kind (plain, ignore, setsid,
-// setsid+ignore, orphan) and returns its pid once it is ready. An orphan is a
+// setsid+ignore, orphan, listen) and returns its pid once it is ready. An orphan is a
 // setsid worker whose parent has already exited.
 func startHelperChild(kind string) (int, error) {
 	exe, _ := os.Executable()
@@ -110,6 +122,8 @@ func startHelperChild(kind string) (int, error) {
 		fl = "setsid"
 	case "setsid+ignore":
 		fl = "setsid ignore"
+	case "listen":
+		fl = "listen"
 	case "orphan":
 		mode = "middle"
 	}

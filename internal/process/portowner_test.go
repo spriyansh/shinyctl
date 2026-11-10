@@ -100,16 +100,14 @@ func TestPortOwner_ADescendantsSocketIsTheCopys(t *testing.T) {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
-	// sh starts python as its child; python listens.
-	child := exec.Command("sh", "-c", `python3 -c "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',`+itoa(port)+`));s.listen(1);time.sleep(30)"; true`)
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { child.Process.Kill(); child.Wait() }()
+	// The leader stands for R; its worker child holds the listener. The
+	// leader reports the worker only once it listens.
+	t.Setenv(helperPort, itoa(port))
+	tr := startTree(t, false, "", "listen")
 	deadline := time.Now().Add(5 * time.Second)
 	var got Owner
 	for time.Now().Before(deadline) {
-		if got = PortOwner(child.Process.Pid, port); got == OwnerSelf || got == OwnerUnknown {
+		if got = PortOwner(tr.pid(), port); got == OwnerSelf || got == OwnerUnknown {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -118,6 +116,6 @@ func TestPortOwner_ADescendantsSocketIsTheCopys(t *testing.T) {
 		t.Skip("this system can't tell who owns a port")
 	}
 	if got != OwnerSelf {
-		t.Errorf("PortOwner(the shell, %d) = %v, want self: the listener is its child's", port, got)
+		t.Errorf("PortOwner(the leader, %d) = %v, want self: the listener is its child's", port, got)
 	}
 }

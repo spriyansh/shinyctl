@@ -25,7 +25,8 @@ var lookPath = exec.LookPath
 // (and the same app: app-state-file is its identity) whichever directory
 // shinyctl is run from. The directory is path as given, made absolute;
 // symlinks are not resolved, so a manifest reached through a link resolves
-// from where the link is. A leading ~ is not expanded.
+// from where the link is. A leading ~ is the user's home directory, as the
+// shell reads it; ~user is not expanded.
 //
 // This has to happen here, in the CLI process: spec.EntrypointFile and
 // spec.AppStateFile cross the wire to shinyctl-api next, a long-running
@@ -65,10 +66,16 @@ func Load(path string) (AppSpec, error) {
 	return spec, nil
 }
 
-// resolvePath makes p absolute against dir, the manifest's directory. An
-// absolute p is only cleaned, as filepath.Abs did; an empty one stays empty
-// so a missing field is still reported as missing.
+// resolvePath makes p absolute against dir, the manifest's directory. A p
+// of ~ or under ~/ is under the user's home directory instead, when it is
+// known. An absolute p is only cleaned, as filepath.Abs did; an empty one
+// stays empty so a missing field is still reported as missing.
 func resolvePath(dir, p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, p[1:])
+		}
+	}
 	switch {
 	case p == "":
 		return ""

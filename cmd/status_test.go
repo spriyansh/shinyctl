@@ -558,8 +558,8 @@ func TestWarnIfMachineLow(t *testing.T) {
 
 // TestNotRunningLine: with shinyctl-api down, status names the registered
 // apps that start again with the next shinyctl-api, skipping the ones
-// stop left stopped, and says when there are none or no registry can be
-// read.
+// stop left stopped, and says when there are none, when every registered
+// app is stopped, or when no registry can be read.
 func TestNotRunningLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.json")
@@ -593,6 +593,17 @@ func TestNotRunningLine(t *testing.T) {
 	}
 	if got, want := notRunningLine(path), `shinyctl-api is not running; "hello" starts again with shinyctl serve -d or any apply`; got != want {
 		t.Errorf("one app: got %q, want %q", got, want)
+	}
+
+	reg, err = registry.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Forget(filepath.Join(dir, "hello.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := notRunningLine(path), "shinyctl-api is not running and no app is set to start"; got != want {
+		t.Errorf("only a stopped app: got %q, want %q", got, want)
 	}
 
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
